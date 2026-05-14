@@ -21,3 +21,9 @@ CLAUDE.local.md
 magi-audit-2.1.1/
 magi-audit-2.1.2/
 magi-audit-postfix/
+
+# Premortem experiment artifacts live on a local-only feature branch
+# (see CLAUDE.md "Post-release hardening / Premortem A/B experiment").
+# The directory persists on disk after branch checkout to main until the
+# operator deletes both the branch and the directory on 2026-05-29.
+experiments/
