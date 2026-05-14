@@ -15,9 +15,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
+
+# Bootstrap: see CLAUDE.md "Open technical debt / synthesize import gap [LOCKED]".
+# Direct invocation and pytest already cover this; ``python -m
+# skills.magi.scripts.synthesize`` does not.
+_SCRIPT_DIR = str(Path(__file__).parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
 
 # Re-export public API so existing ``from synthesize import ...`` still works.
-from validate import (
+from validate import (  # noqa: E402
     VALID_AGENTS,
     VALID_SEVERITIES,
     VALID_VERDICTS,
@@ -25,11 +33,11 @@ from validate import (
     clean_title,
     load_agent_output,
 )
-from consensus import (
+from consensus import (  # noqa: E402
     VERDICT_WEIGHT,
     determine_consensus,
 )
-from reporting import (
+from reporting import (  # noqa: E402
     AGENT_TITLES,
     format_banner,
     format_report,

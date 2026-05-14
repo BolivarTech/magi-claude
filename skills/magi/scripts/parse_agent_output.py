@@ -22,8 +22,16 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
-from validate import MAX_INPUT_FILE_SIZE
+# Bootstrap: see CLAUDE.md "Open technical debt / synthesize import gap [LOCKED]".
+# Direct invocation and pytest already cover this; ``python -m
+# skills.magi.scripts.parse_agent_output`` does not.
+_SCRIPT_DIR = str(Path(__file__).parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from validate import MAX_INPUT_FILE_SIZE  # noqa: E402
 
 
 # Regex to strip leading ```json (case-insensitive, optional whitespace) or bare ```

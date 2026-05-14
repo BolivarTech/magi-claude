@@ -23,28 +23,39 @@ import json
 import os
 import shutil
 import sys
+from pathlib import Path
 from typing import Any
 
-from models import MODE_DEFAULT_MODELS, MODEL_IDS, VALID_MODELS, resolve_model
-from parse_agent_output import parse_agent_output as parse_raw_output
-from status_display import StatusDisplay
-from stderr_shim import _buffered_stderr_while
-from synthesize import (
+# Bootstrap: make sibling modules importable under invocations that do NOT
+# auto-inject this directory into sys.path (e.g. ``python -m
+# skills.magi.scripts.run_magi``). Direct invocation
+# (``python skills/magi/scripts/run_magi.py``) and pytest (via conftest.py)
+# already cover this. See CLAUDE.md "Open technical debt /
+# synthesize import gap [LOCKED]".
+_SCRIPT_DIR = str(Path(__file__).parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from models import MODE_DEFAULT_MODELS, MODEL_IDS, VALID_MODELS, resolve_model  # noqa: E402
+from parse_agent_output import parse_agent_output as parse_raw_output  # noqa: E402
+from status_display import StatusDisplay  # noqa: E402
+from stderr_shim import _buffered_stderr_while  # noqa: E402
+from synthesize import (  # noqa: E402
     determine_consensus,
     format_report,
     load_agent_output,
 )
-from subprocess_utils import (
+from subprocess_utils import (  # noqa: E402
     format_stderr_excerpt as _format_stderr_excerpt,
     reap_and_drain_stderr as _reap_and_drain_stderr,
     write_stderr_log as _write_stderr_log,
 )
-from temp_dirs import (
+from temp_dirs import (  # noqa: E402
     MAGI_DIR_PREFIX,
     cleanup_old_runs,
     create_output_dir,
 )
-from validate import MAX_INPUT_FILE_SIZE, ValidationError
+from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
 
 # Public star-import contract. Underscore-prefixed symbols from
 # ``stderr_shim`` (``_StderrBufferShim``, ``_BinaryStderrBufferShim``,
