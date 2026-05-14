@@ -468,6 +468,8 @@ Where `N` is the number of parent directories from the importing module up to th
 
 **Acceptance**: the next module on `main` outside `skills/magi/scripts/` that needs to import from the orchestration layer carries the 3-line bootstrap. Its README documents `python -m <module>` directly without a `PYTHONPATH` prefix. No new conftest hacks are added.
 
+**Dual-import caveat for outside callers**: a module loaded via the bootstrap is registered in `sys.modules` under its bare name (e.g., `synthesize`) — the same key the in-tree imports use. If a future outside caller ALSO does a dotted import of the same module (e.g., `from skills.magi.scripts.synthesize import ...`), Python treats the two names as distinct cache keys and may load TWO module objects with independent state — global variables, class identity checks, and singleton instances will diverge silently. Outside callers MUST keep their imports under the bare name (`from synthesize import ...`) for consistency with the in-tree convention. The same constraint applies to the entry-point hardening in 2.2.8 (`run_magi.py`, `synthesize.py`, `parse_agent_output.py`): all of their sibling imports are under bare names, so the dual-import hazard is latent today and surfaces only if a future caller violates this rule.
+
 **Why locked rather than deferred**: the architectural decision has already been made (option B from the 2026-05-14 analysis). Future implementers should not re-litigate; they should apply the documented snippet. Locking here prevents the next brainstorm session from reopening the same ground.
 
 ## Post-release hardening
