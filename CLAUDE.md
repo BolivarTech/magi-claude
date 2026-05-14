@@ -439,6 +439,37 @@ These items are real (not "accepted residuals" like the section above) and have 
 
 **Why deferred**: this is the kind of refactor that warrants a minor release (2.3.0) and a brainstorm session because it touches the hottest async path. Doing it inside a patch would conflate behaviour-preserving work with behaviour-defining work and make any future bisect harder. Telemetry from the 2026-05-15 routine should also land first — it may suggest specific tracker responsibilities (per-agent budget, retry-count) that the refactor should accommodate from day one.
 
+### `synthesize` import gap for code outside `skills/magi/scripts/` — `[LOCKED]`
+
+**What**: `synthesize.py` (and the rest of the orchestration modules) live in `skills/magi/scripts/`. That directory is **not** a standard importable package — `conftest.py:34-36` injects it into `sys.path` at pytest startup, and `run_magi.py` runs from inside the directory. Both paths work for the existing codebase. Any new module created **outside** that directory — e.g., scratch tooling, experiment scaffolds, future packaging additions — fails with `ImportError: No module named 'synthesize'` when invoked as `python -m <new.module>` unless the operator manually prepends `PYTHONPATH=skills/magi/scripts`.
+
+**Discovered**: 2026-05-14 during the premortem A/B experiment (see the Post-release hardening entry below). The experiment scaffold at `experiments/premortem/` lived outside `skills/magi/scripts/` and needed `from synthesize import ValidationError`. Every `python -m experiments.premortem.*` invocation required the `PYTHONPATH=skills/magi/scripts` prefix as a workaround. The branch was rejected and the scaffold deleted, but the underlying gap remains.
+
+**Why it is debt**: as soon as any future code on `main` lives outside `skills/magi/scripts/` and needs to import from there, the same friction returns. Operators forget the prefix, CI scripts forget it, documentation has to call it out, and the failure mode (ImportError on a real-looking package name) is opaque to anyone who doesn't know the conftest trick.
+
+**Fix (LOCKED — implement in the next release that adds code outside `skills/magi/scripts/`)**:
+
+Add this 3-line bootstrap at the top of any new module that imports from the orchestration layer, **before** the first `from synthesize import ...` (or any other import from that directory):
+
+```python
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parents[N] / "skills" / "magi" / "scripts"))
+```
+
+Where `N` is the number of parent directories from the importing module up to the repo root. For a module at `experiments/<topic>/foo.py`, `N=2`. For a module at `tools/foo.py`, `N=1`. The path must be added before the project import that needs it; standard PEP 8 import-block ordering is unchanged (stdlib → third-party → first-party).
+
+**Alternatives considered and rejected**:
+
+- **Make `skills/magi/scripts/` a real package via `pyproject.toml` entry points or `pip install -e .`**. Invasive — touches the plugin distribution model, requires updating CI, breaks the existing flat-import convention that `run_magi.py` and the tests rely on. Disproportionate to the use case.
+- **Conftest-style helper module imported for its side effect (e.g., `from experiments import _path_setup`)**. Marginally cleaner than the 3-line bootstrap for cases with multiple consumers, but adds a magic import and a side-effecting module to the codebase. Only adopt if there are 3+ consumers in the same subtree.
+- **Restructure `synthesize.py` into a proper package location**. Invasive — every existing import (`from synthesize import …` in tests and `run_magi.py`) would need updating, and the agent prompts that reference module names would need synchronisation. Not worth it.
+
+**Acceptance**: the next module on `main` outside `skills/magi/scripts/` that needs to import from the orchestration layer carries the 3-line bootstrap. Its README documents `python -m <module>` directly without a `PYTHONPATH` prefix. No new conftest hacks are added.
+
+**Why locked rather than deferred**: the architectural decision has already been made (option B from the 2026-05-14 analysis). Future implementers should not re-litigate; they should apply the documented snippet. Locking here prevents the next brainstorm session from reopening the same ground.
+
 ## Post-release hardening
 
 ### Agent prompt contract reinforcement (all three agents)
@@ -528,6 +559,39 @@ Both are deferred until the routine surfaces enough data to choose between them.
 * Removing the 2.2.6 ASCII markers (``[!]`` warnings, ``--`` em-dash replacements). They are correct and readable; reverting them would not improve anything.
 
 **MAGI self-review skipped on this commit by design**: the change is a single helper plus a one-line call site, both pinned by six tests covering platform gating, encoding choice, missing-reconfigure tolerance, end-to-end non-cp1252 print survival, and call-order-before-print invariant. The standardised pre-merge MAGI procedure (CLAUDE.md "Pre-merge MAGI self-review") allows skipping mechanical hardening commits where the test surface fully encodes the behavioural commitment; a $0.75 self-review here would be ceremony.
+
+### Premortem A/B experiment for Caspar — rejected (2026-05-14)
+
+**Context**: A proposed addition of a "premortem frame" to `caspar.md` (encouraging Caspar to project six months into a failed future and write findings as past-tense post-mortem events) was tested via a pre-registered A/B experiment against 16 real code-review inputs harvested from SBTDD's `.magi_review_input/`. Hypothesis: premortem increases findings' episodic specificity (longer past-tense detail fields, more distinct failure modes, higher judge-rubric score on a 1-5 specificity rubric). The full spec, plan, and code lived on branch `premortem` — scheduled for deletion 2026-05-29; until then it is the audit artifact.
+
+**Methodology amendment during the experiment**: the original spec §7.2 proposed paired-by-title judge comparison (rate equivalent baseline+treatment findings as a pair). The 2-input smoke run found **zero matched title pairs** — the premortem prompt changes how findings are named enough that title-based dedup collapses. The judge step was amended to **per-finding individual rating with per-run mean aggregation**, preserving the pairing at the input level (each input contributes one baseline mean and one treatment mean to a paired Wilcoxon). The decision rule structure in spec §9 was untouched. This methodological note is preserved here because the lesson generalises: any future A/B over LLM-prompt variants should not assume title-based pairing survives a strong stylistic intervention.
+
+**Results (n=16 paired)**:
+
+| Metric | Baseline mean | Treatment mean | Cliff's δ | Wilcoxon p | Effect (treatment direction) |
+|---|---:|---:|---:|---:|---|
+| length (words) | 504.4 | 616.9 (+22%) | 0.289 | **0.0019** | small, treatment_greater |
+| past-tense density | 0.0365 | 0.0362 | 0.055 | 0.717 | negligible |
+| unique findings | 6.0 | 6.0 | −0.090 | 0.878 | negligible (baseline_greater) |
+| judge specificity (1-5) | 2.584 | 2.691 (+0.107) | 0.148 | 0.258 | small, treatment_greater |
+
+**Decision rule outcome**: `inconclusive` per the pre-registered §9 (judge crossed the δ ≥ 0.147 small-effect threshold by exactly 0.001; no mechanistic metric won at the medium δ ≥ 0.330 level). Operator override after manual review: **reject**. Rationale:
+
+- Length grew +22% (Wilcoxon p=0.0019) but density was flat (δ=0.055) and unique findings tied (δ=−0.090). The composition matches the Mitchell-trap shape ("more reasons, not better reasons") even though the technical gate was crossed.
+- The judge effect is at the floor of detection: δ=0.148 vs the 0.147 cutoff = 0.001 above. Wilcoxon p=0.258 is not statistically distinguishable from noise.
+- A +22% output-token cost in production (which translates to ~+22% in Opus billing for any future production adoption) is not justified by a marginal, statistically uncertain specificity gain.
+- Qualitative spot-checks during the smoke showed the prompt **does** engage ("premortem projection — six months from now ... I walked three failure stories" framing appears in treatment outputs), and the treatment surfaces some concerns the baseline misses. But the gain is small enough at corpus scale that the cost/benefit favours not shipping the change.
+
+**Cost reconciliation**: total ~$26 across two smoke iterations and the full run (Opus 32 × ~$0.50 = ~$16; Haiku 196 judge invocations × ~$0.04 = ~$8; smoke overhead ~$2). Original budget was $15-20 — the Haiku per-call cost was higher than estimated due to Claude Code context priming inflating input tokens beyond the bare-rubric size. Useful calibration point for future LLM-judge experiments: budget $0.04/call for Haiku invoked through `claude -p`, not the bare-API $0.001/call rate.
+
+**Branch fate**: `premortem` is kept alive on `main`'s tracking remote until 2026-05-29 for any inspection of the raw data (16 baseline + 16 treatment JSONs, judge scores, results.json, report.md — all under `experiments/premortem/`). A routine scheduled at experiment-close will delete the branch after that date. This CLAUDE.md entry is the durable record after deletion.
+
+**Why this entry exists**: protects against re-litigation. The proposal "should we add premortem to Caspar" was tested at proper scale with pre-registered metrics and a pre-registered decision rule. The answer was no. Future sessions that re-raise the idea should be pointed here; only new evidence (e.g., a different judge rubric, a structural Caspar change, a different corpus) justifies re-running.
+
+**Methodological precedents preserved**:
+
+- Per-finding judge rating with per-run mean aggregation (the smoke amendment) is the correct shape for prompt-variant A/B work over LLM outputs. Title-based pairing is brittle to stylistic interventions and should not be assumed.
+- The decision rule's Mitchell-trap row (length wins without judge winning → reject) is load-bearing and was within 0.001 of firing here. Even when it does not technically fire, the composition (length up, density/unique flat) is a soft Mitchell signal that operator-level review can apply.
 
 ## Breaking changes (2.0.0)
 
