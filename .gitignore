@@ -9,6 +9,7 @@ build/
 .venv/
 .claude/
 plans/
+CLAUDE.md
 CLAUDE.local.md
 
 # Local audit / handoff workspaces — produced during development, not part
