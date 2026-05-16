@@ -83,7 +83,7 @@ To update after new versions are published:
 
 ```bash
 # Option 1: Plugin flag
-claude --plugin-dir /path/to/magi
+claude --plugin-dir /path/to/magi-claude
 
 # Option 2: Symlink for auto-discovery (no flags needed)
 mkdir -p .claude/skills

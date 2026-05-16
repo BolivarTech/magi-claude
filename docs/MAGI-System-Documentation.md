@@ -460,10 +460,10 @@ When using the native sub-agent mode (Agent tool), the model is passed via the A
 
 ```bash
 # Add repo as marketplace source
-/plugin marketplace add <owner>/magi
+/plugin marketplace add BolivarTech/magi-claude
 
 # Install
-/plugin install magi
+/plugin install magi@bolivartech-plugins
 
 # Use
 /magi
@@ -473,7 +473,7 @@ When using the native sub-agent mode (Agent tool), the model is passed via the A
 
 ```bash
 # Option 1: Plugin flag
-claude --plugin-dir /path/to/magi
+claude --plugin-dir /path/to/magi-claude
 
 # Option 2: Symlink for auto-discovery (no flags needed)
 mkdir -p .claude/skills
