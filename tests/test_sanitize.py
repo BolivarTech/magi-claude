@@ -282,14 +282,68 @@ def test_build_normalizes_u2028_used_as_newline():
 # ---------------------------------------------------------------------------
 
 
-def test_invalid_input_error_is_validation_error():
-    """BDD-29: InvalidInputError is a subclass of ValidationError.
+def test_invalid_input_error_is_not_validation_error_subclass():
+    """BDD-29 (2.4.1 derogation): InvalidInputError is intentionally
+    NOT a ValidationError subclass.
 
-    Project convention per CLAUDE.local.md §0.1 — ValidationError is the
-    project-wide error type. Source proposal used ValueError; corrected
-    here per evaluation caveat.
+    This DEVIATES from the project-wide convention in CLAUDE.local.md
+    §0.1 ("Use ValidationError as the project-wide error type").
+
+    Rationale: InvalidInputError is the only fail-closed security-critical
+    exception in MAGI. If it inherited from ValidationError, the
+    orchestrator retry handler at ``run_magi.py:531``
+    (``except (ValidationError, json.JSONDecodeError)``) would silently
+    consume it and convert a fail-closed nonce-collision into a single
+    retry — defeating the purpose of fail-closed.
+
+    The derogation is structural (subclass relationship) rather than
+    conventional (docstring warning) so it survives refactors that do
+    not read the docstring. Per Caspar 2026-05-16 pass-2 finding,
+    locked decision: option B from the two-option B-vs-F analysis on
+    the v2.4.1 branch.
     """
-    assert issubclass(InvalidInputError, ValidationError)
+    # B is sibling-of-ValidationError, not subclass.
+    assert not issubclass(InvalidInputError, ValidationError)
+    # And IIE remains a proper Exception (not BaseException) so the
+    # standard try/except idioms work and KeyboardInterrupt / SystemExit
+    # are not affected.
+    assert issubclass(InvalidInputError, Exception)
+
+
+def test_validation_error_handler_does_not_catch_invalid_input_error():
+    """BDD-35 (2.4.1 structural guard): ``except ValidationError`` MUST
+    NOT catch InvalidInputError.
+
+    Pins the structural property introduced in 2.4.1. The retry handler
+    at ``run_magi.py:531`` cannot silently consume a fail-closed
+    nonce-collision event regardless of where ``build_user_prompt`` is
+    called from. This is the difference from a docstring-warning approach
+    (v2.4.0): convention can be ignored; subclass-graph cannot.
+
+    See ``docs/sbtdd/sanitize-spec-behavior.md`` §5 for the contract.
+    """
+
+    class FixedRng:
+        def getrandbits(self, n):
+            return 0x11111111111111111111111111111111
+
+    content_with_nonce = "harmless 11111111111111111111111111111111 text"
+
+    caught_as_validation = False
+    raised_as_invalid_input = False
+    try:
+        try:
+            build_user_prompt("design", content_with_nonce, rng=FixedRng())
+        except ValidationError:
+            caught_as_validation = True
+    except InvalidInputError:
+        raised_as_invalid_input = True
+
+    assert not caught_as_validation, (
+        "InvalidInputError must NOT be caught by `except ValidationError` "
+        "— structural guard against retry-handler shadow-swallow."
+    )
+    assert raised_as_invalid_input, "InvalidInputError must reach its direct handler unchanged."
 
 
 def test_build_fails_closed_on_nonce_collision():
