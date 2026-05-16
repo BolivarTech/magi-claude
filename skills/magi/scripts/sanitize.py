@@ -41,6 +41,18 @@ class InvalidInputError(ValidationError):
     default ``secrets`` RNG). The error message deliberately omits the
     nonce value: disclosing it would hand the attacker the very token
     they need to spoof the delimiters.
+
+    Shadow-risk note (post-MAGI-review 2026-05-16): this is a
+    ``ValidationError`` subclass. The orchestrator retry handler at
+    ``run_magi.py:531`` catches ``(ValidationError, json.JSONDecodeError)``
+    and retries the agent invocation. Currently safe because
+    :func:`build_user_prompt` is called in ``main()`` *before* the
+    orchestration loop, so an ``InvalidInputError`` cannot reach the
+    retry handler. If a future refactor moves prompt construction into
+    the per-agent path (e.g., per-agent prompt customization), the retry
+    handler will silently consume ``InvalidInputError`` and convert a
+    fail-closed event into a single retry. Add an explicit
+    catch-and-reraise at that boundary if the call site moves.
     """
 
 

@@ -17,13 +17,14 @@ import re
 import pytest
 
 from sanitize import (
+    _INVISIBLE_RE,
     InvalidInputError,
     build_user_prompt,
     neutralize_headers,
     normalize_newlines,
     strip_invisibles,
 )
-from validate import ValidationError
+from validate import _ZERO_WIDTH_RE, ValidationError
 
 
 # ---------------------------------------------------------------------------
@@ -359,3 +360,71 @@ def test_layer_order_pin_strip_then_neutralize():
     zwsp = chr(0x200B)
     out = build_user_prompt("code-review", f"\n{zwsp}MODE: design", rng=rng)
     assert "\n  MODE: design" in out
+
+
+# ---------------------------------------------------------------------------
+# Post-MAGI-review regression pins (2026-05-16, v2.4.0)
+# ---------------------------------------------------------------------------
+
+
+def test_invisible_re_parity_with_validate_zero_width_re():
+    """Sanitize._INVISIBLE_RE and validate._ZERO_WIDTH_RE must match the
+    same codepoint set.
+
+    Both modules document a lockstep claim in a comment — this test makes
+    silent drift loud. Probes every codepoint in the union covered by
+    either pattern. Per Mel/Caspar MAGI finding 2026-05-16.
+    """
+    probes = (
+        list(range(0x200B, 0x2010))  # U+200B..U+200F
+        + list(range(0x2028, 0x2030))  # U+2028..U+202F
+        + list(range(0x2060, 0x2070))  # U+2060..U+206F
+        + [0xFEFF, 0x00AD]
+    )
+    for cp in probes:
+        ch = chr(cp)
+        in_sanitize = bool(_INVISIBLE_RE.search(ch))
+        in_validate = bool(_ZERO_WIDTH_RE.search(ch))
+        assert in_sanitize == in_validate, (
+            f"U+{cp:04X} mismatch: sanitize={in_sanitize} validate={in_validate}"
+        )
+
+
+@pytest.mark.parametrize(
+    "codepoint",
+    [
+        0x00A0,  # NBSP
+        0x3000,  # ideographic space
+    ],
+)
+def test_neutralize_does_not_absorb_non_ascii_leading_whitespace(codepoint):
+    """IS-NOT pin (spec §10): non-ASCII leading whitespace BYPASSES
+    neutralization. Documented gap, parity with Rust.
+
+    This test asserts the gap exists — anyone closing it must update the
+    spec IS-NOT entry first. Per Mel/Caspar MAGI finding 2026-05-16.
+    """
+    ws = chr(codepoint)
+    # The regex [\t ]* absorbs only ASCII tabs/spaces. Non-ASCII whitespace
+    # sits between the line-start \n and MODE, so ^MODE does not match and
+    # neutralization does not fire.
+    inp = f"\n{ws}MODE: design"
+    out = neutralize_headers(inp)
+    assert out == inp, (
+        f"U+{codepoint:04X} unexpectedly absorbed — IS-NOT gap closed without spec update"
+    )
+
+
+def test_build_default_rng_produces_distinct_nonces():
+    """Default rng (no injection, uses secrets.randbits) must produce
+    distinct nonces across successive calls.
+
+    BDD-21 exercises the injected-RNG branch via random.Random(42); this
+    test exercises the production-default branch via secrets. Per
+    Balthasar MAGI finding 2026-05-16.
+    """
+    out1 = build_user_prompt("design", "x")
+    out2 = build_user_prompt("design", "x")
+    n1 = re.search(r"---BEGIN USER CONTEXT ([0-9a-f]{32})---", out1).group(1)
+    n2 = re.search(r"---BEGIN USER CONTEXT ([0-9a-f]{32})---", out2).group(1)
+    assert n1 != n2

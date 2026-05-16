@@ -2762,3 +2762,26 @@ class TestUtf8ConsoleReconfigure:
 
         with pytest.raises(HelperCalledFirst):
             main()
+
+
+class TestInputLabelBannerRegression:
+    """Pin: the init banner in ``run_magi.main`` renders ``input_label``.
+
+    Source-level grep — brittle to a banner refactor but cheap to update.
+    Catches the regression where a future cleanup deletes the operator
+    visibility into which file the user passed. Per Balthasar MAGI
+    finding 2026-05-16, sanitize spec §7.
+    """
+
+    def test_main_banner_renders_input_label(self):
+        from pathlib import Path
+
+        src = Path(__file__).parent.parent / "skills" / "magi" / "scripts" / "run_magi.py"
+        contents = src.read_text(encoding="utf-8")
+        # The exact f-string used in main() to print the input source.
+        # Changing the format is fine — update this assertion to match.
+        assert 'f"|  Input: {input_label}"' in contents, (
+            "Init banner must render input_label; see sanitize spec §7 and "
+            "the Balthasar 2026-05-16 finding. If you intentionally refactored "
+            "the banner, update this pin to match the new rendering."
+        )
