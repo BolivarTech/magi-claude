@@ -19,7 +19,7 @@ in §9 is the canonical Red-phase target.
 ```python
 # skills/magi/scripts/sanitize.py
 
-class InvalidInputError(ValidationError): ...
+class InvalidInputError(Exception): ...   # 2.4.1: sibling of ValidationError, see §5
 
 def normalize_newlines(s: str) -> str: ...
 def strip_invisibles(s: str) -> str: ...
@@ -34,12 +34,17 @@ def build_user_prompt(
 
 **Project conventions applied (not in source proposal):**
 
-- `InvalidInputError` subclasses `ValidationError` (project-wide error
-  type per `CLAUDE.local.md §0.1`), **not** `ValueError`.
+- `InvalidInputError` is a sibling of `ValidationError`, **NOT** a subclass
+  (structural guard, 2.4.1 — see §5 for rationale). This is an explicit
+  documented derogation from `CLAUDE.local.md §0.1` ("Use `ValidationError`
+  as the project-wide error type"); future fail-closed security-critical
+  exceptions should follow the same pattern.
 - Imports in `sanitize.py` and `tests/test_sanitize.py` use the **bare
-  module name** (`from sanitize import ...`, `from validate import
-  ValidationError`), matching the rest of `skills/magi/scripts/`.
-- File header (`# Author: Julian Bolivar`, `# Version: 1.0.0`, `# Date:
+  module name** (`from sanitize import ...`), matching the rest of
+  `skills/magi/scripts/`. `tests/test_sanitize.py` imports
+  `ValidationError` from `validate` solely for the BDD-29 / BDD-35
+  derogation pins.
+- File header (`# Author: Julian Bolivar`, `# Version: 1.0.x`, `# Date:
   2026-05-16`) required on every new source file.
 
 ---
@@ -140,15 +145,37 @@ whitespace, inserts `"  "`, preserves keyword and separator.
 ## 5. `InvalidInputError`
 
 ```python
-class InvalidInputError(ValidationError):
+class InvalidInputError(Exception):
     """Raised when ``content`` cannot be safely embedded in a user prompt."""
 ```
 
-- Subclass of `ValidationError` (`skills/magi/scripts/validate.py:19`).
-- Inherits constructor `(message, filepath="")`.
+- **Sibling of `ValidationError`, NOT a subclass** (structural guard,
+  2.4.1). Explicit derogation from `CLAUDE.local.md §0.1` documented in
+  the class docstring.
+- Direct subclass of `Exception` (not `BaseException`) so standard
+  `try/except` idioms work and `KeyboardInterrupt`/`SystemExit` flow
+  through unchanged.
+- Constructor: `__init__(self, *args)` — plain Python exception, no
+  `filepath` parameter (unlike `ValidationError`).
 - Only raise condition: nonce collision in `build_user_prompt` (§6).
 - Error message **must not contain the nonce value** (information
   disclosure — Rust ADR 001 §6.3).
+
+**Why sibling, not subclass (the structural guard, 2.4.1)**:
+`run_magi.py:531` catches `(ValidationError, json.JSONDecodeError)` and
+retries the agent invocation. If `InvalidInputError` inherited from
+`ValidationError`, that catch would silently consume a fail-closed
+nonce-collision event and convert it into a single retry — defeating the
+purpose of fail-closed entirely. Making `InvalidInputError` a sibling
+makes the protection STRUCTURAL: the typing system enforces the invariant
+across the entire codebase, present and future catch sites alike. Per
+Caspar pass-2 finding 2026-05-16 (option B from the B-vs-F analysis on
+the v2.4.1 branch).
+
+**Pinned by**: `test_sanitize.py::test_invalid_input_error_is_not_validation_error_subclass`
+(BDD-29, 2.4.1 rewrite) and
+`test_sanitize.py::test_validation_error_handler_does_not_catch_invalid_input_error`
+(BDD-35, 2.4.1 new).
 
 ---
 
@@ -328,8 +355,10 @@ proposal §4.3 to close gaps identified in the evaluation.
 
 ### build_user_prompt — fail-closed
 
-- **BDD-29 — `InvalidInputError` IS-A `ValidationError`** (project
-  convention check). (Gap closed.)
+- **BDD-29 (2.4.1 inverted) — `InvalidInputError` is NOT a subclass of
+  `ValidationError`** (structural guard derogation, see §5). Pins the
+  sibling-not-subclass contract so a future refactor cannot silently
+  revert the structural protection.
 - BDD-30 — `InvalidInputError` raised when `FixedRng` produces a nonce
   that appears as a substring of `content`.
 - BDD-31 — error message does NOT contain the nonce value.
@@ -344,8 +373,16 @@ proposal §4.3 to close gaps identified in the evaluation.
   ends up with `MODE: x` on its own line (ZWSP gone), neutralized. Pins
   layer 2 before layer 3.
 
-Total: 34 BDD scenarios. Maps to ~34-38 test functions (some parametrize
-multiple codepoints under one BDD).
+### Structural catch-shadow guard (2.4.1)
+
+- **BDD-35 — `except ValidationError` MUST NOT catch
+  `InvalidInputError`.** Constructs the fail-closed scenario via
+  `FixedRng` and asserts the catch behavior at the type-system level.
+  Pins the sibling-not-subclass property in terms of *consumer behavior*
+  (a catch site), complementing BDD-29's *declaration-side* assertion.
+
+Total: 35 BDD scenarios (34 from v2.4.0 + 1 new in v2.4.1). Maps to
+~35-39 test functions (some parametrize multiple codepoints under one BDD).
 
 ---
 

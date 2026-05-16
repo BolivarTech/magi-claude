@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
+# Version: 1.0.1
 # Date: 2026-05-16
 """Defense-in-depth user-prompt construction for MAGI orchestrator.
 
@@ -19,8 +19,6 @@ import re
 import secrets
 from typing import Protocol
 
-from validate import ValidationError
-
 
 class _RngLike(Protocol):
     """Structural type for the injectable RNG.
@@ -33,7 +31,7 @@ class _RngLike(Protocol):
     def getrandbits(self, k: int, /) -> int: ...
 
 
-class InvalidInputError(ValidationError):
+class InvalidInputError(Exception):
     """Raised when ``content`` cannot be safely embedded in a user prompt.
 
     The only current trigger is a nonce collision in
@@ -42,17 +40,27 @@ class InvalidInputError(ValidationError):
     nonce value: disclosing it would hand the attacker the very token
     they need to spoof the delimiters.
 
-    Shadow-risk note (post-MAGI-review 2026-05-16): this is a
-    ``ValidationError`` subclass. The orchestrator retry handler at
-    ``run_magi.py:531`` catches ``(ValidationError, json.JSONDecodeError)``
-    and retries the agent invocation. Currently safe because
-    :func:`build_user_prompt` is called in ``main()`` *before* the
-    orchestration loop, so an ``InvalidInputError`` cannot reach the
-    retry handler. If a future refactor moves prompt construction into
-    the per-agent path (e.g., per-agent prompt customization), the retry
-    handler will silently consume ``InvalidInputError`` and convert a
-    fail-closed event into a single retry. Add an explicit
-    catch-and-reraise at that boundary if the call site moves.
+    Structural guard (2.4.1): this class is intentionally a sibling of
+    ``ValidationError``, NOT a subclass. This DEVIATES from the
+    project-wide convention in ``CLAUDE.local.md`` §0.1 (which says
+    "Use ``ValidationError`` as the project-wide error type").
+
+    Why the derogation: ``InvalidInputError`` is the only fail-closed
+    security-critical exception in MAGI. The orchestrator retry handler
+    at ``run_magi.py:531`` catches
+    ``(ValidationError, json.JSONDecodeError)``. If ``InvalidInputError``
+    inherited from ``ValidationError``, that catch would silently consume
+    a fail-closed nonce-collision event and convert it into a single
+    retry — defeating the purpose of fail-closed entirely.
+
+    Future similar errors (other fail-closed security boundaries) should
+    follow this pattern: sibling of ``ValidationError``, not subclass.
+    The derogation is structural rather than conventional so it survives
+    refactors that do not read this docstring. Per the locked decision on
+    the v2.4.1 branch (2026-05-16, option B from the B-vs-F analysis).
+
+    See ``tests/test_sanitize.py`` BDD-29 and BDD-35 for the pinned
+    regression contract.
     """
 
 
