@@ -22,6 +22,7 @@ CLAUDE.local.md
 magi-audit-2.1.1/
 magi-audit-2.1.2/
 magi-audit-postfix/
+.regression/
 
 # Premortem experiment artifacts live on a local-only feature branch
 # (see CLAUDE.md "Post-release hardening / Premortem A/B experiment").
