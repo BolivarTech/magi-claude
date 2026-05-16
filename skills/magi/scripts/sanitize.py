@@ -61,6 +61,16 @@ class InvalidInputError(Exception):
 
     See ``tests/test_sanitize.py`` BDD-29 and BDD-35 for the pinned
     regression contract.
+
+    Scope of the structural guard: the sibling relationship protects
+    against any ``except ValidationError`` catch site, present or
+    future. It does **NOT** protect against bare ``except Exception``,
+    ``except BaseException``, ``asyncio.gather(return_exceptions=True)``
+    (which captures exceptions into a list), or ``ExceptionGroup`` /
+    ``except*`` flattening. Those broader catches are residual latent
+    bypass shapes; they are out of scope for this guard because
+    closing them structurally would conflict with legitimate uses of
+    those constructs elsewhere in the codebase.
     """
 
 

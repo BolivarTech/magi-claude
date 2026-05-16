@@ -177,6 +177,16 @@ the v2.4.1 branch).
 `test_sanitize.py::test_validation_error_handler_does_not_catch_invalid_input_error`
 (BDD-35, 2.4.1 new).
 
+**Scope of the guard**: protects against any `except ValidationError`
+catch site. Does NOT protect against bare `except Exception`,
+`except BaseException`, `asyncio.gather(return_exceptions=True)`, or
+`ExceptionGroup` / `except*` flattening — those are residual latent
+bypass shapes documented in the `InvalidInputError` docstring. The
+sibling pattern in this section applies specifically to **fail-closed
+security-critical exceptions**; do NOT generalize the pattern to
+`ValidationError` itself or other domain-level errors that legitimately
+benefit from the project-wide `ValidationError` convention.
+
 ---
 
 ## 6. `build_user_prompt(mode, content, rng=None) -> str`
