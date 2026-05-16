@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.2.6
-# Date: 2026-04-27
+# Version: 2.4.0
+# Date: 2026-05-16
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
 Launches Melchior, Balthasar, and Caspar in parallel using asyncio,
@@ -38,6 +38,7 @@ if _SCRIPT_DIR not in sys.path:
 
 from models import MODE_DEFAULT_MODELS, MODEL_IDS, VALID_MODELS, resolve_model  # noqa: E402
 from parse_agent_output import parse_agent_output as parse_raw_output  # noqa: E402
+from sanitize import InvalidInputError, build_user_prompt  # noqa: E402
 from status_display import StatusDisplay  # noqa: E402
 from stderr_shim import _buffered_stderr_while  # noqa: E402
 from synthesize import (  # noqa: E402
@@ -691,7 +692,11 @@ def main() -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    prompt = f"MODE: {args.mode}\nCONTEXT ({input_label}):\n\n{input_content}"
+    try:
+        prompt = build_user_prompt(args.mode, input_content)
+    except InvalidInputError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     skill_dir = os.path.dirname(script_dir)
@@ -715,6 +720,7 @@ def main() -> None:
     print("|          MAGI SYSTEM -- INITIALIZING              |")
     print("+==================================================+")
     print(f"|  Mode: {args.mode}")
+    print(f"|  Input: {input_label}")
     print(f"|  Model: {args.model} ({MODEL_IDS[args.model]})")
     print(f"|  Timeout: {args.timeout}s")
     print(f"|  Output: {output_dir}")
