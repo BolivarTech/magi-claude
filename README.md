@@ -64,7 +64,7 @@ For the full technical reference, see [`docs/MAGI-System-Documentation.md`](docs
 
 ```bash
 # 1. Add this repo as a marketplace source
-/plugin marketplace add BolivarTech/magi
+/plugin marketplace add BolivarTech/magi-claude
 
 # 2. Install the plugin
 /plugin install magi@bolivartech-plugins

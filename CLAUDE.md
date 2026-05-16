@@ -14,18 +14,15 @@ MAGI is a Claude Code **plugin** implementing a multi-perspective analysis syste
 # Run all tests
 python -m pytest tests/ -v
 
-# Run full verification (lock sync + tests + lint + format + types)
+# Full verification (lock sync + tests + lint + format + types)
 make verify
 
-# Run individual checks
-make lockcheck     # uv lock --check (fails if uv.lock drifts from pyproject.toml)
-make test          # pytest only
-make lint          # ruff check
-make format        # ruff format --check
-make typecheck     # mypy
+# Individual checks
+make lockcheck | make test | make lint | make format | make typecheck
 
 # Run analysis (parallel mode, requires claude CLI)
-python skills/magi/scripts/run_magi.py <code-review|design|analysis> <file_or_text> [--model opus] [--timeout 900] [--output-dir <dir>] [--keep-runs 5] [--no-status]
+python skills/magi/scripts/run_magi.py <code-review|design|analysis> <file_or_text> \
+  [--model opus|sonnet|haiku] [--timeout 900] [--output-dir <dir>] [--keep-runs 5] [--no-status]
 
 # Run synthesis standalone
 python skills/magi/scripts/synthesize.py agent1.json agent2.json [agent3.json] --output report.json
@@ -38,41 +35,38 @@ claude --plugin-dir .
 
 ```
 .claude-plugin/
-  plugin.json                 — Plugin manifest (name, version, author, repository)
-  marketplace.json            — Local marketplace config for development
+  plugin.json                 — Plugin manifest
+  marketplace.json            — Local marketplace config
 skills/magi/
   SKILL.md                    — Orchestrator (mode detection, workflow, fallback)
-  agents/
-    melchior.md               — System prompt: Scientist lens (technical rigor)
-    balthasar.md              — System prompt: Pragmatist lens (practicality)
-    caspar.md                 — System prompt: Critic lens (risk, adversarial)
+  agents/                     — melchior.md, balthasar.md, caspar.md (system prompts)
   scripts/
-    __init__.py               — Python package marker
-    run_magi.py               — Async orchestrator (launch_agent, run_orchestrator, _DisplayLogGate)
-    temp_dirs.py              — magi-run-* LRU cleanup + create_output_dir + realpath traversal guard
-    subprocess_utils.py       — windows_kill_tree + reap_and_drain_stderr + write_stderr_log + timeouts
-    status_display.py         — Live tree renderer (ANSI + plain, UTF-8 + ASCII fallback)
-    stderr_shim.py            — _buffered_stderr_while context + stderr shims for display-active runs
-    models.py                 — MODEL_IDS + resolve_model + VALID_MODELS
-    synthesize.py             — Facade: re-exports from validate, consensus, reporting
-    validate.py               — ValidationError + load_agent_output schema validation
-    consensus.py              — VERDICT_WEIGHT + determine_consensus (weight-based scoring)
-    reporting.py              — AGENT_TITLES + format_banner + format_report (ASCII)
+    run_magi.py               — Async orchestrator + tracked_launch
+    temp_dirs.py              — magi-run-* LRU cleanup, realpath traversal guard
+    subprocess_utils.py       — windows_kill_tree, stderr drain, timeouts
+    status_display.py         — Live tree renderer (ANSI + plain, UTF-8 + ASCII)
+    stderr_shim.py            — _buffered_stderr_while context
+    models.py                 — MODEL_IDS, resolve_model, MODE_DEFAULT_MODELS
+    synthesize.py             — Facade re-exporting validate/consensus/reporting
+    validate.py               — ValidationError + schema check
+    consensus.py              — VERDICT_WEIGHT + determine_consensus
+    reporting.py              — format_banner + format_report (ASCII)
     parse_agent_output.py     — Claude CLI JSON extractor (3 output formats)
 tests/
-  fixtures/claude-cli-outputs/  — Pinned claude -p output samples auto-discovered by the contract test
-  test_synthesize.py          — 142 tests: validation, non-dict top-level guard, consensus, findings, banner verdict-preservation, SKILL.md template parity
-  test_parse_agent_output.py  — 27 tests: fence stripping, text extraction, pipeline, claude -p fixture contract
-  test_run_magi.py            — 105 tests: arg parsing, --no-status, orchestration, tracked_launch states, temp_dirs LRU, subprocess_utils taskkill order, retry on ValidationError + JSONDecodeError, retried_agents telemetry, cp1252 hardening, UTF-8 console reconfigure (2.2.7)
-  test_status_display.py      — 46 tests: init, update, render, ASCII fallback, async lifecycle, stop idempotency, tripwire, refresh-loop Exception resilience, retrying-state glyphs, cp1252 fallback
-pyproject.toml                — Python >= 3.9, dual license, dev deps, tool config
-conftest.py                   — tdd-guard pytest plugin + sys.path setup for test imports
+  fixtures/claude-cli-outputs/  — Pinned claude -p samples (contract tests)
+  test_synthesize.py            — 142 tests
+  test_parse_agent_output.py    — 27 tests
+  test_run_magi.py              — 105 tests
+  test_status_display.py        — 46 tests
+  test_entry_point_invocation.py — 6 tests (python -m hardening)
+pyproject.toml                — Python >= 3.9, dual license, tool config
+conftest.py                   — tdd-guard pytest plugin + sys.path setup
 Makefile                      — verify, test, lint, format, typecheck targets
 ```
 
-### Cross-file contract: Agent JSON Schema
+### Cross-file contract: Agent JSON schema
 
-All three agents and all scripts depend on this schema — changes require updating all files:
+All three agent prompts and every script depend on this schema — change it everywhere or not at all:
 
 ```json
 {
@@ -88,7 +82,7 @@ All three agents and all scripts depend on this schema — changes require updat
 
 ### Consensus logic (consensus.py)
 
-Uses **weight-based scoring** with `VERDICT_WEIGHT = {approve: 1, conditional: 0.5, reject: -1}`:
+Weight-based scoring with `VERDICT_WEIGHT = {approve: 1, conditional: 0.5, reject: -1}`:
 
 ```
 score = sum(VERDICT_WEIGHT[verdict] for each agent) / num_agents
@@ -103,90 +97,78 @@ score = sum(VERDICT_WEIGHT[verdict] for each agent) / num_agents
 | 0 | — | HOLD -- TIE |
 | < 0 | — | HOLD (N-M) |
 
-Labels are dynamic: `(N-M)` reflects actual majority/minority counts (e.g., `GO (2-1)`, `GO WITH CAVEATS (3-0)`, or `HOLD (2-1)`). All non-unanimous and non-tie outcomes carry the split suffix so operators can read the effective verdict split directly off the banner. Score=0 (exact tie) uses `HOLD -- TIE` to avoid misleading majority counts when conditional verdicts skew the effective split. **Policy**: `HOLD -- TIE` maps to `consensus_verdict: "reject"` — ties default to "do not proceed" as the safer option.
+Labels carry a dynamic `(N-M)` split for every non-unanimous and non-tie outcome. `HOLD -- TIE` maps to `consensus_verdict: "reject"` (ties default to "do not proceed").
 
-**Single-source-of-truth invariant (2.1.1):** `consensus_verdict` is derived from `score` alone. The agent partition (`majority_agents` vs `dissent_agents`) is then taken from whichever side matches the verdict — approve and conditional both resolve to the approve side, reject to the reject side. Only then is the `(N-M)` split derived from the partition. This makes the rendered label, `majority_agents`, and the input to `_compute_confidence` all reference the same side on every vector — earlier releases could diverge on `[conditional, reject]` and `[conditional, conditional, reject]`.
+**Single-source-of-truth invariant (2.1.1)**: `consensus_verdict` is derived from `score` alone. The agent partition (`majority_agents` vs `dissent_agents`) is taken from whichever side matches the verdict — approve and conditional resolve to the approve side, reject to the reject side. The `(N-M)` split derives from the partition. This keeps the rendered label, `majority_agents`, and `_compute_confidence` referencing the same side on every vector.
 
-**Confidence formula:**
+**Confidence formula**:
 
 ```
-base_confidence = sum(majority_confidence) / num_agents   # denominator is num_agents, not |majority|
-weight_factor   = (abs(score) + 1) / 2                    # symmetric for approve and reject
+base_confidence = sum(majority_confidence) / num_agents   # denominator is num_agents
+weight_factor   = (abs(score) + 1) / 2                    # symmetric for approve/reject
 confidence      = clamp(base_confidence * weight_factor, 0.0, 1.0)
 ```
 
-Two things the formula does on purpose:
-
-- **Dissent dilution.** The denominator is `num_agents`, not `len(majority_agents)`. A minority that disagrees dilutes the numerator, so a unanimous win yields a higher confidence than a bare-majority one even when the surviving side's own confidence is identical. Read a moderate confidence on a narrow win as "the split itself reduces certainty", not as "the majority is individually uncertain".
-- **Symmetric weighting.** `abs(score)` ensures unanimous reject produces high confidence (matching approve), not zero. At score=0 (exact tie), `weight_factor=0.5`, halving confidence — appropriate for an undecided split.
+- **Dissent dilution**: denominator is `num_agents`, not `len(majority_agents)`. A minority that disagrees dilutes the numerator, so unanimous wins yield higher confidence than bare-majority wins. Moderate confidence on a narrow win means "the split itself reduces certainty".
+- **Symmetric weighting**: `abs(score)` makes unanimous reject produce high confidence (matching approve), not zero. At score=0 weight_factor=0.5 halves confidence.
 
 Key behaviors:
-- `conditional` maps to `approve` for majority identification, but conditions are preserved in report.
-- Unanimous `conditional` produces `GO WITH CAVEATS (3-0)` at moderate confidence (~0.68), not `STRONG GO`.
-- Conditions (`consensus.conditions`) are sourced from each conditional agent's `summary` field, while `consensus.recommendations` uses each agent's `recommendation` field. The two fields must render distinct text so the report's `## Conditions for Approval` and `## Recommended Actions` sections are not duplicates.
-- Findings deduplicated by title (case-insensitive), tracking all reporter agents via `sources` list, keeping highest severity.
-- Requires minimum 2 agents (raises `ValueError` if fewer). Accepts 2-3 for graceful degradation.
-- Validates agent name uniqueness — duplicate names raise `ValueError` to prevent silent vote corruption.
+- `conditional` maps to `approve` for majority identification, conditions preserved in report.
+- Unanimous `conditional` → `GO WITH CAVEATS (3-0)` at ~0.68 confidence, not `STRONG GO`.
+- `consensus.conditions` is sourced from each conditional agent's `summary`; `consensus.recommendations` from each agent's `recommendation`. Both fields must render distinct text.
+- Findings deduplicated by case-insensitive title with `sources` list; highest severity wins.
+- Minimum 2 agents (raises `ValueError`). Duplicate agent names raise `ValueError`.
 
-Implementation is split into focused helpers: `_consensus_short_verdict` (score-to-verdict, split-independent), `_format_consensus_label` (verdict + split → rendered label), `_deduplicate_findings` (merge by title, promote severity), `_compute_confidence` (symmetric weight formula).
+Implementation split: `_consensus_short_verdict`, `_format_consensus_label`, `_deduplicate_findings`, `_compute_confidence`.
 
 ### Import convention
 
-The `synthesize.py` facade re-exports all public symbols from `validate.py`, `consensus.py`, and `reporting.py`. Always import from `synthesize`:
+The `synthesize.py` facade re-exports public symbols from `validate.py`, `consensus.py`, `reporting.py`. Always import from `synthesize`:
 
 ```python
 from synthesize import load_agent_output, determine_consensus, format_report
 ```
 
-Do not import directly from sub-modules — the facade is the stable API.
+Do not import from sub-modules — the facade is the stable API.
 
 ### Orchestrator (run_magi.py)
 
-Async Python orchestrator using `asyncio.create_subprocess_exec`:
+- Launches 3 `claude -p` subprocesses concurrently via `asyncio.create_subprocess_exec` with per-agent `--timeout` (default 900s).
+- `--model` (default `opus`) selects LLM for all agents. Valid: `opus`, `sonnet`, `haiku`. `VALID_MODELS` is derived from `MODEL_IDS.keys()` — single source.
+- User prompt sent via **stdin** (avoids ~32K Windows CLI arg limit). A copy is saved to `{agent}.prompt.txt` for debugging.
+- System prompts passed via `--system-prompt-file` using the original `.md` path (no temp copy).
+- Validates subprocess exit code before parsing — non-zero raises `RuntimeError` with stderr context.
+- Each agent's raw output → `parse_agent_output.py` → `load_agent_output()` validation.
+- < 3 agents succeed: warning to stderr, `"degraded": true` in report, proceed with ≥ 2.
+- < 2 agents succeed: raises `RuntimeError`.
+- Cross-platform temp via `tempfile.mkdtemp(prefix="magi-run-")`, cleaned up on failure.
+- `--keep-runs N` (default 5): LRU cleanup sorted by `st_mtime`, resolved via `realpath` with temp-root validation to prevent symlink traversal. Disabled with `--keep-runs 0`.
+- Live status tree (`StatusDisplay`) wired around `asyncio.gather` via `tracked_launch` mapping `launch_agent` exit paths to display states. Disabled with `--no-status`. Catches both `asyncio.TimeoutError` and `TimeoutError` (3.9/3.10 compat).
 
-- Launches 3 `claude -p` subprocesses concurrently with per-agent timeout (`--timeout`, default 900s).
-- `--model` flag (default `opus`) selects LLM for all agents. Valid: `opus`, `sonnet`, `haiku`.
-- `VALID_MODELS` is derived from `MODEL_IDS.keys()` — single source of truth.
-- User prompt sent via **stdin** (`communicate(input=...)`) to avoid OS CLI arg length limits (~32K on Windows). A copy is saved to `{agent_name}.prompt.txt` as a debug artifact.
-- System prompts passed via `--system-prompt-file` using the **original .md file path** directly (no temp copy).
-- Validates subprocess exit code before parsing — non-zero exits raise `RuntimeError` with stderr context.
-- Parses each agent's raw output via `parse_agent_output.py`, validates via `load_agent_output()`.
-- If < 3 agents succeed: prints warning to stderr, sets `"degraded": true` in report, proceeds with >= 2.
-- If < 2 agents succeed: raises `RuntimeError`.
-- Cross-platform temp directory via `tempfile.mkdtemp(prefix="magi-run-")`, cleaned up on failure.
-- `--keep-runs N` (default 5): LRU cleanup of old `magi-run-*` temp directories before each run. Sorted by `st_mtime`, resolved via `realpath` with temp-root validation to prevent symlink traversal. Disabled with `--keep-runs 0`.
-- Live status tree (`StatusDisplay`) wired around `asyncio.gather` via a `tracked_launch` wrapper that maps `launch_agent` exit paths to `running → success/failed/timeout` events. Disabled with `--no-status`. Catches both `asyncio.TimeoutError` and built-in `TimeoutError` for Python 3.9/3.10 compatibility.
+### Model selection
 
-### Model selection guidance
+Default `opus` applied uniformly — differentiation comes from system prompts, not model. `models.py` is the only place mapping short names → Anthropic IDs (`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`).
 
-The default short name is `opus`, applied uniformly to all three agents — there is no per-agent model assignment, the differentiation comes entirely from each agent's system prompt. Operators can override with `--model sonnet` or `--model haiku`. The registry in `models.py` is the only place where short names map to Anthropic IDs (`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`); bumping a model is a one-line edit there.
-
-**Recommended model per mode** (cost / quality trade-off observed across the captured `magi-report.json` corpus, opus runs ~$0.25/agent ≈ $0.75/run total):
+**Recommended per mode** (opus ≈ $0.25/agent, ~$0.75/run):
 
 | Mode | Recommended | Rationale |
 |------|-------------|-----------|
-| `code-review` | `opus` | Dense technical reasoning; correctness depends on subtle interaction tracing where opus pulls ahead. ~$0.75/run is acceptable for PR-blocking decisions. |
-| `design` | `opus` | Multi-level abstraction (architecture, scaling cliffs, hidden coupling). The cohort confidence on `design` outputs in the audit corpus drops sharply on smaller models. |
-| `analysis` | `sonnet` | Exploratory questions and trade-off framing; sonnet matches opus quality at ~4× lower cost (~$0.20/run total). Reserve opus for cases where the answer drives a hard decision. |
-| Smoke / fixtures / contract testing | `haiku` | ~10× cheaper (~$0.07/run); validates the schema and parsing pipeline without burning opus budget on inputs whose verdict you do not act on. |
+| `code-review` | `opus` | Dense reasoning; subtle interaction tracing. |
+| `design` | `opus` | Multi-level abstraction; smaller models lose cohort confidence. |
+| `analysis` | `opus` | See 2.2.5 — sonnet caused ≥33% Caspar drops under sbtdd. |
+| Smoke / fixtures | `haiku` | ~10× cheaper; validates schema/parsing without burning opus. |
 
-**Default resolution (2.2.5+)**: when `--model` is omitted, `parse_args` looks the mode up in `MODE_DEFAULT_MODELS` (`models.py`) and resolves to that short name. Explicit `--model X` always wins over the mode default.
-
-**Resolution history**:
-
-* 2.0.x-2.2.2: uniform `opus` default for every mode.
-* 2.2.3 (2026-04-25): switched `analysis` default to `sonnet` for cost relief on the assumption that sonnet matched opus quality on exploratory work at ~4× lower cost.
-* 2.2.5 (2026-04-26): reverted `analysis` default to `opus`. Production data showed Caspar (most-output agent by design, 4-7K output tokens vs 2-3K for Mel/Bal) failed in ≥33% of sbtdd Loop verifications under sonnet — an order of magnitude above the 3.3% design assumption. Sonnet's ~8K max-output ceiling pressed against Caspar's adversarial-by-design verbosity; 2.2.4 retry could not recover because the failure was structural, not stochastic. The `MODE_DEFAULT_MODELS` plumbing is preserved for future per-mode differentiation; only the `analysis` value flipped back. Operators who want sonnet for analysis can still pass `--model sonnet` explicitly.
+When `--model` is omitted, `MODE_DEFAULT_MODELS` (`models.py`) resolves it. Explicit `--model X` always wins.
 
 ### Status display (status_display.py)
 
-Live tree-style progress renderer. Stdlib-only, no external dependencies:
+Stdlib-only tree renderer:
 
-- **ANSI mode** (TTY): in-place redraw every 200ms using `\033[NA` cursor movement and per-line `\033[2K` erase. Background async task drives the spinner. On Windows, `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is enabled via `ctypes` with narrow exception handling.
+- **ANSI mode** (TTY): in-place redraw every 200ms via `\033[NA` cursor movement and `\033[2K` erase. Background async drives spinner. On Windows, `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is enabled via `ctypes` with narrow exception handling.
 - **Plain mode** (pipe/captured stream): one line per `update()` call, no escape codes.
-- **Glyph fallback**: probes `stream.encoding` against `"●○✓✗⏱├─└─⠋"`; falls back to an ASCII-only glyph set (`* . v x ~ |- \-`) on cp1252 and other non-UTF-8 encodings. Streams without bound encoding (e.g., `io.StringIO`) are treated as unicode-capable. The timeout glyph is `~` (tilde) rather than `T` to avoid visual collision with the letter `T` inside state words and agent names.
-- **Invariant**: plain-mode and ANSI refresh writes are mutually exclusive — `_use_ansi` selects exactly one write path. Never mix both on the same stream.
-- `stop()` is idempotent and safe to call without a prior `start()`.
+- **Glyph fallback**: probes `stream.encoding` against `"●○✓✗⏱├─└─⠋"`; falls back to ASCII (`* . v x ~ |- \-`) on cp1252. Streams without bound encoding (`io.StringIO`) are treated as unicode-capable. Timeout glyph is `~` (avoids letter `T` collision).
+- **Invariant**: plain-mode and ANSI refresh writes are mutually exclusive — `_use_ansi` selects exactly one path.
+- `stop()` is idempotent.
 
 ### Parser (parse_agent_output.py)
 
@@ -194,262 +176,172 @@ Handles three Claude CLI output formats:
 
 1. `{"result": "..."}` — standard `--output-format json`
 2. `{"content": [{"type": "text", "text": "..."}]}` — content-block format
-3. Plain string — raw text output
+3. Plain string — raw text
 
-Also strips markdown code fences (```` ```json ... ``` ````) and validates extracted JSON. Raises `ValueError` for unrecognised output types (no silent fallback).
+Strips markdown code fences and validates extracted JSON. Raises `ValueError` for unrecognised output types (no silent fallback).
 
 ### Execution pipeline
 
 ```
-User input → SKILL.md (complexity gate + mode) → run_magi.py launches 3x claude -p
-  → each agent writes JSON to temp dir → parse_agent_output.py extracts JSON
-  → validate.load_agent_output() validates schema → consensus.determine_consensus() merges verdicts
-  → reporting.format_report() produces banner + report to stdout, JSON to output dir
+User input → SKILL.md (gate + mode) → run_magi.py launches 3× claude -p
+  → each writes JSON to temp dir → parse_agent_output.py extracts JSON
+  → validate.load_agent_output() → consensus.determine_consensus()
+  → reporting.format_report() → stdout banner + JSON to output dir
 ```
 
 Fallback (no `claude -p`): SKILL.md simulates three perspectives sequentially (Caspar first to reduce anchoring).
 
 ## Key Design Decisions
 
-- **Disagreement is a feature.** Unanimous agreement on non-trivial input may indicate insufficiently differentiated prompts.
-- **Caspar is adversarial by design.** Most likely to vote `reject` — intentional red-teaming.
-- **Weight-based scoring.** Uses `VERDICT_WEIGHT` for consensus determination and confidence calculation. Unanimous `conditional` correctly maps to moderate confidence, not high.
+- **Disagreement is a feature**. Unanimous agreement on non-trivial input may indicate insufficiently differentiated prompts.
+- **Caspar is adversarial by design**. Most likely to vote `reject` — intentional red-teaming.
+- **Weight-based scoring** via `VERDICT_WEIGHT`. Unanimous `conditional` maps to moderate confidence, not high.
 - **Agent prompts enforce English output** regardless of input language.
-- **Prompt injection guard** in all agent prompts — agents ignore instructions embedded in CONTEXT. Output validation (`load_agent_output`) provides a technical enforcement layer.
-- **Failure alerting.** Degraded mode (< 3 agents) is explicitly flagged in report and stderr, not silently accepted.
+- **Prompt injection guard** in all agent prompts; schema validation (`load_agent_output`) is the technical enforcement layer.
+- **Failure alerting**. Degraded mode (< 3 agents) is explicitly flagged in report and stderr.
 
 ## Distribution & Installation
 
-This repo is a Claude Code plugin distributed via the decentralized marketplace system. There is no centralized Anthropic registry — a "marketplace" is simply a public GitHub repository containing a `.claude-plugin/marketplace.json` that catalogs available plugins.
+Decentralized marketplace — no central registry. A marketplace is any public GitHub repo with `.claude-plugin/marketplace.json` cataloging plugins.
 
-### For users (install from GitHub)
+### For users
 
 ```bash
-# 1. Add this repo as a marketplace source
-/plugin marketplace add BolivarTech/magi
-
-# 2. Install the plugin
+/plugin marketplace add BolivarTech/magi-claude
 /plugin install magi@bolivartech-plugins
-
-# 3. Use it
 /magi
-```
-
-To update after new versions are published:
-
-```bash
+# Update after publishes:
 /plugin marketplace update
 ```
 
-### For development (local testing)
-
-**Option A — Plugin flag:**
+### For development
 
 ```bash
+# Option A — plugin flag:
 claude --plugin-dir /path/to/magi
-```
 
-**Option B — Symlink for auto-discovery (no flags needed):**
-
-```bash
-# One-time setup
+# Option B — symlink for auto-discovery:
 mkdir -p .claude/skills
 ln -s ../../skills/magi .claude/skills/magi
-
-# Then run claude normally
 claude
+# /reload-plugins picks up changes.
 ```
 
-The symlink is excluded via `.gitignore` (`.claude/` is ignored). Each developer must create it locally. Changes are picked up with `/reload-plugins` without restarting.
-
-### Scope notes
-
-- `.claude/skills/` auto-discovery is **project-scoped** — only works when running `claude` from this repo directory.
-- For user-wide availability, install as a plugin (`/plugin install`) or symlink into `~/.claude/skills/`.
-- `plugin.json` requires `"skills": "./skills/"` to register skills when loaded as a plugin.
+`.claude/skills/` auto-discovery is project-scoped. For user-wide availability use `/plugin install` or symlink into `~/.claude/skills/`. `plugin.json` requires `"skills": "./skills/"`.
 
 ### Publishing updates
 
-1. Bump `"version"` in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both occurrences), `pyproject.toml`, and `uv.lock` (the `[[package]] name = "magi"` entry).
-2. Run `make verify` — lock sync must pass, all tests must pass, zero lint warnings, clean formatting, no type errors.
-3. Commit with message `fix|feat|chore: <short summary> and release <version>` and push to `main` on GitHub.
-4. Tag the release commit: `git tag -a v<version> -m "Release <version>: <short summary>"` then `git push origin v<version>`. Every release from 2.1.4 onward carries an annotated tag in `v<MAJOR>.<MINOR>.<PATCH>` form; the tag is non-optional because it is the durable anchor for rollback, changelogs, and GitHub's release UI. Lightweight tags are not acceptable — the annotated form carries tagger identity and a dated message.
-5. Users pick up updates with `/plugin marketplace update`.
+1. Bump `"version"` in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both occurrences), `pyproject.toml`, and `uv.lock` (`[[package]] name = "magi"`).
+2. Run `make verify`. Lock sync + all tests + zero lint + clean format + no type errors.
+3. Commit `fix|feat|chore: <summary> and release <version>`. Push to `main`.
+4. Annotated tag: `git tag -a v<version> -m "Release <version>: <summary>"` then `git push origin v<version>`. Every release from 2.1.4 onward carries an annotated tag in `v<MAJOR>.<MINOR>.<PATCH>` form. Lightweight tags are not acceptable.
+5. Users pick up via `/plugin marketplace update`.
 
 ### Pre-merge MAGI self-review (standard procedure)
 
-For any release that ships behaviour-affecting code — `feat:` commits, `fix:` of medium severity or higher, or any change that touches `tracked_launch` / `launch_agent` / the schema — run MAGI on the branch's diff before merging. This turns the plugin into a self-auditing system and consistently catches gaps that grep + manual review miss (the 2.2.3 lockstep-test gap, the 2.2.4 docstring drift, etc.).
+For any release shipping behaviour-affecting code (`feat:`, medium-severity+ `fix:`, anything touching `tracked_launch` / `launch_agent` / the schema), run MAGI on the diff before merging.
 
-The procedure is fixed so the cadence is repeatable across releases:
+1. **Build the diff bundle** as `magi-review-<version>-context.md`: one-paragraph what+why, full `git diff main feature/<branch>` in a ```diff``` fence, 4-6 non-leading review questions ("Is X correct?", "Could Y break Z?").
+2. **Invoke**: `python skills/magi/scripts/run_magi.py code-review magi-review-<version>-context.md --timeout 900 --no-status`. Wall time 1-3 min, opus cost ~$0.75.
+3. **Read raw per-agent `.json`** in the run's temp dir. Per-finding `detail` carries reasoning the rendered table truncates.
+4. **Process findings via `superpowers:receiving-code-review`**: every finding gets a verdict — `valid`, `wrong`, `style`, `out-of-scope`, or `YAGNI`. Push-backs require concrete proof (file:line, test, counter-example). Performative agreement forbidden.
+5. **Address valid findings** in a follow-up `fix:` commit on the same branch. Push-back rationale goes in the commit body. ≥ 3 valid findings of the same shape → stop and re-plan.
+6. **Delete the context bundle** before merging. `magi-report.json` on disk is the audit artifact.
+7. **Merge `--no-ff`**, tag, push.
 
-1. **Build the diff bundle**. From the feature branch, write a single context file (e.g., `magi-review-<version>-context.md`) containing:
-   - One paragraph describing what changed and why.
-   - The full `git diff main feature/<branch>` inside a fenced ``diff`` block.
-   - 4-6 specific "hot review questions" that direct the agents at the parts of the diff you most want challenged. Avoid leading questions; phrase as "Is X correct?", "Could Y break Z?", "Does the help text leak internal symbols?".
-2. **Invoke MAGI** on the bundle: `python skills/magi/scripts/run_magi.py code-review magi-review-<version>-context.md --timeout 900 --no-status`. Wall time is typically 1-3 minutes; cost on opus is ~$0.75 per review.
-3. **Read the raw `.json` per agent** in the run's temp directory rather than only the rendered banner. Per-finding `detail` fields carry the reasoning the rendered table truncates to titles.
-4. **Run the findings through `superpowers:receiving-code-review`** *before* implementing anything. The skill enforces verify-before-act:
-   - Each finding gets a verdict — `valid` (implement), `wrong` (push back with code reference), `style` (push back as preference), `out-of-scope` (already-debated decision), or `YAGNI` (no real consumer).
-   - Push-backs require a concrete proof — a file:line reference, a test, or a counter-example. Performative agreement is forbidden by the skill.
-5. **Address valid findings** in a follow-up `fix:` commit on the same branch. Push-backs go in the commit message body so the rationale survives later bisects. If the review surfaces an architectural problem (≥ 3 valid findings of the same shape), stop and re-plan before merging.
-6. **Delete the context bundle** before merging so it does not enter `main`. The MAGI run's `magi-report.json` on disk is the audit artifact; the bundle is a transient input.
-7. **Merge to `main` with `--no-ff`**, tag, push.
+**Skip when**: pure docs, version bumps, gitignore, reformatting, dependency updates with no behaviour change. The $0.75 cost is real.
 
-**When to skip**: pure documentation commits, pure version bumps, gitignore changes, reformatting, dependency updates with no behaviour change. The cost (~$0.75) is real; do not run MAGI on commits where the diff is mechanical.
-
-**When to escalate beyond MAGI**: if MAGI returns `STRONG NO-GO` or two consecutive iterations of `GO WITH CAVEATS` whose conditions overlap, treat the feature as architecturally suspect and pull in a second human reviewer before merging.
-
-**Yes, this procedure applies to the release that introduces it.** 2.2.4 — the release that ships this section — was itself reviewed under the procedure. The "skip when mechanical" exemption is for diffs that contain no behaviour-affecting code; a release that *introduces* this procedure as a new behavioural commitment for future reviews is not mechanical.
+**Escalate beyond MAGI** when: `STRONG NO-GO`, or two consecutive `GO WITH CAVEATS` with overlapping conditions. Pull in a second human reviewer.
 
 ### Marketplace structure
-
-The plugin system relies on two manifest files in `.claude-plugin/`:
 
 | File | Purpose |
 |------|---------|
 | `plugin.json` | Plugin identity: name, version, author, repository, license, skills path |
-| `marketplace.json` | Marketplace catalog: owner, plugin list with sources, categories, tags |
+| `marketplace.json` | Catalog: owner, plugin list with sources, categories, tags |
 
-A single marketplace repo can host multiple plugins by pointing `source` to other GitHub repos. This repo hosts only the `magi` plugin with `source: "./"` (self-contained).
+This repo hosts only `magi` with `source: "./"`.
 
 ## Test Coverage
 
-320 tests across 4 test files (319 passed, 1 skipped on Windows):
+326 tests across 5 files (325 passing, 1 skipped on Windows). Run with `python -m pytest tests/ -v` or `make test`.
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `tests/test_synthesize.py` | 142 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, non-dict top-level JSON (R4-1), zero-width Unicode (incl. U+2060-U+206F word joiner / invisible math operators / tag controls), finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, verdict-suffix preservation under overlong labels (R4-3), report sections + ordering, dissent summary-only, SKILL.md template parity |
-| `tests/test_parse_agent_output.py` | 27 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration, pinned claude -p output contract via auto-discovered fixtures (R4-5) |
-| `tests/test_run_magi.py` | 105 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0), `retried_agents` telemetry field with conditional presence and sorted serialisation (2.2.1), per-mode default model resolution with explicit `--model` override + `MODE_DEFAULT_MODELS` ↔ `VALID_MODES` lockstep invariant (2.2.3), single-shot retry extended to `json.JSONDecodeError` from parse stage with `ValueError` boundary guard (2.2.4), Windows cp1252 hardening — WARNING prints survive cp1252 stderr + input file read tolerates cp1252 bytes (2.2.6), UTF-8 console reconfigure helper — `_enable_utf8_console_io` switches stdout/stderr to UTF-8 + backslashreplace on win32, no-op elsewhere, missing-`reconfigure` streams skipped silently, called first in `main()` before any print (2.2.7) |
-| `tests/test_status_display.py` | 46 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience, refresh-loop non-OSError resilience (R4-2), retrying-state glyphs (UTF-8 ↻, ASCII lowercase r), retrying not terminal, unicode probe includes retry glyph, cp1252 fallback safe (2.2.2) |
+| `test_synthesize.py` | 142 | Validation, type/length checks, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD--TIE, duplicate-agent rejection, banner alignment, verdict-suffix preservation, report ordering, SKILL.md parity, zero-width Unicode (U+2060-U+206F) |
+| `test_parse_agent_output.py` | 27 | Fence stripping, text extraction (3 formats), fail-fast on unknown shapes, pipeline, pinned `claude -p` fixture contract (auto-discovered) |
+| `test_run_magi.py` | 105 | Arg parsing, --no-status, model passthrough, orchestration, degraded mode, cleanup LRU/symlink, tracked_launch states, kill-tree order, stderr replay OSError safety, retry on ValidationError + JSONDecodeError, retried_agents telemetry, MODE_DEFAULT_MODELS ↔ VALID_MODES lockstep, cp1252 hardening, UTF-8 console reconfigure |
+| `test_status_display.py` | 46 | Init/update/render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, OSError + non-OSError refresh-loop resilience, retrying-state glyphs (UTF-8 ↻, ASCII `r`), cp1252 fallback |
+| `test_entry_point_invocation.py` | 6 | `python -m skills.magi.scripts.<name>` and direct-script invocation of `run_magi`, `synthesize`, `parse_agent_output` |
 
-Run with `python -m pytest tests/ -v` or `make test`.
+## Resolved Issues (consolidated)
 
-## Resolved Issues (2026-04-01 Migration)
+All issues from MAGI self-analysis (2026-04-01 migration) and four rounds of self-review (R1-R4) are resolved. Highlights:
 
-All issues from the MAGI self-analysis have been resolved:
+- **Schema/Validation**: weight-based scoring replaces unanimous-conditional → STRONG GO bug; non-dict top-level JSON guarded with `ValidationError`; agent-name uniqueness validated; `_extract_text` fails fast on unknown shapes.
+- **Subprocess robustness**: prompt via stdin (32K Windows arg limit); `--timeout` enforced; exit-code validated; Windows kill-tree runs *before* `proc.kill()`; stderr drain hardened against OSError.
+- **Filesystem**: cross-platform tempdirs; LRU cleanup via `st_mtime` with `realpath` + temp-root validation; `OSError` warnings on cleanup failure.
+- **Display**: status tree never fails the run (`refresh_loop` catches `Exception`); `stop()` idempotent; cp1252 ASCII fallback; verdict suffix preserved under overlong labels.
+- **Telemetry**: zero-width Unicode (`U+2060-U+206F` word joiner, invisible math operators, tag controls) cleaned in finding titles; banner uses integer percent; `HOLD -- TIE` replaces misleading HOLD with conditionals.
+- **Test contract**: pinned `claude -p` output fixtures under `tests/fixtures/claude-cli-outputs/` auto-discovered, with a non-empty guard test so renames cannot degrade the contract to a vacuous pass.
 
-| # | Issue | Resolution |
-|---|-------|------------|
-| C1 | Empty `repository` in plugin.json | Placeholder URL set |
-| C2 | No tests for parse_agent_output.py | 19 tests, 80%+ coverage |
-| C3 | No timeout in orchestrator | `asyncio.wait_for` with `--timeout 300` default |
-| W1 | Unanimous conditional = STRONG GO | Weight-based scoring via `VERDICT_WEIGHT` |
-| W2 | Cross-platform `/tmp` | `tempfile.mkdtemp()` |
-| W3 | Prompt injection guards soft only | Schema validation via `load_agent_output()` in pipeline |
-| W4 | Graceful degradation hides failures | `degraded` flag + stderr warnings |
-| W5 | Opaque `claude -p` dependency | Documented 3 output formats in parse_agent_output.py |
-| W6 | No troubleshooting guide | Module docstrings + this document |
-| I4 | No pyproject.toml | Added with Python >= 3.9, dual license |
+Detail of each fix lives in git history; only the LOCKED debt entry below requires re-reading.
 
-Remaining soft controls (instructional prompt injection guards) are inherent to LLM-based systems and do not affect operational reliability.
+### Known residual limitations
 
-## Resolved Issues (MAGI Self-Review)
-
-Three rounds of MAGI self-review identified and resolved the following issues:
-
-| # | Issue | Resolution |
-|---|-------|------------|
-| R1-1 | User prompt passed as CLI arg (32K limit on Windows) | Prompt sent via stdin with `communicate(input=...)` |
-| R1-2 | System prompt copied to temp file unnecessarily | Original `.md` path passed directly to `--system-prompt-file` |
-| R1-3 | No agent name uniqueness validation | `ValueError` raised for duplicate names in `determine_consensus` |
-| R1-4 | Temp directories accumulate indefinitely | LRU cleanup with `--keep-runs` (default 5) |
-| R1-5 | `_extract_text` silent fallback for unknown types | `ValueError` raised for unrecognised output types |
-| R1-6 | `determine_consensus` monolithic (80 lines) | Refactored into `_classify_consensus`, `_deduplicate_findings`, `_compute_confidence` |
-| R1-7 | Banner confidence format inconsistent (decimal vs %) | SKILL.md specifies integer percentage format matching `reporting.py` |
-| R2-1 | Off-by-one in `cleanup_old_runs` slice | `magi_dirs[keep - 1:]` → `magi_dirs[keep:]` |
-| R2-2 | TOCTOU / symlink traversal in cleanup | `os.path.realpath()` + `tmp_root` prefix validation |
-| R2-3 | `st_ctime` inconsistent across platforms | Changed to `st_mtime` |
-| R2-4 | `shutil.rmtree(ignore_errors=True)` hides failures | `try/except OSError` with warning to stderr |
-| R2-5 | No subprocess exit code validation | `proc.returncode` check with `RuntimeError` |
-| R2-6 | HOLD label misleading with conditional verdicts | `HOLD -- TIE` for score=0 (ties default to reject) |
-| R3-1 | Windows kill-tree ran *after* `proc.kill()` — parent torn down before `taskkill /T` could enumerate descendants | `_windows_kill_tree(pid)` now runs **before** `proc.kill()`; `proc.kill()` stays as belt-and-suspenders so the asyncio wrapper still observes the exit |
-| R3-2 | `_ZERO_WIDTH_RE` skipped `U+2060-U+206F` (word joiner, invisible math operators, deprecated tag controls) — Cf-category invisibles could smuggle dedup-key collisions | Regex widened to `[\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff\u00ad]`; covers every Cf-category invisible in the BMP that prior tests touched |
-| R3-3 | `_buffered_stderr_while` replay re-raised `OSError` from `saved.write` / `saved.flush`, masking the body's in-flight exception (root cause hidden by a cleanup-only failure) | `finally` wraps the replay in `try/except OSError`; clean-body runs no longer crash on broken pipes, and an in-flight exception always propagates unchanged |
-| R3-4 | `StatusDisplay._refresh_loop` and the final `stop()` redraw bubbled `OSError` (e.g. `BrokenPipeError`) out of the background task; `stop()` then re-raised it and discarded gathered agent results | Both call sites wrap `_redraw()` in `try/except OSError`; refresh loop sets `_running = False` and returns silently when the stream dies |
-| R4-1 | `validate.load_agent_output` ran `set(data.keys())` without checking `isinstance(data, dict)` — non-object top-level JSON (list, string, null, number) raised `AttributeError` and bypassed the `ValidationError` contract, producing opaque `'list' object has no attribute 'keys'` traces in `asyncio.gather` | Explicit `isinstance(data, dict)` guard after `json.load`; non-dict top-level JSON now raises `ValidationError("Top-level JSON must be an object, got <type>.")` with the filepath preserved |
-| R4-2 | `_refresh_loop` and the final `stop()` redraw caught only `OSError` — a `ValueError` (closed `io.StringIO`), `UnicodeEncodeError` (mis-probed encoding), or any future bug in `_redraw` would bubble out of the background task and make `stop()` re-raise on `await self._refresh_task`, discarding gathered agent results the same way R3-4 had for `OSError` | Both handlers widened to `except Exception` with `# noqa: BLE001` and a pointer to `_refresh_loop`'s docstring: *the live display is never allowed to fail the run*. `BaseException` subclasses (`KeyboardInterrupt`, `SystemExit`) still propagate |
-| R4-3 | `_fit_content` tail-truncated the banner row; on a pathologically long agent label the verdict+confidence suffix (`APPROVE (85%)`) was erased even though the row stayed width-valid, leaving operators with a structurally correct banner that had lost the one token it exists to communicate | `_fit_content` accepts a `preserve_suffix` keyword; when the suffix fits, truncation eats the label prefix instead. `format_banner` threads `verdict_display (conf_pct)` through as the preserved suffix, falling back to the original tail-cut when no suffix is requested |
-| R4-4 | `run_magi.py` had grown to hold arg parsing, LRU cleanup, Windows kill-tree, stderr-shim coordination, display lifecycle, subprocess orchestration, consensus call-out, and report writing — a new maintainer needed four invariants in their head to touch `run_orchestrator` safely | Extracted two pure-filesystem/pure-subprocess modules: `temp_dirs.py` (`MAGI_DIR_PREFIX`, `cleanup_old_runs`, `create_output_dir`, plus TOCTOU/symlink helpers) and `subprocess_utils.py` (`windows_kill_tree`, `reap_and_drain_stderr`, `write_stderr_log`, `format_stderr_excerpt`, plus `TASKKILL_TIMEOUT`/`PROC_WAIT_REAP_TIMEOUT`). `run_magi.py` keeps the orchestration flow and re-exports `cleanup_old_runs`/`create_output_dir`/`MAGI_DIR_PREFIX` for longstanding test imports |
-| R4-5 | Nothing in the suite exercised the three `claude -p` output shapes end-to-end because the CLI requires a paid API key; a silent wrapper change at Anthropic would surface only as a production parse failure | Added `tests/fixtures/claude-cli-outputs/` with five pinned captures (`result-shape`, `content-block-shape`, `plain-string-shape`, `result-with-markdown-fences`, `content-block-not-first`) and a parametrized contract test in `test_parse_agent_output.py` that auto-discovers new `.json` files. A guard test asserts the fixture directory is non-empty so a future rename cannot degrade the contract to a vacuous pass |
-
-### Known limitations
-
-- **TOCTOU residual**: A narrow race window exists between `realpath()` and `rmtree()` in `cleanup_old_runs`. Acceptable for dev-tooling context; not suitable for security-critical environments.
-- **Windows subprocess orphans (residual)**: the reap path now invokes `taskkill /F /T /PID` *before* `proc.kill()` so the tree is collapsed while the parent-child mapping is still intact. Orphans only survive when `taskkill` is missing from PATH or its `_TASKKILL_TIMEOUT` budget is exceeded — both already emit a "may be orphaned" warning naming the pid so operators can clean up manually.
-- **Temp directory scan**: `cleanup_old_runs` scans the entire system temp directory. May be slow on machines with thousands of temp entries (e.g., shared CI runners).
-- **Windows non-VT TTY**: On legacy Windows consoles where `ENABLE_VIRTUAL_TERMINAL_PROCESSING` cannot be enabled, the status display falls through to plain mode and emits one append-only line per agent state change (no in-place redraw). Modern Windows Terminal, ConEmu, and WSL terminals are unaffected. Disable the display with `--no-status` if the append output is undesirable.
-- **`_StderrBufferShim` coverage gap**: the shim intercepts `sys.stderr.write`, `sys.stderr.flush`, and `sys.stderr.buffer.write`. The following paths bypass it:
-  - `os.write(sys.stderr.fileno(), b"...")` — direct OS-level writes to fd 2.
-  - Subprocesses inheriting fd 2 (MAGI itself uses `stderr=PIPE` so this doesn't apply to `launch_agent`, but third-party code invoked from user-level hooks could).
-  - **Pre-cached stderr references**: modules that capture `err = sys.stderr` at import time and later call `err.write(...)` hold a reference to the real stream, not to the swapped-in shim. The shim replaces `sys.stderr` only for the duration of `_buffered_stderr_while`; a reference captured before that context manager enters is unaffected. If MAGI ever imports a library that does this, its writes will appear directly in the display's redraw region.
-- **Buffered diagnostics on hard process death**: `_buffered_stderr_while` flushes its buffer in a `finally` clause, so diagnostics survive ordinary exceptions, `CancelledError`, `KeyboardInterrupt`, and `SystemExit`. They are lost only on `SIGKILL`, segfault, or `os._exit()` — all out of scope for Python-level cleanup.
+- **TOCTOU**: narrow race between `realpath()` and `rmtree()` in `cleanup_old_runs`. Acceptable for dev tooling, not security-critical environments.
+- **Windows subprocess orphans**: only if `taskkill` is missing from PATH or `_TASKKILL_TIMEOUT` exceeded — emits a warning naming the pid.
+- **Temp-dir scan**: may be slow on machines with thousands of temp entries (shared CI).
+- **Windows non-VT TTY**: falls through to plain mode (append-only); modern Windows Terminal / ConEmu / WSL unaffected. Use `--no-status` if append output is undesirable.
+- **`_StderrBufferShim` bypass paths**: `os.write(2, ...)`, subprocess fd 2 inheritance, and pre-cached `sys.stderr` references (modules that capture `err = sys.stderr` at import time bypass the shim).
+- **Buffered diagnostics on hard process death**: `_buffered_stderr_while` flushes in `finally`, surviving exceptions / CancelledError / KeyboardInterrupt / SystemExit. Lost only on `SIGKILL`, segfault, or `os._exit()`.
 
 ## Open technical debt
 
-These items are real (not "accepted residuals" like the section above) and have a concrete fix path, but were de-prioritised to avoid bloating an unrelated release. They are documented here so they do not silently age into a third "known limitation" disguised as architecture.
+Real items with concrete fix paths, deferred to avoid bloating unrelated releases.
 
 ### Backwards-compatibility re-exports in `run_magi.py`
 
-**What**: Lines 56-67 of `run_magi.py` keep `cleanup_old_runs`, `create_output_dir`, and `MAGI_DIR_PREFIX` re-exported from the module's `__all__` so the legacy `from run_magi import cleanup_old_runs` import path continues to work for tests that pre-date the R4-4 split. The accompanying comment explicitly says *"Future code should import from `temp_dirs` directly"* — the re-exports are a transition aid, not a stable API.
+Lines 56-67 re-export `cleanup_old_runs`, `create_output_dir`, `MAGI_DIR_PREFIX` for legacy test imports. Comment explicitly says future code should import from `temp_dirs` directly.
 
-**Why it is debt**: every grep for `temp_dirs` symbols has to touch two modules, and the `__all__` of `run_magi.py` carries names that have nothing to do with orchestration. New contributors learn the shortcut and the convention erodes.
+**Fix** (~1-2h): rewrite the few `from run_magi import cleanup_old_runs` call sites (mostly in `tests/test_run_magi.py`) to `from temp_dirs import ...`; delete the three names from `__all__`. `make verify` flags misses via mypy.
 
-**Fix path** (~1-2 hours):
-1. `grep -rn "from run_magi import \(cleanup_old_runs\|create_output_dir\|MAGI_DIR_PREFIX\)"` to enumerate the call sites — primarily inside `tests/test_run_magi.py`.
-2. Rewrite each import to `from temp_dirs import ...`.
-3. Delete the three names from `run_magi.__all__` and the explanatory comment block.
-4. Run `make verify`; mypy will flag any miss because the names will no longer be importable from `run_magi`.
+**Acceptance**: `git grep "from run_magi import cleanup_old_runs"` returns zero. Orchestration symbols (`MODEL_IDS`, `VALID_MODELS`, `resolve_model`) stay re-exported because they legitimately straddle modules.
 
-**Acceptance**: `git grep "from run_magi import cleanup_old_runs"` returns zero matches. The orchestration symbols (`MODEL_IDS`, `VALID_MODELS`, `resolve_model`) stay re-exported because they straddle modules legitimately — only the `temp_dirs` triple is targeted.
-
-**Why deferred**: pure cleanup, zero behaviour change, zero user impact. Bundle into the next refactor-flavoured release (e.g., 2.3.0) rather than a patch.
+**Why deferred**: pure cleanup, zero behaviour change. Bundle into the next refactor release (e.g., 2.3.0).
 
 ### `run_magi.py` size and orchestrator layering
 
-**What**: `run_magi.py` is 628 LOC, the largest module in the project (next is `status_display.py` at 443; the orchestration tier average is ~250). It carries arg parsing, `launch_agent`, the `_DisplayLogGate` class, `_safe_display_update`, `_build_retry_prompt`, `run_orchestrator`, the `tracked_launch` closure (with seven captured variables), and `main`. The R4-4 extraction (`temp_dirs`, `subprocess_utils`) already pulled the pure-filesystem and pure-subprocess pieces out; what remains is the genuinely entangled orchestration core, but it is still bigger than any one reader needs to hold in their head.
+628 LOC — largest module. Carries arg parsing, `launch_agent`, `_DisplayLogGate`, `_safe_display_update`, `_build_retry_prompt`, `run_orchestrator`, `tracked_launch` closure (7 captured variables), and `main`. R4-4 already pulled out filesystem/subprocess pieces; what remains is genuinely entangled.
 
-**Why it is debt**: every retry-related change so far (2.2.0 retry, 2.2.1 telemetry) had to thread state through the closure rather than through an explicit object. The closure is correct, just not introspectable. A future operator-visible feature like "retry count > 1" would benefit from a real state object instead of a sixth captured variable.
+**Fix** (~3-5h, minor release): extract `launch_agent` + timeout/stderr into `agent_runner.py`; extract per-agent state machine (running → retrying → terminal) into a `LaunchTracker` class in `tracking.py`. `run_orchestrator` shrinks to ~80 LOC.
 
-**Fix path** (estimated 3-5 hours, not patch material):
-1. Extract `launch_agent` and its timeout / stderr handling into a new `agent_runner.py` module exposing one async function. The function should be a pure I/O operation: subprocess + parse + validate. No display, no retry.
-2. Extract the per-agent state machine (running → retrying → terminal) into a `LaunchTracker` class in a new `tracking.py` module. Class instance owns the display-update calls, the retry decision, and the retried/failed sets that today live as closure variables.
-3. `run_orchestrator` shrinks to: build display, build trackers for each agent, gather, build report. Probably ~80 LOC instead of ~150.
+**Acceptance**: no module > ~300 LOC; `tracked_launch` no longer a closure; tracker class has unit tests independent of the orchestrator.
 
-**Acceptance**: `wc -l skills/magi/scripts/*.py | sort -n` shows no module above ~300 LOC; `tracked_launch` no longer exists as a closure; the tracker class has unit tests independent of the orchestrator.
+**Why deferred**: warrants a minor release (2.3.0) and a brainstorm — touches the hottest async path. The 2026-05-15 telemetry routine should land first; it may suggest specific tracker responsibilities (per-agent budget, retry-count) the refactor should accommodate from day one.
 
 ### `ValueError` boundary conflates parser-shape and config errors
 
-**What**: ``tracked_launch`` (post-2.2.4) does **not** retry on ``ValueError``. The decision is correct in aggregate but lumps two qualitatively different failure modes:
+`tracked_launch` does not retry on `ValueError`, which lumps two failure modes:
 
-* ``resolve_model("gpt4")`` → ``ValueError("Unknown model 'gpt4'…")``. A configuration error. Retry would re-fail identically; not retrying is correct.
-* ``parse_agent_output._extract_text({"weird_shape": …})`` → ``ValueError("Unexpected Claude CLI output type…")``. A structural change in the upstream Anthropic CLI output. Retry *might* recover (the model could roll a recognised shape on the second attempt), but it could also be a sustained CLI change that needs a parser update.
+- `resolve_model("gpt4")` — config error, retry would re-fail identically. Correct.
+- `parse_agent_output._extract_text({"weird_shape": ...})` — structural CLI change, retry might recover.
 
-**Why it is debt**: today the wrong-side decision has zero observed cost — there are no production reports of ``_extract_text`` ``ValueError``. But a future Anthropic CLI shape change would surface as a non-recoverable agent loss exactly where 2.2.4 just closed the equivalent gap for ``JSONDecodeError``. The right fix is a custom exception class — e.g., ``ParseShapeError`` — raised by ``_extract_text`` and added to the retry catch alongside ``ValidationError`` and ``json.JSONDecodeError``. The ``resolve_model`` ``ValueError`` keeps its current semantics (no retry).
+**Fix** (~1-2h): introduce `class ParseShapeError(ValueError)` in `parse_agent_output.py`; replace the two `raise ValueError` sites in `_extract_text` with `raise ParseShapeError` (file-too-large stays plain `ValueError`); extend `tracked_launch` catch to `(ValidationError, json.JSONDecodeError, ParseShapeError)`. Add regression test for shape-fail → retry; rename existing `test_value_error_from_parse_does_not_retry` to target `resolve_model`-style errors.
 
-**Fix path** (estimated 1-2 hours):
-1. Introduce ``class ParseShapeError(ValueError)`` in ``parse_agent_output.py``. Subclassing ``ValueError`` preserves backward compatibility for any caller already doing ``except ValueError``.
-2. Replace the two ``raise ValueError`` sites in ``_extract_text`` with ``raise ParseShapeError`` (file-too-large stays as ``ValueError``; size limit is a structural failure that retry cannot fix).
-3. Extend ``tracked_launch`` retry catch to ``(ValidationError, json.JSONDecodeError, ParseShapeError)``.
-4. Add a regression test exercising the shape-fail → retry path; keep the existing ``test_value_error_from_parse_does_not_retry`` test renamed to target ``resolve_model``-style ``ValueError`` (to keep that boundary explicit).
+**Acceptance**: a future Anthropic CLI shape change produces a single recoverable failure per agent, not 2-of-3 catastrophic loss. The `ValueError`-from-config boundary remains pinned.
 
-**Acceptance**: a future Anthropic CLI shape change produces a single recoverable failure per agent rather than a 2-of-3 catastrophic loss. The test suite still pins the ``ValueError``-from-config boundary so configuration errors do not silently retry.
-
-**Why deferred**: zero observed cost today. Caspar flagged it during the 2.2.4 self-review (W3) as a known asymmetry; if a production incident surfaces, this becomes the 2.2.5 patch with the same TDD shape as 2.2.4.
-
-**Why deferred**: this is the kind of refactor that warrants a minor release (2.3.0) and a brainstorm session because it touches the hottest async path. Doing it inside a patch would conflate behaviour-preserving work with behaviour-defining work and make any future bisect harder. Telemetry from the 2026-05-15 routine should also land first — it may suggest specific tracker responsibilities (per-agent budget, retry-count) that the refactor should accommodate from day one.
+**Why deferred**: zero observed cost today. If a production incident surfaces, this becomes the next patch with the same TDD shape as 2.2.4.
 
 ### `synthesize` import gap for code outside `skills/magi/scripts/` — `[LOCKED]`
 
-**What**: `synthesize.py` (and the rest of the orchestration modules) live in `skills/magi/scripts/`. That directory is **not** a standard importable package — `conftest.py:34-36` injects it into `sys.path` at pytest startup, the entry-point scripts (`run_magi.py`, `synthesize.py`, `parse_agent_output.py`) now self-inject their own directory via a 4-line bootstrap at module top (covers `python -m skills.magi.scripts.<name>` invocations), and direct invocation (`python skills/magi/scripts/<name>.py`) is covered automatically by Python's script-dir injection. Any **non-entry-point** module created outside `skills/magi/scripts/` — e.g., scratch tooling, experiment scaffolds, future packaging additions — fails with `ImportError: No module named 'synthesize'` unless the operator either prepends `PYTHONPATH=skills/magi/scripts` or applies the same bootstrap snippet locally.
+`synthesize.py` and the other orchestration modules live in `skills/magi/scripts/`, which is **not** a standard importable package. `conftest.py:34-36` injects it into `sys.path` for tests; the entry-point scripts (`run_magi.py`, `synthesize.py`, `parse_agent_output.py`) self-inject their own directory via a 4-line bootstrap at module top (covers `python -m skills.magi.scripts.<name>`); direct invocation is covered by Python's script-dir injection.
 
-**Discovered**: 2026-05-14 during the premortem A/B experiment (see the Post-release hardening entry below). The experiment scaffold at `experiments/premortem/` lived outside `skills/magi/scripts/` and needed `from synthesize import ValidationError`. Every `python -m experiments.premortem.*` invocation required the `PYTHONPATH=skills/magi/scripts` prefix as a workaround. The branch was rejected and the scaffold deleted; the in-tree entry points were hardened in the same release; the underlying convention-coupling for *new* outside callers remains.
+Any **non-entry-point** module created outside `skills/magi/scripts/` fails with `ImportError: No module named 'synthesize'` unless the operator prepends `PYTHONPATH=skills/magi/scripts` or applies the bootstrap.
 
-**Why it is debt**: as soon as any future code on `main` lives outside `skills/magi/scripts/` and needs to import from there, the same friction returns. Operators forget the prefix, CI scripts forget it, documentation has to call it out, and the failure mode (ImportError on a real-looking package name) is opaque to anyone who doesn't know the conftest trick.
+**Discovered**: 2026-05-14 during the rejected premortem A/B experiment (`experiments/premortem/`). Branch was deleted; the underlying convention-coupling for new outside callers remains.
 
-**Fix (LOCKED — implement in the next release that adds code outside `skills/magi/scripts/`)**:
-
-Add this 3-line bootstrap at the top of any new module that imports from the orchestration layer, **before** the first `from synthesize import ...` (or any other import from that directory):
+**Fix (LOCKED — implement when needed)**: add this bootstrap at the top of any new outside-callers module, **before** the first `from synthesize import ...`:
 
 ```python
 import sys
@@ -458,164 +350,113 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[N] / "skills" / "magi" / "scripts"))
 ```
 
-Where `N` is the number of parent directories from the importing module up to the repo root. For a module at `experiments/<topic>/foo.py`, `N=2`. For a module at `tools/foo.py`, `N=1`. The path must be added before the project import that needs it; standard PEP 8 import-block ordering is unchanged (stdlib → third-party → first-party).
+Where `N` is parent-directories up to the repo root. `experiments/<topic>/foo.py` → N=2; `tools/foo.py` → N=1. Standard PEP 8 import-block ordering is unchanged.
 
-**Alternatives considered and rejected**:
+**Rejected alternatives**: full packaging (invasive — touches plugin distribution + CI); conftest-style side-effect helper (magic import, only worth it with 3+ consumers); restructuring `synthesize.py` location (invasive — every existing import + agent-prompt reference needs updating).
 
-- **Make `skills/magi/scripts/` a real package via `pyproject.toml` entry points or `pip install -e .`**. Invasive — touches the plugin distribution model, requires updating CI, breaks the existing flat-import convention that `run_magi.py` and the tests rely on. Disproportionate to the use case.
-- **Conftest-style helper module imported for its side effect (e.g., `from experiments import _path_setup`)**. Marginally cleaner than the 3-line bootstrap for cases with multiple consumers, but adds a magic import and a side-effecting module to the codebase. Only adopt if there are 3+ consumers in the same subtree.
-- **Restructure `synthesize.py` into a proper package location**. Invasive — every existing import (`from synthesize import …` in tests and `run_magi.py`) would need updating, and the agent prompts that reference module names would need synchronisation. Not worth it.
+**Acceptance**: next outside-caller module on `main` carries the bootstrap. Its README documents `python -m <module>` directly. No new conftest hacks.
 
-**Acceptance**: the next module on `main` outside `skills/magi/scripts/` that needs to import from the orchestration layer carries the 3-line bootstrap. Its README documents `python -m <module>` directly without a `PYTHONPATH` prefix. No new conftest hacks are added.
+**Dual-import caveat**: a module loaded via the bootstrap is registered in `sys.modules` under its bare name (e.g., `synthesize`) — same key as in-tree imports. If a caller ALSO does a dotted import (`from skills.magi.scripts.synthesize import ...`), Python treats the two names as distinct cache keys and loads TWO module objects with independent state — globals, class identity checks, singletons diverge silently. Outside callers MUST keep imports under the bare name. Same constraint applies to the 2.2.8 entry-point hardening.
 
-**Dual-import caveat for outside callers**: a module loaded via the bootstrap is registered in `sys.modules` under its bare name (e.g., `synthesize`) — the same key the in-tree imports use. If a future outside caller ALSO does a dotted import of the same module (e.g., `from skills.magi.scripts.synthesize import ...`), Python treats the two names as distinct cache keys and may load TWO module objects with independent state — global variables, class identity checks, and singleton instances will diverge silently. Outside callers MUST keep their imports under the bare name (`from synthesize import ...`) for consistency with the in-tree convention. The same constraint applies to the entry-point hardening in 2.2.8 (`run_magi.py`, `synthesize.py`, `parse_agent_output.py`): all of their sibling imports are under bare names, so the dual-import hazard is latent today and surfaces only if a future caller violates this rule.
+**Why locked**: architectural decision made (option B from 2026-05-14). Future implementers apply the snippet, don't re-litigate.
 
-**Why locked rather than deferred**: the architectural decision has already been made (option B from the 2026-05-14 analysis). Future implementers should not re-litigate; they should apply the documented snippet. Locking here prevents the next brainstorm session from reopening the same ground.
+## Post-release hardening (changelog)
 
-## Post-release hardening
+Brief release notes preserving load-bearing context. Implementation details live in git history and test docstrings.
 
-### Agent prompt contract reinforcement (all three agents)
+### 2.2.0 — Single-shot agent retry on `ValidationError`
 
-**Context**: A production-log scan across 10 runs × 3 agents (30 extracted outputs, versions 2.0.3 / 2.1.0 / 2.1.1 / 2.1.2 / 2.1.3) found one schema violation: in `magi-run-d48ls1lm` (19-Apr-2026, under 2.1.3), Caspar emitted a well-formed JSON that parsed cleanly with `json.loads` but omitted the required top-level `recommendation` key. The validator correctly raised `ValidationError("Agent output missing keys: ['recommendation']")`, the orchestrator dropped Caspar and set `degraded=true`, and the run completed on Melchior + Balthasar. No downstream corruption; the degraded-mode path worked as designed. Incidence in the sampled corpus: 1/30 ≈ 3.3%, exclusively on Caspar (the most opinionated agent by design, highest output-token pressure).
+`tracked_launch` catches `ValidationError`, emits `retrying` display state, rebuilds prompt via `_build_retry_prompt` (original + `---RETRY-FEEDBACK---` delimiter + error + 7-key schema restatement), re-invokes `launch_agent` with the full `--timeout`. Retry count fixed at 1. Worst-case wall time per retried agent: `2 × --timeout`. `StatusDisplay.VALID_STATES` gains `"retrying"` (UTF-8 glyph `↻`, ASCII `r`). `_UNICODE_PROBE` widened to include `↻`. Non-goals (each pinned by a regression test): retry on subprocess timeout, retry on non-schema exceptions, retry count > 1.
 
-**Fix**: The single-line `IMPORTANT:` closer in every agent system prompt (`melchior.md`, `balthasar.md`, `caspar.md`) now enumerates all seven required top-level keys and states explicitly that any omission causes the output to be rejected and the agent dropped from consensus. The reinforcement is applied to all three agents — not just Caspar — because the failure mode is LLM-schema-drift rather than agent-specific and the identical closer across prompts is easier to audit than a per-agent divergence. This is a probabilistic mitigation: it raises the cost of omission in the prompt, it does not prove omission impossible.
+### 2.2.1 — `retried_agents` telemetry
 
-### Single-shot agent retry on ValidationError (2.2.0)
+`run_orchestrator` records every agent that took the retry path; serialises sorted alphabetically to `retried_agents` in the report. Conditional presence (like `degraded`, `failed_agents`). Downstream can compose `retried_agents - failed_agents` (retry-recovered) and `retried_agents & failed_agents` (retry-also-failed).
 
-**Context**: Prompt reinforcement (above) is probabilistic and cannot drive the schema-drift rate to zero. A targeted retry closes the last gap without widening the schema contract and without paying latency cost on the success path — the retry only fires when `load_agent_output` raises.
+### 2.2.2 — cp1252 retry glyph fallback
 
-**Implementation**: `run_orchestrator.tracked_launch` now wraps `launch_agent` in a nested `try` that catches `ValidationError` only. On catch, the closure (a) emits a new `retrying` display state, (b) rebuilds the prompt via `_build_retry_prompt(original_prompt, error)` — original prompt verbatim + `---RETRY-FEEDBACK---` delimiter + the ValidationError message + a restatement of the 7-key schema — and (c) re-invokes `launch_agent` with the rebuilt prompt and the same per-agent `timeout`. Terminal-state emission (`success` / `timeout` / `failed`) remains on the outer handler pair, so the display invariant "exactly one terminal state per agent" survives the retry branch. If the retry raises anything (`ValidationError` again, `TimeoutError`, `RuntimeError`, `CancelledError`), it flows through the outer handler and the agent is dropped into the pre-existing degraded path.
+`_UNICODE_PROBE` updated so cp1252 streams fall through to ASCII glyphs **before** the first retry, not on it.
 
-**Scope**: retry triggers **only** on `ValidationError`. `TimeoutError`, subprocess exit errors, cancellation, and signals pass through unchanged so the 2.1.x degraded semantics are preserved verbatim. Retry count is fixed at 1 — a second retry is a separate decision.
+### 2.2.3 → 2.2.5 — Analysis-mode default model
 
-**Display**: `StatusDisplay.VALID_STATES` gains `"retrying"`; `_UTF8_GLYPHS.icons` renders it as `↻` and `_ASCII_GLYPHS.icons` as lowercase `r` (lowercase avoids collision with capital `R` in agent/state words — same cosmetic rule the `~`-for-timeout glyph already follows). `_UNICODE_PROBE` was widened to include `↻` so streams that cannot render the retry glyph fall back to the ASCII glyph set **before** the first retry, not on it.
+- 2.2.3: switched `MODE_DEFAULT_MODELS["analysis"]` to `sonnet` for cost relief.
+- 2.2.5: reverted to `opus`. Production data showed Caspar (longest output, 3.6-6.7K tokens) failed in ≥33% of sbtdd verifications under sonnet's ~8K max-output ceiling. 2.2.4 retry could not recover because the failure was structural, not stochastic. Losing Caspar specifically biases consensus toward false-positive approval — the adversarial lens disappears, so `GO_WITH_CAVEATS (2-0)` from Mel+Bal is structurally different from a clean 3-agent result. Cost reverts to ~$0.75/run for bare-`analysis`. `MODE_DEFAULT_MODELS` plumbing preserved for future per-mode work.
 
-**Budget**: each attempt receives the full `--timeout` ceiling. The retry is not given a reduced budget, and the first attempt's residual time is not carried over. Worst-case wall time per retried agent is therefore `2 × --timeout`; the orchestrator's overall wall time is unchanged for the ~97% of runs where no agent retries.
+Open follow-ups (deferred until the 2026-05-15 telemetry routine surfaces enough data to choose):
 
-**Non-goals (2.2.0)**: retry on subprocess timeout, retry on non-schema exceptions, retry count > 1. Tests guard each non-goal so these behaviors cannot regress silently into scope.
+1. **Per-agent model**: Caspar on opus, Mel/Bal on sonnet. Saves ~$0.30/run; needs per-agent plumbing.
+2. **`--max-tokens` flag** in `launch_agent`: override model default; needs Anthropic CLI option parser.
 
-### Single-shot retry — JSON parse extension (2.2.4)
+### 2.2.4 — Retry extended to `json.JSONDecodeError`
 
-**Trigger**: An iter-2 sbtdd Loop 2 catastrophic failure (post-2.2.3) lost two of three agents to ``json.JSONDecodeError`` raised inside ``parse_agent_output`` BEFORE ``load_agent_output`` could wrap the failure into ``ValidationError``. The 2.2.0 retry only caught ``ValidationError``, so both agents were dropped without a second attempt and synthesis aborted on the 2-agent minimum.
+After an iter-2 sbtdd run lost two of three agents to `JSONDecodeError` raised **before** `load_agent_output` could wrap. `tracked_launch` now catches `(ValidationError, json.JSONDecodeError)`. `_build_retry_prompt` reworded ("rejected by the parsing pipeline") to be accurate for both layers; 7-key schema reminder retained.
 
-**Fix**: ``tracked_launch`` now catches ``(ValidationError, json.JSONDecodeError)`` instead of ``(ValidationError,)``. Both flow through the identical retry path (emit ``retrying``, rebuild prompt with the parser/validator error message, re-launch with a fresh ``--timeout`` budget, fall back to degraded mode if the retry also fails). ``_build_retry_prompt`` was reworded from "failed schema validation" to "rejected by the parsing pipeline" so the corrective message is accurate for both failure classes; the seven-key schema reminder stays because it is useful context regardless of which layer rejected the output.
+Still **out of scope** (each pinned by a regression test): `ValueError` from `resolve_model` or `_extract_text`, `TimeoutError`, `RuntimeError`, `OSError`, `CancelledError`.
 
-**Still out of scope** (each pinned by a regression test): ``ValueError`` from ``resolve_model`` (invalid short name — retry would re-fail identically), ``ValueError`` from ``parse_agent_output._extract_text`` (unrecognised CLI shape — needs a parser update, not a retry), ``TimeoutError``, ``RuntimeError``, ``OSError``, ``asyncio.CancelledError``. The retry net is now wide enough to recover from typical LLM output drift (truncation, malformed braces, schema violations) and narrow enough that configuration/structural errors still surface immediately.
+### 2.2.6 — Windows cp1252 hardening
 
-**Telemetry**: the 2.2.1 ``retried_agents`` field records every agent that took the retry path, regardless of whether the trigger was ``ValidationError`` or ``JSONDecodeError``. Downstream tooling does not need to know which class triggered the retry — only that one fired.
+Two crash sites fixed:
 
-### Analysis-mode default reverted to opus (2.2.5)
+1. **Encode-side**: replaced four `⚠ WARNING` prints with ASCII `[!] WARNING` (U+26A0 is not in cp1252's codepage; `print` raised `UnicodeEncodeError` whenever an agent failed under captured stderr).
+2. **Decode-side**: extracted `_load_input_content(input_arg) -> tuple[str, str]` using `open(..., encoding="utf-8", errors="replace")` so cp1252-only bytes decode as U+FFFD and the run continues.
 
-**Trigger**: After 2.2.4 shipped, the user reported a recurring Caspar-drop pattern in sbtdd Loop verifications: each verification runs MAGI three times, and **at least one of the three drops Caspar to a degraded(2,0)** result. The 2.2.0 retry + 2.2.4 JSON-parse extension fired correctly but could not recover Caspar because the failure was structural, not stochastic — the second attempt under the same model hit the same output-token ceiling.
+Em-dash U+2014 left intact — cp1252 encodes it at 0x97.
 
-**Why Caspar specifically**: Caspar is adversarial by design (longest reasoning, most findings, densest critique). Across the captured ``magi-report.json`` corpus, Caspar's output token count ranged 3620-6691 — 2-3× larger than Melchior's or Balthasar's. Under the 2.2.3 sonnet default, that put Caspar at 50-87% of the ~8K max-output ceiling for analysis-mode runs. Variance under sbtdd's larger inputs was enough to push Caspar over the cliff while Mel/Bal completed comfortably.
+### 2.2.7 — UTF-8 console reconfigure
 
-**Why this is not just a degraded-result issue**: losing Caspar specifically biases consensus toward false-positive approval. ``GO_WITH_CAVEATS (2-0)`` from Mel+Bal is structurally different from ``GO_WITH_CAVEATS (2-0)`` with Caspar dissent — the surviving two are the constructive lenses, the missing one is the adversarial one. sbtdd's "F's auto-recovery is for N=1 only" cannot save this because synthesis succeeds with two agents; the only fix that restores quality is preventing the drop in the first place.
+`_enable_utf8_console_io()` is the **first** statement in `main()`. On `win32`, switches `sys.stdout`/`sys.stderr` to `encoding="utf-8"` with `errors="backslashreplace"` via `stream.reconfigure()`. `backslashreplace` is the non-negotiable error policy — produces ASCII so output is encodable in any codepage. No-op on POSIX. Streams without `reconfigure` (custom sinks, pytest capture) silently skipped.
 
-**Fix**: ``MODE_DEFAULT_MODELS["analysis"]`` flipped from ``"sonnet"`` back to ``"opus"``. Restores the 32K max-output budget and gives Caspar the room it needs. Cost reverts from ~$0.20/run to ~$0.75/run for bare-``analysis`` invocations; the cost-saving rationale of 2.2.3 was empirically refuted by the failure rate observed in production.
+Supersedes 2.2.6's whack-a-mole: fixes the channel itself so any LLM-emitted Unicode in finding titles survives without per-codepoint patches. The 2.2.6 ASCII markers stay — they read cleaner than escape-sequence noise.
 
-**Tripwire activation**: this revert fired the policy documented in ``memory/routine_telemetry_post_2.2.1.md`` ("Observation policy in effect") by sustained evidence rather than the literal "n=2 iter-2-style" letter. The observed pattern (≥33% Caspar drop per verification, structural cause) was decisive enough to act ahead of the 2026-05-15 telemetry routine.
+### 2.2.8 — Entry-point hardening for `python -m`
 
-**MAGI self-review skipped on this commit by design** (precedent for similar reverts): the change restores a configuration that ran successfully through the 0.x.x → 2.2.2 release range, is mechanical from the behaviour-history standpoint, and the decision criteria are baked into the test docstring + the ``models.py`` rationale comment so a future bisector reconstructs the reasoning without the MAGI artifact. The standard "Pre-merge MAGI self-review" procedure exists to catch architectural surprise on forward-going behaviour changes; running it on a documented revert to a known-stable state would be ceremony.
+`run_magi.py`, `synthesize.py`, `parse_agent_output.py` self-inject their own directory at module top via a 4-line `sys.path` bootstrap. Covers `python -m skills.magi.scripts.<name>` invocations. Pinned by 6 parametrized subprocess tests in `tests/test_entry_point_invocation.py`. Direct-script invocation is covered automatically by Python's script-dir injection.
 
-**Still open after 2.2.5**: the cost-saving question for ``analysis``. Sonnet 4.6 may match opus on quality but it cannot fit Caspar's full output today. Two paths the 2026-05-15 telemetry routine should inform:
-1. **Per-agent model differentiation**: Caspar on opus, Mel/Bal on sonnet. Saves ~$0.30/run vs full opus while preserving Caspar's output budget. Requires per-agent model plumbing (currently the orchestrator passes one model for all three).
-2. **Output-budget plumbing**: a ``--max-tokens`` flag in ``launch_agent`` that overrides the model default. Lets operators raise the sonnet budget on Caspar specifically without changing models. Requires a parser for the Anthropic CLI's ``--max-tokens`` option.
+### Agent prompt schema-key reinforcement
 
-Both are deferred until the routine surfaces enough data to choose between them.
-
-### Windows cp1252 hardening (2.2.6)
-
-**Trigger**: when MAGI runs as a subprocess on Windows (e.g., sbtdd's ``subprocess.run(..., capture_output=True)``), the captured ``sys.stderr`` inherits the system locale encoding — cp1252 by default. Two reproducible crash sites surfaced:
-
-1. **Encode-side**: four ``print(f"⚠ WARNING: ...", file=sys.stderr)`` sites in ``run_orchestrator``. The warning sign U+26A0 is **not** in cp1252's codepage (cp1252 covers U+0000-U+00FF plus a 0x80-0x9F extension; U+26A0 is outside). Python's ``print`` calls ``encode(errors='strict')`` and raises ``UnicodeEncodeError``, crashing the orchestrator before the report can be written. Triggered every time an agent fails — under the ≥33% Caspar drop pattern reported pre-2.2.5, this fired routinely.
-
-2. **Decode-side**: ``open(args.input, encoding="utf-8")`` in ``main()``. Any input file written by Windows tooling with the default cp1252 encoding (Notepad, VS Code without explicit BOM, Python's ``open()`` on Windows without ``encoding=``) raises ``UnicodeDecodeError`` on the first byte ≥0x80 that is not a valid UTF-8 start byte (e.g., the cp1252 em dash 0x97).
-
-**Fix**:
-
-* Encode-side: replaced the four ``⚠`` warning signs with ASCII ``[!]`` markers. ASCII is encodable in any codepage — bulletproof. The em dashes (U+2014) were left intact because cp1252 *does* encode them at byte 0x97; they were never the crash trigger.
-* Decode-side: extracted ``main()``'s inline file-reading block into a new module-level helper ``_load_input_content(input_arg) -> tuple[str, str]``. The helper uses ``open(..., encoding="utf-8", errors="replace")`` so cp1252-only bytes are decoded as U+FFFD and the run continues. The MAX_INPUT_FILE_SIZE check moved into the helper as a ``ValueError`` raise; ``main()`` catches it and exits with the operator-friendly error message.
-
-**Out of scope by design** (deferred until evidence justifies):
-
-* Reconfiguring ``sys.stdout`` / ``sys.stderr`` to UTF-8 with ``errors="backslashreplace"`` at startup. Would bulletproof against any LLM-emitted unicode in finding titles surfacing through ``format_report``, but changes the output bytes contract for parents that captured stdout assuming the locale encoding. The risk is theoretical (LLM output is overwhelmingly English technical prose with em dashes that DO encode in cp1252) and the change touches every output path. If LLM-unicode crashes appear, address with a 2.2.7 patch and a focused test.
-* Encoding-detection fallback (try UTF-8 first, fall back to cp1252) for input files. Would avoid U+FFFD artifacts in cp1252 source files. Same as above — defer until artifacts in production reviews are noisy enough to justify the chain.
-
-**MAGI self-review skipped on this commit by design** (precedent established in 2.2.5 release): the change is mechanical (string replacements + one ``errors=`` keyword + a refactor that preserves behaviour modulo decode-tolerance), the crash modes are reproduced and pinned by tests, and the standardised pre-merge MAGI procedure (CLAUDE.md "Pre-merge MAGI self-review") allows skipping when ``hotfix where time-to-mitigate dominates``. The user reported active production crashes; a $0.75 self-review on a deterministic 4-line + 1-refactor change would be ceremony.
-
-**Telemetry follow-up (2.2.1)**: ``run_orchestrator`` now records every agent that hit the retry path in a closure-captured set and serialises it to the report under the new ``retried_agents`` key. The key follows the same conditional-presence convention as ``degraded`` and ``failed_agents``: omitted entirely on clean runs, sorted alphabetically when present so the JSON is byte-stable. Downstream consumers can compose ``retried_agents - failed_agents`` for the retry-recovered cohort and ``retried_agents & failed_agents`` for retry-also-failed. This closes the 2.2.0 blind spot where successful retries were indistinguishable from clean first-attempt runs and is what makes the post-release fault-rate decision criterion measurable.
-
-### UTF-8 console reconfigure (2.2.7)
-
-**Trigger**: 2.2.6 closed the immediate cp1252 crash sites (the four ``⚠`` warning signs and the input-file decode), but left ``sys.stdout`` / ``sys.stderr`` themselves bound to the locale-derived wrapper Python gives child processes on Windows. The 2.2.6 OOS section explicitly flagged this as deferred *"until evidence justifies"*. Evidence arrived: the user reported recurring crashes when MAGI runs under Windows captures and the LLM emits non-cp1252 codepoints in finding titles (``→``, ``≥``, curly quotes — none of which are in cp1252's 256-codepoint range). The 2.2.6 ASCII-marker swap could not address this because the codepoints come from LLM output, not from MAGI's own format strings.
-
-**Fix**: a new helper ``_enable_utf8_console_io()`` runs as the **first** statement in ``main()``, before ``parse_args`` and any ``print``. On ``sys.platform == "win32"`` it switches both ``sys.stdout`` and ``sys.stderr`` to ``encoding="utf-8"`` with ``errors="backslashreplace"`` via ``stream.reconfigure()``. ``backslashreplace`` is the non-negotiable error policy — ``strict`` is what crashed in the first place, ``ignore`` would silently drop diagnostic content, ``replace`` substitutes U+FFFD which is itself non-ASCII and thus pointless under cp1252, while ``backslashreplace`` always produces ASCII output (``⚠``) so the printed bytes are guaranteed encodable in any codepage. On non-Windows platforms the helper is a no-op — POSIX shells already default to UTF-8 and forcing the encoding would change the byte contract for parents that captured stdout assuming the locale-derived encoding. Streams that lack ``reconfigure`` (custom logger sinks, buffer proxies, pytest capture wrappers) are skipped silently rather than crashed.
-
-**Why this supersedes 2.2.6's whack-a-mole pattern**: 2.2.6 fixed each individual crash site by removing the offending codepoint from MAGI's own format strings. That works for codepoints MAGI controls, but not for codepoints the LLM emits via ``format_report`` finding titles. 2.2.7 fixes the channel itself, so any LLM-emitted Unicode survives without a per-codepoint patch. The 2.2.6 ASCII markers (``[!]``) stay — they are still preferable to ``⚠`` even with backslashreplace because they read cleanly without escape-sequence noise.
-
-**Still out of scope by design** (each pinned by a regression test):
-
-* Encoding-detection fallback for input files (try UTF-8 first, fall back to cp1252). Would avoid U+FFFD artifacts in cp1252 source files. Defer until artifacts in production reviews are noisy enough to justify the chain.
-* ``PYTHONIOENCODING`` environment variable propagation to subprocesses. The ``claude`` subprocesses already read prompts via stdin (post-R1-1), and their stdout is captured as bytes in ``launch_agent``. The reconfigure here covers the orchestrator's own output paths only.
-* Removing the 2.2.6 ASCII markers (``[!]`` warnings, ``--`` em-dash replacements). They are correct and readable; reverting them would not improve anything.
-
-**MAGI self-review skipped on this commit by design**: the change is a single helper plus a one-line call site, both pinned by six tests covering platform gating, encoding choice, missing-reconfigure tolerance, end-to-end non-cp1252 print survival, and call-order-before-print invariant. The standardised pre-merge MAGI procedure (CLAUDE.md "Pre-merge MAGI self-review") allows skipping mechanical hardening commits where the test surface fully encodes the behavioural commitment; a $0.75 self-review here would be ceremony.
+Production-log scan (10 runs × 3 agents, 30 outputs) found one schema violation (Caspar, 2026-04-19, missing `recommendation`). Incidence 1/30 ≈ 3.3%, exclusively on Caspar. The `IMPORTANT:` closer in all three agent prompts now enumerates the seven required top-level keys and states explicitly that omission causes rejection. Applied to all three — failure mode is LLM-schema-drift, not agent-specific.
 
 ### Premortem A/B experiment for Caspar — rejected (2026-05-14)
 
-**Context**: A proposed addition of a "premortem frame" to `caspar.md` (encouraging Caspar to project six months into a failed future and write findings as past-tense post-mortem events) was tested via a pre-registered A/B experiment against 16 real code-review inputs harvested from SBTDD's `.magi_review_input/`. Hypothesis: premortem increases findings' episodic specificity (longer past-tense detail fields, more distinct failure modes, higher judge-rubric score on a 1-5 specificity rubric). The full spec, plan, and code lived on branch `premortem` — scheduled for deletion 2026-05-29; until then it is the audit artifact.
+Tested adding a "premortem frame" to `caspar.md` (project six months into a failed future, write findings as past-tense post-mortem). N=16 paired inputs from sbtdd's `.magi_review_input/`.
 
-**Methodology amendment during the experiment**: the original spec §7.2 proposed paired-by-title judge comparison (rate equivalent baseline+treatment findings as a pair). The 2-input smoke run found **zero matched title pairs** — the premortem prompt changes how findings are named enough that title-based dedup collapses. The judge step was amended to **per-finding individual rating with per-run mean aggregation**, preserving the pairing at the input level (each input contributes one baseline mean and one treatment mean to a paired Wilcoxon). The decision rule structure in spec §9 was untouched. This methodological note is preserved here because the lesson generalises: any future A/B over LLM-prompt variants should not assume title-based pairing survives a strong stylistic intervention.
+| Metric | Baseline | Treatment | Cliff's δ | Wilcoxon p |
+|---|---:|---:|---:|---:|
+| length (words) | 504.4 | 616.9 (+22%) | 0.289 | **0.0019** |
+| past-tense density | 0.0365 | 0.0362 | 0.055 | 0.717 |
+| unique findings | 6.0 | 6.0 | −0.090 | 0.878 |
+| judge specificity (1-5) | 2.584 | 2.691 | 0.148 | 0.258 |
 
-**Results (n=16 paired)**:
+Technical rule: `inconclusive` (judge δ=0.148 crossed the 0.147 small-effect cutoff by 0.001). **Operator rejected** because length +22% with flat density/unique findings matches the "more reasons, not better reasons" Mitchell-trap shape, and the judge effect is at noise floor (Wilcoxon p=0.258). +22% Opus tokens not justified.
 
-| Metric | Baseline mean | Treatment mean | Cliff's δ | Wilcoxon p | Effect (treatment direction) |
-|---|---:|---:|---:|---:|---|
-| length (words) | 504.4 | 616.9 (+22%) | 0.289 | **0.0019** | small, treatment_greater |
-| past-tense density | 0.0365 | 0.0362 | 0.055 | 0.717 | negligible |
-| unique findings | 6.0 | 6.0 | −0.090 | 0.878 | negligible (baseline_greater) |
-| judge specificity (1-5) | 2.584 | 2.691 (+0.107) | 0.148 | 0.258 | small, treatment_greater |
+**Methodology amendment preserved**: title-based judge pairing failed (zero matched pairs after 2-input smoke). Replaced with per-finding individual rating + per-run mean aggregation, preserving input-level pairing for Wilcoxon. **Generalisation**: any future LLM-prompt A/B should not assume title-based pairing survives stylistic interventions.
 
-**Decision rule outcome**: `inconclusive` per the pre-registered §9 (judge crossed the δ ≥ 0.147 small-effect threshold by exactly 0.001; no mechanistic metric won at the medium δ ≥ 0.330 level). Operator override after manual review: **reject**. Rationale:
+**Cost calibration**: ~$26 total (Opus 32 × ~$0.50 + Haiku 196 × ~$0.04). Haiku per-call via `claude -p` ≈ $0.04 (Claude Code context priming inflates input tokens), not the bare-API $0.001.
 
-- Length grew +22% (Wilcoxon p=0.0019) but density was flat (δ=0.055) and unique findings tied (δ=−0.090). The composition matches the Mitchell-trap shape ("more reasons, not better reasons") even though the technical gate was crossed.
-- The judge effect is at the floor of detection: δ=0.148 vs the 0.147 cutoff = 0.001 above. Wilcoxon p=0.258 is not statistically distinguishable from noise.
-- A +22% output-token cost in production (which translates to ~+22% in Opus billing for any future production adoption) is not justified by a marginal, statistically uncertain specificity gain.
-- Qualitative spot-checks during the smoke showed the prompt **does** engage ("premortem projection — six months from now ... I walked three failure stories" framing appears in treatment outputs), and the treatment surfaces some concerns the baseline misses. But the gain is small enough at corpus scale that the cost/benefit favours not shipping the change.
+**Branch fate**: `premortem` kept local-only on the operator's machine until 2026-05-29 for raw-data inspection (16 baseline + 16 treatment JSONs + judge scores + results.json + report.md under `experiments/premortem/`). Never pushed to origin. After 2026-05-29 operator runs `git branch -D premortem` locally. No automated scheduling — operator's calendar reminder. This entry is the durable record.
 
-**Cost reconciliation**: total ~$26 across two smoke iterations and the full run (Opus 32 × ~$0.50 = ~$16; Haiku 196 judge invocations × ~$0.04 = ~$8; smoke overhead ~$2). Original budget was $15-20 — the Haiku per-call cost was higher than estimated due to Claude Code context priming inflating input tokens beyond the bare-rubric size. Useful calibration point for future LLM-judge experiments: budget $0.04/call for Haiku invoked through `claude -p`, not the bare-API $0.001/call rate.
-
-**Branch fate**: `premortem` is kept alive **locally only** on the operator's machine until 2026-05-29 for any inspection of the raw data (16 baseline + 16 treatment JSONs, judge scores, results.json, report.md — all under `experiments/premortem/` on that branch). The branch was deliberately not pushed to `origin` (no rejected-experiment code on the public marketplace mirror). After 2026-05-29 the operator runs `git branch -D premortem` locally. No automated scheduling exists for this deletion — remote routines cannot reach a local working tree, and the plugin has no local-cron equivalent; the operator is responsible for the manual cleanup via a calendar reminder. This CLAUDE.md entry is the durable record after deletion.
-
-**Why this entry exists**: protects against re-litigation. The proposal "should we add premortem to Caspar" was tested at proper scale with pre-registered metrics and a pre-registered decision rule. The answer was no. Future sessions that re-raise the idea should be pointed here; only new evidence (e.g., a different judge rubric, a structural Caspar change, a different corpus) justifies re-running.
-
-**Methodological precedents preserved**:
-
-- Per-finding judge rating with per-run mean aggregation (the smoke amendment) is the correct shape for prompt-variant A/B work over LLM outputs. Title-based pairing is brittle to stylistic interventions and should not be assumed.
-- The decision rule's Mitchell-trap row (length wins without judge winning → reject) is load-bearing and was within 0.001 of firing here. Even when it does not technically fire, the composition (length up, density/unique flat) is a soft Mitchell signal that operator-level review can apply.
+**Why this entry exists**: protect against re-litigation. The proposal was tested at scale with pre-registered metrics. Future sessions raising the idea should be pointed here; only new evidence (different rubric, structural Caspar change, different corpus) justifies re-running.
 
 ## Breaking changes (2.0.0)
 
-- **`GO WITH CAVEATS` now renders with an `(N-M)` split suffix** (e.g., `GO WITH CAVEATS (3-0)`, `GO WITH CAVEATS (2-1)`). The flat form from 1.x is no longer produced. Downstream parsers that grep the banner for an exact `GO WITH CAVEATS` string must tolerate the trailing split.
-- **`consensus.conditions[*].condition` is now sourced from each conditional agent's `summary`**, not from `recommendation`. Consumers that rendered the `condition` field and the `recommendations` map side-by-side will stop seeing duplicated text; any consumer that relied on the duplication must switch to reading `recommendations[agent]` explicitly.
-- **`validate.clean_title` is a public symbol** (previously `_clean_title`). Existing imports of the private form must be updated. The same helper is re-exported through `synthesize.clean_title`.
-- **`StatusDisplay._write_plain_event` raises `RuntimeError`** (previously `AssertionError`) when invoked under ANSI mode. The invariant now survives `python -O`.
+- `GO WITH CAVEATS` now renders with `(N-M)` split suffix (e.g., `GO WITH CAVEATS (3-0)`). Downstream parsers grepping for an exact flat string must tolerate the trailing split.
+- `consensus.conditions[*].condition` is sourced from each conditional agent's `summary`, not `recommendation`. Consumers relying on the duplication must switch to `recommendations[agent]`.
+- `validate.clean_title` is public (previously `_clean_title`). Re-exported through `synthesize.clean_title`.
+- `StatusDisplay._write_plain_event` raises `RuntimeError` (previously `AssertionError`) when invoked under ANSI mode. Invariant survives `python -O`.
 
 ## Breaking changes (1.1.0)
 
-- **`## Consensus Summary` section removed** from `format_report` output. The rendered report now goes straight from the banner to `## Key Findings`. The `consensus.majority_summary` field remains available in the JSON report for downstream consumers — parse that instead of grepping the rendered markdown.
-- **`## Dissenting Opinion` shows `summary` only**, not the full `reasoning` field. The full reasoning is preserved in the JSON report and in each agent's raw output file under the run's temp directory.
+- `## Consensus Summary` section removed from `format_report` output. Banner → `## Key Findings` directly. `consensus.majority_summary` field remains in JSON for downstream consumers — parse that, don't grep markdown.
+- `## Dissenting Opinion` shows `summary` only, not full `reasoning`. Full reasoning preserved in JSON and raw agent output files.
 
 ## Dependencies
 
 | Component | Required | Notes |
 |-----------|----------|-------|
-| Claude Code CLI (`claude -p`) | For parallel mode | Fallback available without it |
-| Python 3.9+ | Yes | Uses `dict[str, Any]` syntax, `asyncio` |
-| pytest + pytest-asyncio | Dev only | Test suite requires async test support |
-| ruff | Dev only | Linting and formatting |
-| mypy | Dev only | Type checking (strict mode) |
+| Claude Code CLI (`claude -p`) | For parallel mode | Fallback available |
+| Python 3.9+ | Yes | `dict[str, Any]`, `asyncio` |
+| pytest + pytest-asyncio | Dev only | Async tests |
+| ruff | Dev only | Lint + format |
+| mypy | Dev only | Strict mode |
 
 ## License
 
