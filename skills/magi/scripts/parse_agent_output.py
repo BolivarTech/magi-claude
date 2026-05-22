@@ -154,6 +154,15 @@ def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
     :class:`RecursionError` from a deeply nested candidate is treated like a
     decode failure (skip the candidate) rather than aborting the scan.
 
+    Known residual (single-match fabrication): when exactly one verdict-shaped
+    object decodes but it is NOT the real verdict — a quoted example beside a
+    truncated real verdict, an early echo with the real verdict beyond the
+    probe cap, or a lone echoed example — it is recovered and a fabricated
+    ``approve`` can reach consensus. The durable fix is a verdict
+    sentinel/delimiter (or Option C). See CLAUDE.md "Durable verdict-recovery
+    fix". Do not add more heuristic tuning here; the next change should be the
+    sentinel.
+
     Args:
         text: Text that may contain a verdict object embedded in prose.
 
