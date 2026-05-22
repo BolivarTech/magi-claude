@@ -10,6 +10,7 @@ import tempfile
 
 from review_context import enrich_code_review_context, _git_toplevel, _tree_is_clean
 from review_context import _contains_diff, _extract_touched_files, _read_file_safe
+from review_context import _git_diff
 
 
 def _init_repo(repo: str) -> None:
@@ -168,3 +169,19 @@ class TestTouchedFiles:
             )
             content, note = enrich_code_review_context(dup, repo_root=repo)
             assert content.count("### pkg.py\n") == 1  # not duplicated
+
+
+class TestAutoCompute:
+    def test_no_input_diff_autocomputes(self):
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            content, _ = enrich_code_review_context(
+                "Review the branch.", repo_root=repo, base_ref="main"
+            )
+            assert "## Touched files (full content)" in content
+            assert "def added():" in content
+
+    def test_bad_base_returns_none(self):
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            assert _git_diff(repo, "no-such-ref") is None

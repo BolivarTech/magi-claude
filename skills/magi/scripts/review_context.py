@@ -263,6 +263,23 @@ def _collect_touched(
     return touched, mismatched
 
 
+def _git_diff(repo_root: str, base_ref: str) -> "str | None":
+    """Return the output of ``git diff <base_ref>...HEAD``, or None on failure.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        base_ref: The base git ref to compare against HEAD.
+
+    Returns:
+        The diff text if the command succeeds and produces output, otherwise
+        None (non-zero exit code, git unavailable, bad ref, or empty diff).
+    """
+    rc, out = _git(repo_root, "diff", f"{base_ref}...HEAD")
+    if rc != 0:
+        return None
+    return out or None
+
+
 def _enrich(
     input_content: str, repo_root: str | None, base_ref: str, max_chars: int
 ) -> tuple[str, str]:
@@ -282,7 +299,7 @@ def _enrich(
         return input_content, "enrichment skipped (not a git repo)"
     if not _tree_is_clean(root):
         return input_content, "enrichment skipped (working tree not clean / not at HEAD)"
-    diff_text = input_content if _contains_diff(input_content) else None
+    diff_text = input_content if _contains_diff(input_content) else _git_diff(root, base_ref)
     if not diff_text:
         return input_content, "enrichment skipped (no diff context)"
     cache: dict[str, str | None] = {}
