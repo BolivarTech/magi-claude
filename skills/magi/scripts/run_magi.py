@@ -56,6 +56,7 @@ from temp_dirs import (  # noqa: E402
     cleanup_old_runs,
     create_output_dir,
 )
+from review_context import enrich_code_review_context  # noqa: E402
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
 
 # Public star-import contract. Underscore-prefixed symbols from
@@ -131,7 +132,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_false",
         help="Disable the live status tree display",
     )
-    parser.set_defaults(show_status=True)
+    parser.add_argument(
+        "--base",
+        default="main",
+        help="Base ref for code-review context enrichment (default: main)",
+    )
+    parser.add_argument(
+        "--no-enrich",
+        dest="enrich",
+        action="store_false",
+        help="Disable code-review context enrichment (use for untrusted PRs)",
+    )
+    parser.add_argument(
+        "--enrich-max-chars",
+        type=int,
+        default=512_000,
+        help="Max chars of enriched code-review context (default: 512000)",
+    )
+    parser.set_defaults(show_status=True, enrich=True)
     args = parser.parse_args(argv)
     # ``--keep-runs 0`` is ambiguous: a naive reading is "keep nothing"
     # (wipe), but the legacy contract for ``cleanup_old_runs(keep)`` treats
@@ -445,6 +463,44 @@ def _load_input_content(input_arg: str) -> tuple[str, str]:
     return input_arg, "Inline input"
 
 
+def _maybe_enrich(
+    mode: str,
+    content: str,
+    *,
+    base_ref: str,
+    enrich: bool,
+    max_chars: int,
+) -> tuple[str, str | None]:
+    """Enrich code-review input; pass-through otherwise. Boundary fail-safe —
+    never raises into the orchestrator.
+
+    Only applies enrichment for ``code-review`` mode when ``enrich`` is
+    ``True``. All other modes and ``--no-enrich`` receive the original
+    content unchanged with ``None`` as the note.
+
+    Args:
+        mode: Analysis mode (e.g. "code-review", "design", "analysis").
+        content: The loaded input content to potentially enrich.
+        base_ref: Git base ref for diff enrichment (e.g. "main").
+        enrich: Whether enrichment is enabled (``False`` when ``--no-enrich``
+            was passed).
+        max_chars: Maximum characters allowed for the enriched output.
+
+    Returns:
+        Tuple ``(content, note)`` where ``content`` is the (possibly
+        enriched) prompt body and ``note`` is a human-readable description
+        of the enrichment action, or ``None`` if no enrichment occurred.
+    """
+    if mode != "code-review" or not enrich:
+        return content, None
+    try:
+        return enrich_code_review_context(
+            content, repo_root=os.getcwd(), base_ref=base_ref, max_chars=max_chars
+        )
+    except Exception as exc:  # noqa: BLE001 — boundary fail-safe
+        return content, f"enrichment skipped (boundary error: {exc!r})"
+
+
 async def run_orchestrator(
     agents_dir: str,
     prompt: str,
@@ -692,6 +748,14 @@ def main() -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    input_content, enrich_note = _maybe_enrich(
+        args.mode,
+        input_content,
+        base_ref=args.base,
+        enrich=args.enrich,
+        max_chars=args.enrich_max_chars,
+    )
+
     try:
         prompt = build_user_prompt(args.mode, input_content)
     except InvalidInputError as exc:
@@ -721,6 +785,8 @@ def main() -> None:
     print("+==================================================+")
     print(f"|  Mode: {args.mode}")
     print(f"|  Input: {input_label}")
+    if enrich_note is not None:
+        print(f"|  Context: {enrich_note}")
     print(f"|  Model: {args.model} ({MODEL_IDS[args.model]})")
     print(f"|  Timeout: {args.timeout}s")
     print(f"|  Output: {output_dir}")

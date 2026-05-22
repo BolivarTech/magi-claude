@@ -2785,3 +2785,55 @@ class TestInputLabelBannerRegression:
             "the Balthasar 2026-05-16 finding. If you intentionally refactored "
             "the banner, update this pin to match the new rendering."
         )
+
+
+class TestEnrichIntegration:
+    """Task 7: fail-safe code-review enrichment wired into run_magi."""
+
+    def test_args_defaults(self):
+        import run_magi
+
+        a = run_magi.parse_args(["code-review", "in.txt"])
+        assert a.base == "main" and a.enrich is True and a.enrich_max_chars == 512_000
+
+    def test_no_enrich(self):
+        import run_magi
+
+        assert run_magi.parse_args(["code-review", "x", "--no-enrich"]).enrich is False
+
+    def test_codereview_calls_lib(self, monkeypatch):
+        import run_magi
+
+        seen = {}
+
+        def fake(c, **kw):
+            seen.update(kw)
+            return c + "\n[E]", "enriched: 1 file(s)"
+
+        monkeypatch.setattr(run_magi, "enrich_code_review_context", fake)
+        out, note = run_magi._maybe_enrich(
+            "code-review", "D", base_ref="main", enrich=True, max_chars=99
+        )
+        assert "[E]" in out and seen["max_chars"] == 99 and note
+
+    def test_passthrough_design(self, monkeypatch):
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "enrich_code_review_context", lambda *a, **k: ("X", "x"))
+        out, note = run_magi._maybe_enrich(
+            "design", "D", base_ref="main", enrich=True, max_chars=99
+        )
+        assert out == "D" and note is None
+
+    def test_boundary_failsafe(self, monkeypatch):
+        import run_magi
+
+        monkeypatch.setattr(
+            run_magi,
+            "enrich_code_review_context",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")),
+        )
+        out, note = run_magi._maybe_enrich(
+            "code-review", "D", base_ref="main", enrich=True, max_chars=99
+        )
+        assert out == "D" and "error" in note.lower()
