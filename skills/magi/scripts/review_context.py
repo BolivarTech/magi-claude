@@ -428,6 +428,73 @@ def _git_diff(repo_root: str, base_ref: str) -> "str | None":
     return out or None
 
 
+def _assemble(
+    input_content: str,
+    touched: list[tuple[str, str]],
+    defs: list[tuple[str, int, str]],
+    max_chars: int,
+) -> tuple[str, str]:
+    """Assemble enriched content within a HARD char budget.
+
+    Input is always kept (may itself exceed max_chars — documented carve-out).
+    Touched files (smallest first) are added before defs; defs are dropped first
+    when over budget. Header and join bytes are accounted up front so
+    ``len(result) <= max_chars`` whenever ``len(input_content) <= max_chars``.
+
+    Args:
+        input_content: The original diff/review text; always preserved in output.
+        touched: List of ``(path, content)`` pairs for files to include.
+        defs: List of ``(path, line_no, excerpt)`` tuples for symbol definitions.
+        max_chars: Hard character budget for the assembled result.
+
+    Returns:
+        A tuple of ``(content, note)`` where note summarises what was kept or
+        omitted.
+    """
+    _TF_HDR = "## Touched files (full content)"
+    _SD_HDR = "## Referenced symbol definitions"
+    _JOIN = 2  # len("\n\n")
+
+    parts: list[str] = [input_content]
+    used = len(input_content)
+    omitted: list[str] = []
+
+    # Sort touched files smallest-first so cheapest blocks are kept preferentially.
+    file_blocks = sorted(
+        ((p, f"### {p}\n```\n{c}\n```") for p, c in touched), key=lambda pb: len(pb[1])
+    )
+    kept_files: list[str] = []
+    for path, block in file_blocks:
+        # Account for join + optional section header on the first file.
+        extra = len(block) + _JOIN + (len(_TF_HDR) + _JOIN if not kept_files else 0)
+        if used + extra <= max_chars:
+            kept_files.append(block)
+            used += extra
+        else:
+            omitted.append(f"file {path}")
+    if kept_files:
+        parts.append(_TF_HDR + "\n\n" + "\n\n".join(kept_files))
+
+    kept_defs: list[str] = []
+    for path, line_no, excerpt in defs:
+        block = f"### {path}:{line_no}\n```\n{excerpt}\n```"
+        extra = len(block) + _JOIN + (len(_SD_HDR) + _JOIN if not kept_defs else 0)
+        if used + extra <= max_chars:
+            kept_defs.append(block)
+            used += extra
+        else:
+            omitted.append(f"def {path}:{line_no}")
+    if kept_defs:
+        parts.append(_SD_HDR + "\n\n" + "\n\n".join(kept_defs))
+
+    if len(parts) == 1:
+        return input_content, "enrichment skipped (nothing within budget)"
+    note = f"enriched: {len(kept_files)} file(s), {len(kept_defs)} def(s)"
+    if omitted:
+        note += f"; omitted {len(omitted)} unit(s) over budget"
+    return "\n\n".join(parts), note
+
+
 def _enrich(
     input_content: str, repo_root: str | None, base_ref: str, max_chars: int
 ) -> tuple[str, str]:
@@ -452,21 +519,14 @@ def _enrich(
         return input_content, "enrichment skipped (no diff context)"
     cache: dict[str, str | None] = {}
     touched, mismatched = _collect_touched(root, diff_text, cache)
-    if not touched:
-        note = "enrichment skipped (no readable touched files)"
+    defined = _defined_names([c for _p, c in touched])
+    defs = _grep_defs(root, _candidate_identifiers(diff_text, defined), cache)
+    if not touched and not defs:
+        note = "enrichment skipped (no readable context)"
         if mismatched:
             note = f"enrichment skipped (diff/HEAD mismatch: {len(mismatched)} file(s))"
         return input_content, note
-    sections = ["## Touched files (full content)"]
-    for path, content in touched:
-        sections.append(f"### {path}\n```\n{content}\n```")
-    defined = _defined_names([c for _p, c in touched])
-    defs = _grep_defs(root, _candidate_identifiers(diff_text, defined), cache)
-    if defs:
-        sections.append("## Referenced symbol definitions")
-        for path, line_no, excerpt in defs:
-            sections.append(f"### {path}:{line_no}\n```\n{excerpt}\n```")
-    note = f"enriched: {len(touched)} file(s), {len(defs)} def(s)"
-    if mismatched:
+    content, note = _assemble(input_content, touched, defs, max_chars)
+    if mismatched and content != input_content:
         note += f"; {len(mismatched)} file(s) skipped (diff/HEAD mismatch)"
-    return input_content + "\n\n" + "\n\n".join(sections), note
+    return content, note

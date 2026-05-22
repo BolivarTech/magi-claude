@@ -12,6 +12,7 @@ from review_context import enrich_code_review_context, _git_toplevel, _tree_is_c
 from review_context import _contains_diff, _extract_touched_files, _read_file_safe
 from review_context import _git_diff
 from review_context import _candidate_identifiers, _grep_defs, _MAX_CANDIDATES
+from review_context import _assemble
 
 
 def _init_repo(repo: str) -> None:
@@ -234,3 +235,38 @@ class TestSymbols:
                 "def helper():" in content
             )  # helper() referenced in the added line, defined cross-file
             assert "def(s)" in note
+
+
+class TestBudgetAndFailSafe:
+    def test_hard_cap_holds_and_defs_drop_first(self):
+        base = "DIFF"
+        touched = [("a.py", "x" * 60), ("big.py", "y" * 400)]
+        defs = [("d.py", 1, "z" * 90)]
+        content, note = _assemble(base, touched, defs, max_chars=len(base) + 160)
+        assert len(content) <= len(base) + 160  # HARD cap holds
+        assert content.startswith(base)  # input kept
+        assert "a.py" in content  # smallest file kept
+        assert "big.py" not in content  # largest dropped
+        assert "z" * 90 not in content  # defs dropped first
+        assert "omitted" in note.lower()
+
+    def test_input_over_cap_kept_with_note(self):
+        big = "Q" * 500
+        content, note = _assemble(big, [("a.py", "aaa")], [], max_chars=100)
+        assert content == big  # input always kept (documented carve-out)
+        assert "skip" in note.lower() or "omitted" in note.lower()
+
+    def test_within_budget_keeps_all(self):
+        content, _ = _assemble("D", [("a.py", "aaa")], [("d.py", 1, "ddd")], 10_000)
+        assert "a.py" in content and "ddd" in content
+
+    def test_outer_failsafe_trips(self, monkeypatch):
+        import review_context
+
+        monkeypatch.setattr(
+            review_context, "_assemble", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            content, note = enrich_code_review_context(_SAMPLE_DIFF, repo_root=repo)
+        assert content == _SAMPLE_DIFF and "error" in note.lower()
