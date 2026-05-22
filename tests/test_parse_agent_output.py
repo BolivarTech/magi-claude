@@ -378,6 +378,37 @@ class TestProseWrappedJson:
         lone_braces = "{" * (pao._MAX_BRACE_PROBES + 5)
         self._expect_raises(lone_braces + json.dumps(payload))
 
+    def test_multiple_verdict_objects_fail_closed(self):
+        """Two complete verdict-shaped objects are ambiguous → fail closed.
+
+        If an agent quotes the schema example (a full valid verdict) beside
+        its real verdict, or content under review embeds one, picking either
+        risks a fabricated verdict entering consensus. Recover only when a
+        single verdict object is present; otherwise re-raise so the
+        orchestrator retries. (2.4.2 pass-2 review, consensus integrity.)
+        """
+        real = _sample_agent_payload()
+        echoed = _sample_agent_payload()
+        echoed["verdict"] = "approve"
+        echoed["summary"] = "Quoted schema example."
+        result = (
+            "For reference the schema is:\n\n"
+            + json.dumps(echoed)
+            + "\n\nMy actual verdict:\n\n"
+            + json.dumps(real)
+        )
+        self._expect_raises(result)
+
+    def test_deeply_nested_input_raises_json_error_not_recursion(self):
+        """Deeply nested input must surface as JSONDecodeError, not RecursionError.
+
+        CPython's json raises RecursionError on deeply nested input; the
+        orchestrator's retry catches JSONDecodeError, so the parser maps it
+        to keep deeply-nested (echoed or adversarial) output on the
+        fail-closed/retry path rather than letting it escape. (2.4.2 pass-2.)
+        """
+        self._expect_raises('{"a":' * 100_000)
+
 
 # ---------------------------------------------------------------------------
 # TestClaudeCliFixtureContract — pinned contract with the Claude CLI output.
