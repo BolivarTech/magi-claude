@@ -20,6 +20,7 @@ _MAX_DEFS = 40
 _MAX_DEFS_PER_NAME = 5
 _GIT_TIMEOUT = 30
 _MAX_FILE_BYTES = 262_144
+_MAX_TOUCHED_FILES = 50
 _DIFF_MARKERS = ("diff --git ", "--- a/", "+++ b/")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DEF_RE = re.compile(r"^[\t ]*(?:def|class)[\t ]+([A-Za-z_][A-Za-z0-9_]*)")
@@ -109,11 +110,12 @@ def _read_file_safe(repo_root: str, rel_path: str, cache: "dict[str, str | None]
         inside = os.path.commonpath([root_real, full]) == root_real
     except ValueError:  # e.g. different drives on Windows
         inside = False
-    if inside and os.path.isfile(full) and os.path.getsize(full) <= _MAX_FILE_BYTES:
+    if inside:
         try:
-            with open(full, encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
-            content = None if "\x00" in text else text
+            if os.path.isfile(full) and os.path.getsize(full) <= _MAX_FILE_BYTES:
+                with open(full, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                content = None if "\x00" in text else text
         except OSError:
             content = None
     cache[rel_path] = content
@@ -255,7 +257,9 @@ def _collect_touched(
     added_by_file = _added_lines_by_file(diff_text)
     touched: list[tuple[str, str]] = []
     mismatched: list[str] = []
-    for path in dict.fromkeys(_extract_touched_files(diff_text)):  # dedup, preserve order
+    for path in list(dict.fromkeys(_extract_touched_files(diff_text)))[
+        :_MAX_TOUCHED_FILES
+    ]:  # dedup, preserve order, cap
         content = _read_file_safe(repo_root, path, cache)
         if content is None:
             continue

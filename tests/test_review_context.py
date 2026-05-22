@@ -8,6 +8,8 @@ import os
 import subprocess
 import tempfile
 
+import pytest
+
 from review_context import enrich_code_review_context, _git_toplevel, _tree_is_clean
 from review_context import _contains_diff, _extract_touched_files, _read_file_safe
 from review_context import _git_diff
@@ -235,6 +237,47 @@ class TestSymbols:
                 "def helper():" in content
             )  # helper() referenced in the added line, defined cross-file
             assert "def(s)" in note
+
+
+class TestLoop2Fixes:
+    def test_getsize_oserror_is_swallowed(self, monkeypatch):
+        import review_context
+
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            # getsize raises OSError → must yield None, not propagate
+            monkeypatch.setattr(
+                review_context.os.path, "getsize", lambda p: (_ for _ in ()).throw(OSError("boom"))
+            )
+            assert review_context._read_file_safe(repo, "pkg.py", {}) is None
+
+    def test_touched_files_count_capped(self):
+        from review_context import _MAX_TOUCHED_FILES
+        import review_context
+
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            # build a diff naming many files (only pkg.py exists; cap limits iteration)
+            blocks = []
+            for i in range(_MAX_TOUCHED_FILES + 10):
+                blocks.append(
+                    f"diff --git a/f{i}.py b/f{i}.py\n--- a/f{i}.py\n+++ b/f{i}.py\n@@ -0,0 +1 @@\n+x = {i}\n"
+                )
+            big_diff = "".join(blocks)
+            calls = {"n": 0}
+            real = review_context._read_file_safe
+
+            def counting(root, path, cache):
+                calls["n"] += 1
+                return real(root, path, cache)
+
+            mp = pytest.MonkeyPatch()
+            mp.setattr(review_context, "_read_file_safe", counting)
+            try:
+                review_context._collect_touched(repo, big_diff, {})
+            finally:
+                mp.undo()
+            assert calls["n"] <= _MAX_TOUCHED_FILES
 
 
 class TestBudgetAndFailSafe:
