@@ -120,3 +120,51 @@ class TestScaffold:
             assert _tree_is_clean(repo) is False
             content, note = enrich_code_review_context("Review.", repo_root=repo, base_ref="main")
             assert content == "Review." and "clean" in note.lower()
+
+
+class TestTouchedFiles:
+    def test_input_diff_includes_worktree_content(self):
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            content, note = enrich_code_review_context(_SAMPLE_DIFF, repo_root=repo)
+            assert "## Touched files (full content)" in content
+            assert "def added():" in content
+            assert content.startswith(_SAMPLE_DIFF)
+            assert "1 file" in note
+
+    def test_missing_touched_file_skipped(self):
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            content, _ = enrich_code_review_context(
+                _SAMPLE_DIFF.replace("pkg.py", "ghost.py"), repo_root=repo
+            )
+            assert "## Touched files" not in content
+
+    def test_diff_head_mismatch_file_skipped(self):
+        # An added line that does NOT exist in the working-tree file → mismatch → skip.
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            bad = (
+                "diff --git a/pkg.py b/pkg.py\n"
+                "--- a/pkg.py\n"
+                "+++ b/pkg.py\n"
+                "@@ -1,1 +1,2 @@\n"
+                " def base():\n"
+                "+    return NONEXISTENT_TOKEN_XYZ()\n"
+            )
+            content, note = enrich_code_review_context(bad, repo_root=repo)
+            assert "## Touched files" not in content  # pkg.py skipped (mismatch)
+            assert "mismatch" in note.lower()
+
+    def test_duplicate_touched_paths_deduped(self):
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            dup = _SAMPLE_DIFF + (
+                "diff --git a/pkg.py b/pkg.py\n"
+                "--- a/pkg.py\n"
+                "+++ b/pkg.py\n"
+                "@@ -1,1 +1,1 @@\n"
+                " def base():\n"
+            )
+            content, note = enrich_code_review_context(dup, repo_root=repo)
+            assert content.count("### pkg.py\n") == 1  # not duplicated

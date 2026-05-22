@@ -192,6 +192,77 @@ def enrich_code_review_context(
         return input_content, f"enrichment skipped (error: {exc!r})"
 
 
+def _added_lines_by_file(diff_text: str) -> dict[str, list[str]]:
+    """Map each post-image path to its added (``+``) lines from the diff.
+
+    Args:
+        diff_text: A unified diff string (git format).
+
+    Returns:
+        Dict mapping relative file path to list of added line bodies (the
+        leading ``+`` character is stripped).
+    """
+    result: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in diff_text.splitlines():
+        if line.startswith("+++ "):
+            path = line[4:].strip()
+            if path.startswith("b/"):
+                path = path[2:]
+            current = None if (not path or path == "/dev/null") else path
+        elif current and line.startswith("+") and not line.startswith("+++"):
+            result.setdefault(current, []).append(line[1:])
+    return result
+
+
+def _coheres(content: str, added: list[str]) -> bool:
+    """Return True iff every non-blank added line appears in *content*.
+
+    This is a cheap HEAD-coherence check: with a clean working tree
+    (working tree == HEAD), any added line from the diff must be present
+    in the file. A mismatch means the diff doesn't correspond to HEAD.
+
+    Args:
+        content: Full text of the working-tree file.
+        added: List of added line bodies from the diff for this file.
+
+    Returns:
+        True if all non-blank added lines are found in content.
+    """
+    return all(a.strip() == "" or a.strip() in content for a in added)
+
+
+def _collect_touched(
+    repo_root: str, diff_text: str, cache: "dict[str, str | None]"
+) -> "tuple[list[tuple[str, str]], list[str]]":
+    """Return (touched, mismatched_paths).
+
+    *touched* holds ``(path, content)`` for files that exist, are readable,
+    and whose added lines cohere with the working tree. *mismatched_paths*
+    holds paths where the coherence check failed.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        diff_text: A unified diff string (git format).
+        cache: Mutable dict used for memoization by _read_file_safe.
+
+    Returns:
+        Tuple of (touched list of (path, content), mismatched path list).
+    """
+    added_by_file = _added_lines_by_file(diff_text)
+    touched: list[tuple[str, str]] = []
+    mismatched: list[str] = []
+    for path in dict.fromkeys(_extract_touched_files(diff_text)):  # dedup, preserve order
+        content = _read_file_safe(repo_root, path, cache)
+        if content is None:
+            continue
+        if not _coheres(content, added_by_file.get(path, [])):
+            mismatched.append(path)
+            continue
+        touched.append((path, content))
+    return touched, mismatched
+
+
 def _enrich(
     input_content: str, repo_root: str | None, base_ref: str, max_chars: int
 ) -> tuple[str, str]:
@@ -211,4 +282,20 @@ def _enrich(
         return input_content, "enrichment skipped (not a git repo)"
     if not _tree_is_clean(root):
         return input_content, "enrichment skipped (working tree not clean / not at HEAD)"
-    return input_content, "enrichment skipped (no diff context)"
+    diff_text = input_content if _contains_diff(input_content) else None
+    if not diff_text:
+        return input_content, "enrichment skipped (no diff context)"
+    cache: dict[str, str | None] = {}
+    touched, mismatched = _collect_touched(root, diff_text, cache)
+    if not touched:
+        note = "enrichment skipped (no readable touched files)"
+        if mismatched:
+            note = f"enrichment skipped (diff/HEAD mismatch: {len(mismatched)} file(s))"
+        return input_content, note
+    sections = ["## Touched files (full content)"]
+    for path, content in touched:
+        sections.append(f"### {path}\n```\n{content}\n```")
+    note = f"enriched: {len(touched)} file(s)"
+    if mismatched:
+        note += f"; {len(mismatched)} file(s) skipped (diff/HEAD mismatch)"
+    return input_content + "\n\n" + "\n\n".join(sections), note
