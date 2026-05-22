@@ -102,47 +102,74 @@ def _extract_text(data: object) -> str:
     )
 
 
-def _largest_json_object(text: str) -> dict[str, Any] | None:
-    """Return the widest-spanning embedded JSON object in *text*, or ``None``.
+# Minimal keys that identify an agent verdict among other JSON objects an
+# agent might echo (config files, schema examples, quoted payloads). Kept to
+# the two discriminating keys rather than the full 7-key schema so a verdict
+# merely missing a key (e.g. ``recommendation``) is still recovered and then
+# rejected by ``load_agent_output``'s full check — preserving the retry path.
+_VERDICT_KEYS = ("agent", "verdict")
 
-    Scans for every ``{`` and attempts ``json.JSONDecoder().raw_decode``
-    from that position, which parses one complete JSON value and reports
-    where it ended — so nested braces, braces inside strings, and arrays
-    are handled correctly without hand-rolled brace counting.
+# Lenient recovery is a fallback for prose-wrapped output, which is a few KB
+# in practice. Above this budget the scan is skipped: a multi-MB blob is
+# almost certainly echoed tool-use content, not a clean verdict, and scanning
+# it risks the O(n^2) ``raw_decode`` worst case. The agent is dropped and
+# retried instead.
+_LENIENT_RECOVERY_MAX_CHARS = 1_000_000
 
-    Only ``dict`` values qualify: the agent schema is a JSON object, so a
-    bare array or scalar appearing in the surrounding prose must not be
-    mistaken for the verdict. The widest span wins so an incidental small
-    object in the preamble (e.g. a schema example ``{"agent": "name"}``)
-    cannot shadow the real multi-key verdict that follows it.
+# Hard cap on candidate ``{`` positions probed, bounding the scan within the
+# size budget against adversarial deeply-nested-unterminated input. The real
+# verdict is found within the first few probes; a legitimate output never
+# approaches this.
+_MAX_BRACE_PROBES = 2_000
+
+
+def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
+    """Return the last embedded JSON object that looks like an agent verdict.
+
+    Scans for ``{`` and attempts ``json.JSONDecoder().raw_decode`` from each
+    position — which parses one complete JSON value and reports where it
+    ended, so nested braces and braces inside strings are handled without
+    hand-rolled counting.
+
+    Selection is **schema-aware, not span-based**: only objects carrying the
+    verdict discriminator keys (:data:`_VERDICT_KEYS`) qualify, so a large
+    JSON document an agent echoes from tool use — ``package.json``, an API
+    payload, a quoted schema example — cannot be mistaken for the verdict
+    even when it out-spans it. When several qualify the *last* one wins: the
+    model's actual answer follows its reasoning, and any earlier
+    verdict-shaped object is a quote or example.
+
+    The scan is bounded by :data:`_MAX_BRACE_PROBES` so adversarial
+    deeply-nested-unterminated input cannot degrade to O(n^2).
 
     Args:
-        text: Text that may contain a JSON object embedded in prose.
+        text: Text that may contain a verdict object embedded in prose.
 
     Returns:
-        The widest-spanning embedded ``dict``, or ``None`` if no JSON
-        object decodes anywhere in *text*.
+        The last qualifying verdict ``dict``, or ``None`` if none decodes
+        within the probe budget.
     """
     decoder = json.JSONDecoder()
-    best: dict[str, Any] | None = None
-    best_span = -1
+    found: dict[str, Any] | None = None
     index = 0
     length = len(text)
-    while index < length:
+    probes = 0
+    while index < length and probes < _MAX_BRACE_PROBES:
         brace = text.find("{", index)
         if brace == -1:
             break
+        probes += 1
         try:
             candidate, end = decoder.raw_decode(text, brace)
         except json.JSONDecodeError:
             index = brace + 1
             continue
-        if isinstance(candidate, dict) and end - brace > best_span:
-            best, best_span = candidate, end - brace
+        if isinstance(candidate, dict) and all(key in candidate for key in _VERDICT_KEYS):
+            found = candidate  # later qualifying objects overwrite — keep the last
         # Advance past the decoded value so the next iteration looks for a
         # later object; guard against a zero-width decode pinning the scan.
         index = end if end > brace else brace + 1
-    return best
+    return found
 
 
 def _loads_lenient(text: str) -> Any:
@@ -150,16 +177,21 @@ def _loads_lenient(text: str) -> Any:
 
     The fast path is a strict :func:`json.loads`: in the common case the
     text *is* the JSON object (optionally after fence stripping) and the
-    behaviour is byte-for-byte identical to before 2.4.2. When that raises
-    — which happens when an agent doing multi-turn tool use prepends a
+    behaviour is byte-for-byte identical to before 2.4.2. When that raises —
+    which happens when an agent doing multi-turn tool use prepends a
     transitional sentence before the JSON verdict (the 2.4.2 exit-1 root
-    cause) — the largest embedded JSON object is recovered instead.
+    cause) — the embedded verdict object is recovered via
+    :func:`_embedded_verdict_object`.
 
-    If no embedded object decodes, the original
-    :class:`json.JSONDecodeError` is re-raised so genuinely malformed or
-    truncated output still fails closed. The orchestrator relies on that
-    exception to drive its single retry and, failing that, degraded-mode
-    handling; silently salvaging a truncated verdict would defeat both.
+    Recovery is skipped for input larger than
+    :data:`_LENIENT_RECOVERY_MAX_CHARS` (likely echoed tool-use content, and
+    a scan hazard). If nothing qualifies, the original
+    :class:`json.JSONDecodeError` is re-raised so output with no JSON object,
+    a truncated verdict (whose stray complete sub-objects lack the verdict
+    keys), or only echoed non-verdict objects still fails closed at this
+    layer. The orchestrator relies on that exception to drive its single
+    retry and degraded-mode handling; the full 7-key schema is still enforced
+    downstream by ``load_agent_output``.
 
     Args:
         text: Candidate JSON text, possibly wrapped in prose.
@@ -168,14 +200,15 @@ def _loads_lenient(text: str) -> Any:
         The parsed JSON value.
 
     Raises:
-        json.JSONDecodeError: If *text* contains no decodable JSON object.
+        json.JSONDecodeError: If *text* yields no qualifying verdict object.
     """
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        embedded = _largest_json_object(text)
-        if embedded is not None:
-            return embedded
+        if len(text) <= _LENIENT_RECOVERY_MAX_CHARS:
+            verdict = _embedded_verdict_object(text)
+            if verdict is not None:
+                return verdict
         raise
 
 
