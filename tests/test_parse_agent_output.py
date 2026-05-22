@@ -256,6 +256,10 @@ class TestProseWrappedJson:
     dropped the agent; with all three dropped it exited 1. The parser
     must recover the embedded object while still failing closed on
     output that contains no JSON object at all. (v2.4.2 root cause.)
+
+    Selection is schema-aware (objects carrying the verdict keys), not by
+    character span, and the scan is bounded against oversized/adversarial
+    input — hardening added after the 2.4.2 MAGI self-review.
     """
 
     def _round_trip(self, result_text: str) -> dict:
@@ -298,12 +302,30 @@ class TestProseWrappedJson:
         result = json.dumps(payload) + "\n\nThat concludes my analysis."
         assert self._round_trip(result) == payload
 
-    def test_largest_object_wins_over_incidental_brace(self):
-        """A schema example in the preamble must not shadow the real verdict."""
+    def test_partial_key_object_is_ignored(self):
+        """An object with only some verdict keys must not shadow the real verdict."""
         payload = _sample_agent_payload()
         result = (
             'The required schema looks like {"agent": "name"}. '
             "Here is my verdict:\n\n" + json.dumps(payload)
+        )
+        assert self._round_trip(result) == payload
+
+    def test_echoed_larger_object_without_verdict_keys_is_ignored(self):
+        """A large JSON doc echoed from tool use must not shadow the verdict.
+
+        In code-review mode agents Read source/config and quote it; an
+        echoed object can out-span the verdict. Selection is by verdict
+        keys, not character span, so the echoed object (no ``agent`` /
+        ``verdict``) is ignored even though it is larger.
+        """
+        payload = _sample_agent_payload()
+        echoed = {f"config_key_{i}": f"value_{i}" for i in range(40)}
+        result = (
+            "I read the project config:\n\n"
+            + json.dumps(echoed)
+            + "\n\nBased on that, here is my verdict:\n\n"
+            + json.dumps(payload)
         )
         assert self._round_trip(result) == payload
 
@@ -312,9 +334,49 @@ class TestProseWrappedJson:
         self._expect_raises("I am unable to complete this analysis.")
 
     def test_preamble_with_truncated_json_still_raises(self):
-        """A truncated verdict is unrecoverable and must not be silently salvaged."""
+        """A truncated verdict with no complete sub-object re-raises."""
         truncated = json.dumps(_sample_agent_payload())[:-12]
         self._expect_raises("Here is my verdict:\n\n" + truncated)
+
+    def test_truncated_verdict_with_intact_findings_still_raises(self):
+        """Truncation after a complete findings element must still fail closed.
+
+        The stray complete finding object lacks the verdict keys, so it is
+        not mistaken for the verdict; with no verdict object the parser
+        re-raises rather than returning a partial dict.
+        """
+        payload = _sample_agent_payload()
+        payload["findings"] = [
+            {"severity": "info", "title": "A finding", "detail": "Complete object."}
+        ]
+        full = json.dumps(payload)
+        truncated = full[: full.rindex('"recommendation"')]
+        self._expect_raises("Here is my verdict:\n\n" + truncated)
+
+    def test_oversized_output_skips_recovery_and_raises(self):
+        """Output beyond the recovery size budget is not scanned; it re-raises.
+
+        A multi-MB blob is almost certainly echoed tool-use content, not a
+        clean verdict, and scanning it risks the O(n^2) raw_decode worst case.
+        """
+        import parse_agent_output as pao
+
+        payload = _sample_agent_payload()
+        filler = "x" * (pao._LENIENT_RECOVERY_MAX_CHARS + 1)
+        self._expect_raises(filler + "\n\n" + json.dumps(payload))
+
+    def test_brace_scan_is_bounded(self):
+        """The brace scan stops after a bounded number of probes.
+
+        Guards against adversarial deeply-nested-unterminated input
+        degrading to O(n^2): a verdict placed beyond the probe cap is not
+        recovered.
+        """
+        import parse_agent_output as pao
+
+        payload = _sample_agent_payload()
+        lone_braces = "{" * (pao._MAX_BRACE_PROBES + 5)
+        self._expect_raises(lone_braces + json.dumps(payload))
 
 
 # ---------------------------------------------------------------------------
