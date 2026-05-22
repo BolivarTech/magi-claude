@@ -136,14 +136,18 @@ def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
     JSON document an agent echoes from tool use — ``package.json``, an API
     payload — cannot be mistaken for the verdict even when it out-spans it.
 
-    Recovery succeeds **only when exactly one** qualifying object decodes. If
-    two or more do (the agent quoted the schema example — which is a complete
-    valid verdict, see ``agents/*.md`` — beside its real verdict, or content
-    under review embedded one), the choice is ambiguous: picking either risks
-    a fabricated ``approve`` entering consensus, which ``load_agent_output``
-    cannot catch because both are well-formed. We return ``None`` so the
-    caller fails closed and the orchestrator retries rather than guessing.
-    (2.4.2 pass-2 review — consensus integrity.)
+    Recovery succeeds **only when exactly one** qualifying object decodes
+    *within the probe budget* (:data:`_MAX_BRACE_PROBES`). If two or more do
+    (the agent quoted the schema example — which is a complete valid verdict,
+    see ``agents/*.md`` — beside its real verdict, or content under review
+    embedded one), the choice is ambiguous: picking either risks a fabricated
+    ``approve`` entering consensus, which ``load_agent_output`` cannot catch
+    because both are well-formed. We return ``None`` so the caller fails
+    closed and the orchestrator retries rather than guessing. (2.4.2 pass-2
+    review — consensus integrity.) Note the budget bound: a second qualifying
+    object beyond the probe cap would not be seen, so a verdict followed by
+    >2000 brace positions then a second verdict is the one ambiguity shape the
+    guard cannot observe — acceptable, as that input is already pathological.
 
     The scan is bounded by :data:`_MAX_BRACE_PROBES` so adversarial
     deeply-nested-unterminated input cannot degrade to O(n^2). A
