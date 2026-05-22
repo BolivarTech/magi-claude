@@ -410,6 +410,30 @@ class TestProseWrappedJson:
         self._expect_raises('{"a":' * 100_000)
 
 
+class TestPython39Compatibility:
+    """Pin the Python 3.9 compatibility invariant flagged across MAGI reviews."""
+
+    def test_module_annotations_stay_lazy(self):
+        """`from __future__ import annotations` must remain in effect.
+
+        ``parse_agent_output`` uses PEP 604 ``X | None`` annotations, which are
+        runtime-valid only on CPython 3.10+. ``pyproject`` pins ``>=3.9``, so
+        the module relies on ``from __future__ import annotations`` (PEP 563)
+        keeping annotations as non-evaluated strings. This guard fails if a
+        refactor drops that import: on 3.10+ the annotation becomes an
+        evaluated ``types.UnionType`` (caught here); on 3.9 the import itself
+        would break. Pins the recurring review concern as a tested invariant.
+        """
+        import parse_agent_output as pao
+
+        annotation = pao._embedded_verdict_object.__annotations__["return"]
+        assert isinstance(annotation, str), (
+            "annotations must stay lazy strings (from __future__ import "
+            f"annotations); got an evaluated {type(annotation)!r} — PEP 604 "
+            "unions break module import on Python 3.9"
+        )
+
+
 # ---------------------------------------------------------------------------
 # TestClaudeCliFixtureContract — pinned contract with the Claude CLI output.
 # ---------------------------------------------------------------------------
