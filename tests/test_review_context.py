@@ -11,6 +11,7 @@ import tempfile
 from review_context import enrich_code_review_context, _git_toplevel, _tree_is_clean
 from review_context import _contains_diff, _extract_touched_files, _read_file_safe
 from review_context import _git_diff
+from review_context import _candidate_identifiers, _grep_defs, _MAX_CANDIDATES
 
 
 def _init_repo(repo: str) -> None:
@@ -185,3 +186,51 @@ class TestAutoCompute:
         with tempfile.TemporaryDirectory() as repo:
             _init_repo(repo)
             assert _git_diff(repo, "no-such-ref") is None
+
+
+class TestSymbols:
+    def test_candidates_strip_keywords_defined_noise_comments_strings(self):
+        diff = (
+            "+def added():\n"
+            "+    return helper(x)  # call something noise\n"
+            '+    msg = "ignore zzz inside string"\n'
+            "+# pure comment qqq\n"
+        )
+        ids = _candidate_identifiers(diff, defined={"added"})
+        assert "helper" in ids and "x" in ids and "msg" in ids
+        assert "added" not in ids and "return" not in ids
+        assert "zzz" not in ids  # inside a string literal
+        assert "qqq" not in ids  # pure-comment line
+        assert "self" not in ids  # _EXTRA_EXCLUDE
+
+    def test_candidate_cap(self):
+        diff = "\n".join(f"+    v{i} = f{i}()" for i in range(200))
+        assert len(_candidate_identifiers(diff, set())) <= _MAX_CANDIDATES
+
+    def test_grep_single_batched_and_cross_file(self, monkeypatch):
+        calls = {"n": 0}
+        import review_context
+
+        real = review_context._git
+
+        def counting(repo, *args):
+            if args and args[0] == "grep":
+                calls["n"] += 1
+            return real(repo, *args)
+
+        monkeypatch.setattr(review_context, "_git", counting)
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            defs = _grep_defs(repo, ["helper", "base"], {})
+            assert calls["n"] == 1  # ONE batched grep, not per-name
+            assert any(p == "helpers.py" and "def helper():" in ex for p, _l, ex in defs)
+
+    def test_enrich_appends_symbol_defs_section(self):
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            content, note = enrich_code_review_context(_SAMPLE_DIFF, repo_root=repo)
+            assert "## Referenced symbol definitions" in content
+            assert (
+                "def helper():" in content
+            )  # helper() referenced in the added line, defined cross-file
+            assert "def(s)" in note

@@ -17,6 +17,7 @@ _ENRICH_MAX_CHARS = 512_000
 _DEF_WINDOW_LINES = 40
 _MAX_CANDIDATES = 60
 _MAX_DEFS = 40
+_MAX_DEFS_PER_NAME = 5
 _GIT_TIMEOUT = 30
 _MAX_FILE_BYTES = 262_144
 _DIFF_MARKERS = ("diff --git ", "--- a/", "+++ b/")
@@ -263,6 +264,153 @@ def _collect_touched(
     return touched, mismatched
 
 
+def _code_part(line: str) -> str:
+    """Drop pure-comment lines, string-literal contents, and inline comments
+    (single-line heuristic; multi-line strings/docstrings may leak — documented).
+
+    Args:
+        line: A single source line (the leading ``+`` already stripped).
+
+    Returns:
+        The portion of the line that counts as code, with string contents and
+        inline ``  #`` comments removed; empty string for pure-comment lines.
+    """
+    if line.lstrip().startswith("#"):
+        return ""
+    line = _STRING_RE.sub("", line)
+    idx = line.find("  #")
+    return line[:idx] if idx != -1 else line
+
+
+def _defined_names(texts: list[str]) -> set[str]:
+    """Return all ``def``/``class`` names declared in the given source texts.
+
+    Args:
+        texts: List of full file contents to scan.
+
+    Returns:
+        Set of identifier strings that appear as ``def`` or ``class`` names.
+    """
+    names: set[str] = set()
+    for text in texts:
+        for line in text.splitlines():
+            m = _DEF_RE.match(line)
+            if m:
+                names.add(m.group(1))
+    return names
+
+
+def _candidate_identifiers(diff_text: str, defined: set[str]) -> list[str]:
+    """Extract candidate identifiers from added lines, bounded by ``_MAX_CANDIDATES``.
+
+    Strips keywords, soft-keywords, ``_EXTRA_EXCLUDE`` tokens, and names
+    already defined in touched files (passed via *defined*). Comment-only lines
+    and string-literal contents are excluded via ``_code_part``.
+
+    Args:
+        diff_text: A unified diff string (git format).
+        defined: Set of names already declared in the touched files.
+
+    Returns:
+        Ordered list of unique candidate identifier strings (insertion order,
+        capped at ``_MAX_CANDIDATES``).
+    """
+    ordered: dict[str, None] = {}
+    for raw in diff_text.splitlines():
+        if not raw.startswith("+") or raw.startswith("+++"):
+            continue
+        for tok in _IDENT_RE.findall(_code_part(raw[1:])):
+            if (
+                tok in keyword.kwlist
+                or tok in keyword.softkwlist
+                or tok in _EXTRA_EXCLUDE
+                or tok in defined
+            ):
+                continue
+            ordered.setdefault(tok, None)
+            if len(ordered) >= _MAX_CANDIDATES:
+                return list(ordered)
+    return list(ordered)
+
+
+def _read_excerpt(
+    repo_root: str, rel_path: str, line_no: int, cache: "dict[str, str | None]"
+) -> "str | None":
+    """Return up to ``_DEF_WINDOW_LINES`` lines starting at *line_no* (1-based).
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        rel_path: Relative path to the file.
+        line_no: 1-based line number where the definition starts.
+        cache: Mutable dict used for memoization by ``_read_file_safe``.
+
+    Returns:
+        Multi-line string excerpt, or None if the file cannot be read.
+    """
+    content = _read_file_safe(repo_root, rel_path, cache)
+    if content is None:
+        return None
+    lines = content.splitlines()
+    start = max(0, line_no - 1)
+    return "\n".join(lines[start : start + _DEF_WINDOW_LINES])
+
+
+def _grep_defs(
+    repo_root: str, names: list[str], cache: "dict[str, str | None]"
+) -> "list[tuple[str, int, str]]":
+    """Single batched ``git grep`` for ``def``/``class`` of any candidate name.
+
+    Portable word boundary ``([^A-Za-z0-9_]|$)`` is used (not ``\\b``,
+    which is unsupported in git ERE on all platforms). Bounded by
+    ``_MAX_DEFS`` total and ``_MAX_DEFS_PER_NAME`` per symbol (collision-
+    flooding guard from iter-3).
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        names: List of candidate identifier strings to look up.
+        cache: Mutable dict used for memoization by ``_read_excerpt``.
+
+    Returns:
+        List of ``(rel_path, line_no, excerpt)`` tuples, at most ``_MAX_DEFS``
+        entries and at most ``_MAX_DEFS_PER_NAME`` per distinct name.
+    """
+    if not names:
+        return []
+    alt = "|".join(re.escape(n) for n in names)
+    pattern = rf"^[\t ]*(def|class)[\t ]+({alt})([^A-Za-z0-9_]|$)"
+    rc, out = _git(repo_root, "grep", "-nE", pattern)
+    if rc != 0:
+        return []
+    defs: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int]] = set()
+    per_name: dict[str, int] = {}
+    for hit in out.splitlines():
+        parts = hit.split(":", 2)
+        if len(parts) < 3:
+            continue
+        path, line_s, body = parts
+        try:
+            line_no = int(line_s)
+        except ValueError:
+            continue
+        m = _DEF_RE.match(body)
+        name = m.group(1) if m else None
+        if name is not None and per_name.get(name, 0) >= _MAX_DEFS_PER_NAME:
+            continue
+        key = (path, line_no)
+        if key in seen:
+            continue
+        seen.add(key)
+        excerpt = _read_excerpt(repo_root, path, line_no, cache)
+        if excerpt is not None:
+            defs.append((path, line_no, excerpt))
+            if name is not None:
+                per_name[name] = per_name.get(name, 0) + 1
+        if len(defs) >= _MAX_DEFS:
+            break
+    return defs
+
+
 def _git_diff(repo_root: str, base_ref: str) -> "str | None":
     """Return the output of ``git diff <base_ref>...HEAD``, or None on failure.
 
@@ -312,7 +460,13 @@ def _enrich(
     sections = ["## Touched files (full content)"]
     for path, content in touched:
         sections.append(f"### {path}\n```\n{content}\n```")
-    note = f"enriched: {len(touched)} file(s)"
+    defined = _defined_names([c for _p, c in touched])
+    defs = _grep_defs(root, _candidate_identifiers(diff_text, defined), cache)
+    if defs:
+        sections.append("## Referenced symbol definitions")
+        for path, line_no, excerpt in defs:
+            sections.append(f"### {path}:{line_no}\n```\n{excerpt}\n```")
+    note = f"enriched: {len(touched)} file(s), {len(defs)} def(s)"
     if mismatched:
         note += f"; {len(mismatched)} file(s) skipped (diff/HEAD mismatch)"
     return input_content + "\n\n" + "\n\n".join(sections), note
