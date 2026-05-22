@@ -104,6 +104,25 @@ def _write_temp(content: str, *, suffix: str = ".json") -> str:
     return path
 
 
+def _sample_agent_payload() -> dict:
+    """A minimal but schema-complete agent verdict for prose-wrapping tests.
+
+    ``findings`` is left empty on purpose so the only JSON object in the
+    serialised payload is the verdict itself — that lets the truncation
+    test assert "no recoverable sub-object survives" without a nested
+    finding accidentally decoding.
+    """
+    return {
+        "agent": "melchior",
+        "verdict": "conditional",
+        "confidence": 0.82,
+        "summary": "API-correct plan, ready after minor fixes.",
+        "reasoning": "Cross-checked every load-bearing call against the source.",
+        "findings": [],
+        "recommendation": "Ship after fixing the dependency-graph error.",
+    }
+
+
 class TestParseAgentOutput:
     """Integration tests for the full parse pipeline."""
 
@@ -224,6 +243,78 @@ class TestParseAgentOutput:
         finally:
             os.unlink(input_path)
             os.unlink(output_path)
+
+
+class TestProseWrappedJson:
+    """Recover the JSON verdict when an agent wraps it in natural language.
+
+    Agents doing multi-turn tool use (e.g. verifying a plan against the
+    real source) emit a transitional sentence before — and occasionally
+    after — the JSON object, such as ``"Now I have enough to render my
+    verdict.\\n\\n{...}"``. The strict ``json.loads`` then raised
+    ``JSONDecodeError`` and, after one failed retry, the orchestrator
+    dropped the agent; with all three dropped it exited 1. The parser
+    must recover the embedded object while still failing closed on
+    output that contains no JSON object at all. (v2.4.2 root cause.)
+    """
+
+    def _round_trip(self, result_text: str) -> dict:
+        """Run *result_text* through the full parser and return the parsed dict."""
+        raw = json.dumps({"result": result_text})
+        input_path = _write_temp(raw)
+        fd, output_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            parse_agent_output(input_path, output_path)
+            with open(output_path, encoding="utf-8") as f:
+                return json.load(f)
+        finally:
+            os.unlink(input_path)
+            os.unlink(output_path)
+
+    def _expect_raises(self, result_text: str) -> None:
+        """Assert *result_text* still fails closed with ``JSONDecodeError``."""
+        raw = json.dumps({"result": result_text})
+        input_path = _write_temp(raw)
+        fd, output_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(input_path, output_path)
+        finally:
+            os.unlink(input_path)
+            os.unlink(output_path)
+
+    def test_prose_preamble_before_json_is_recovered(self):
+        payload = _sample_agent_payload()
+        result = (
+            "I have verified the plan's code against the real source. "
+            "Now I have enough to render my technical verdict.\n\n" + json.dumps(payload)
+        )
+        assert self._round_trip(result) == payload
+
+    def test_trailing_prose_after_json_is_recovered(self):
+        payload = _sample_agent_payload()
+        result = json.dumps(payload) + "\n\nThat concludes my analysis."
+        assert self._round_trip(result) == payload
+
+    def test_largest_object_wins_over_incidental_brace(self):
+        """A schema example in the preamble must not shadow the real verdict."""
+        payload = _sample_agent_payload()
+        result = (
+            'The required schema looks like {"agent": "name"}. '
+            "Here is my verdict:\n\n" + json.dumps(payload)
+        )
+        assert self._round_trip(result) == payload
+
+    def test_prose_with_no_json_object_still_raises(self):
+        """No JSON object anywhere → fail closed so the orchestrator can react."""
+        self._expect_raises("I am unable to complete this analysis.")
+
+    def test_preamble_with_truncated_json_still_raises(self):
+        """A truncated verdict is unrecoverable and must not be silently salvaged."""
+        truncated = json.dumps(_sample_agent_payload())[:-12]
+        self._expect_raises("Here is my verdict:\n\n" + truncated)
 
 
 # ---------------------------------------------------------------------------
