@@ -124,7 +124,7 @@ _MAX_BRACE_PROBES = 2_000
 
 
 def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
-    """Return the last embedded JSON object that looks like an agent verdict.
+    """Return the *sole* embedded JSON object that looks like an agent verdict.
 
     Scans for ``{`` and attempts ``json.JSONDecoder().raw_decode`` from each
     position — which parses one complete JSON value and reports where it
@@ -134,23 +134,31 @@ def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
     Selection is **schema-aware, not span-based**: only objects carrying the
     verdict discriminator keys (:data:`_VERDICT_KEYS`) qualify, so a large
     JSON document an agent echoes from tool use — ``package.json``, an API
-    payload, a quoted schema example — cannot be mistaken for the verdict
-    even when it out-spans it. When several qualify the *last* one wins: the
-    model's actual answer follows its reasoning, and any earlier
-    verdict-shaped object is a quote or example.
+    payload — cannot be mistaken for the verdict even when it out-spans it.
+
+    Recovery succeeds **only when exactly one** qualifying object decodes. If
+    two or more do (the agent quoted the schema example — which is a complete
+    valid verdict, see ``agents/*.md`` — beside its real verdict, or content
+    under review embedded one), the choice is ambiguous: picking either risks
+    a fabricated ``approve`` entering consensus, which ``load_agent_output``
+    cannot catch because both are well-formed. We return ``None`` so the
+    caller fails closed and the orchestrator retries rather than guessing.
+    (2.4.2 pass-2 review — consensus integrity.)
 
     The scan is bounded by :data:`_MAX_BRACE_PROBES` so adversarial
-    deeply-nested-unterminated input cannot degrade to O(n^2).
+    deeply-nested-unterminated input cannot degrade to O(n^2). A
+    :class:`RecursionError` from a deeply nested candidate is treated like a
+    decode failure (skip the candidate) rather than aborting the scan.
 
     Args:
         text: Text that may contain a verdict object embedded in prose.
 
     Returns:
-        The last qualifying verdict ``dict``, or ``None`` if none decodes
-        within the probe budget.
+        The single qualifying verdict ``dict``, or ``None`` if zero qualify,
+        more than one qualify (ambiguous), or the probe budget is exhausted.
     """
     decoder = json.JSONDecoder()
-    found: dict[str, Any] | None = None
+    matches: list[dict[str, Any]] = []
     index = 0
     length = len(text)
     probes = 0
@@ -161,15 +169,17 @@ def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
         probes += 1
         try:
             candidate, end = decoder.raw_decode(text, brace)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             index = brace + 1
             continue
         if isinstance(candidate, dict) and all(key in candidate for key in _VERDICT_KEYS):
-            found = candidate  # later qualifying objects overwrite — keep the last
+            matches.append(candidate)
+            if len(matches) > 1:
+                return None  # ambiguous — fail closed rather than guess
         # Advance past the decoded value so the next iteration looks for a
         # later object; guard against a zero-width decode pinning the scan.
         index = end if end > brace else brace + 1
-    return found
+    return matches[0] if len(matches) == 1 else None
 
 
 def _loads_lenient(text: str) -> Any:
@@ -188,10 +198,15 @@ def _loads_lenient(text: str) -> Any:
     a scan hazard). If nothing qualifies, the original
     :class:`json.JSONDecodeError` is re-raised so output with no JSON object,
     a truncated verdict (whose stray complete sub-objects lack the verdict
-    keys), or only echoed non-verdict objects still fails closed at this
-    layer. The orchestrator relies on that exception to drive its single
-    retry and degraded-mode handling; the full 7-key schema is still enforced
-    downstream by ``load_agent_output``.
+    keys), an ambiguous multi-verdict output, or only echoed non-verdict
+    objects still fails closed at this layer. The orchestrator relies on that
+    exception to drive its single retry and degraded-mode handling; the full
+    7-key schema is still enforced downstream by ``load_agent_output``.
+
+    A :class:`RecursionError` (CPython's ``json`` raises it, not
+    ``JSONDecodeError``, on deeply nested input) is mapped to a
+    ``JSONDecodeError`` so deeply-nested echoed/adversarial output stays on
+    the same fail-closed/retry path instead of escaping as an uncaught error.
 
     Args:
         text: Candidate JSON text, possibly wrapped in prose.
@@ -200,15 +215,20 @@ def _loads_lenient(text: str) -> Any:
         The parsed JSON value.
 
     Raises:
-        json.JSONDecodeError: If *text* yields no qualifying verdict object.
+        json.JSONDecodeError: If *text* yields no qualifying verdict object,
+            including the deeply-nested ``RecursionError`` case.
     """
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError) as exc:
         if len(text) <= _LENIENT_RECOVERY_MAX_CHARS:
             verdict = _embedded_verdict_object(text)
             if verdict is not None:
                 return verdict
+        if isinstance(exc, RecursionError):
+            raise json.JSONDecodeError(
+                "Input nesting exceeds the JSON decoder limit", text, 0
+            ) from exc
         raise
 
 
