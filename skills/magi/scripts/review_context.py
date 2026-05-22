@@ -18,6 +18,7 @@ _DEF_WINDOW_LINES = 40
 _MAX_CANDIDATES = 60
 _MAX_DEFS = 40
 _GIT_TIMEOUT = 30
+_MAX_FILE_BYTES = 262_144
 _DIFF_MARKERS = ("diff --git ", "--- a/", "+++ b/")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DEF_RE = re.compile(r"^[\t ]*(?:def|class)[\t ]+([A-Za-z_][A-Za-z0-9_]*)")
@@ -42,6 +43,78 @@ _EXTRA_EXCLUDE = frozenset(
         "tuple",
     }
 )
+
+
+def _contains_diff(text: str) -> bool:
+    """Return True if text looks like a unified diff.
+
+    Args:
+        text: The text to inspect.
+
+    Returns:
+        True if any of the canonical diff markers are present.
+    """
+    return any(marker in text for marker in _DIFF_MARKERS)
+
+
+def _extract_touched_files(diff_text: str) -> list[str]:
+    """Return the list of paths modified by diff_text (new-file side only).
+
+    Skips /dev/null targets (deleted files) and strips the ``b/`` prefix
+    that git unified diffs add.
+
+    Args:
+        diff_text: A unified diff string (git format).
+
+    Returns:
+        Ordered list of relative file paths that were added or modified.
+    """
+    files: list[str] = []
+    for line in diff_text.splitlines():
+        if line.startswith("+++ "):
+            path = line[4:].strip()
+            if path.startswith("b/"):
+                path = path[2:]
+            if path and path != "/dev/null":
+                files.append(path)
+    return files
+
+
+def _read_file_safe(repo_root: str, rel_path: str, cache: "dict[str, str | None]") -> "str | None":
+    """Read a working-tree file (UTF-8 with replace). Return None if the file
+    is missing, binary (contains NUL), oversized, or outside the repo root.
+    Results are memoized in *cache*.
+
+    Path-traversal containment guard: resolves ``os.path.realpath`` and
+    requires the result is inside *repo_root*. Skips files larger than
+    ``_MAX_FILE_BYTES`` without reading them into memory.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        rel_path: Relative path (as it appears in the diff) to read.
+        cache: Mutable dict used for memoization; key is *rel_path*.
+
+    Returns:
+        File text or None on any skip condition.
+    """
+    if rel_path in cache:
+        return cache[rel_path]
+    content: "str | None" = None
+    root_real = os.path.realpath(repo_root)
+    full = os.path.realpath(os.path.join(repo_root, rel_path))
+    try:
+        inside = os.path.commonpath([root_real, full]) == root_real
+    except ValueError:  # e.g. different drives on Windows
+        inside = False
+    if inside and os.path.isfile(full) and os.path.getsize(full) <= _MAX_FILE_BYTES:
+        try:
+            with open(full, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            content = None if "\x00" in text else text
+        except OSError:
+            content = None
+    cache[rel_path] = content
+    return content
 
 
 def _git(repo_root: str, *args: str) -> tuple[int, str]:

@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 
 from review_context import enrich_code_review_context, _git_toplevel, _tree_is_clean
+from review_context import _contains_diff, _extract_touched_files, _read_file_safe
 
 
 def _init_repo(repo: str) -> None:
@@ -35,6 +36,58 @@ def _init_repo(repo: str) -> None:
         f.write("def helper():\n    return 1\n")
     run("add", "-A")
     run("commit", "-q", "-m", "feat")
+
+
+_SAMPLE_DIFF = (
+    "diff --git a/pkg.py b/pkg.py\n"
+    "--- a/pkg.py\n"
+    "+++ b/pkg.py\n"
+    "@@ -1,1 +1,5 @@\n"
+    " def base():\n"
+    "+    return base() + helper()\n"
+    "diff --git a/old.py b/old.py\n"
+    "--- a/old.py\n"
+    "+++ /dev/null\n"
+)
+
+
+class TestDiffAndRead:
+    def test_contains_diff(self):
+        assert _contains_diff(_SAMPLE_DIFF) is True
+        assert _contains_diff("prose only") is False
+
+    def test_extract_touched_skips_devnull_strips_prefix(self):
+        assert _extract_touched_files(_SAMPLE_DIFF) == ["pkg.py"]
+
+    def test_read_file_safe_reads_worktree_and_memoizes(self):
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            cache: dict = {}
+            content = _read_file_safe(repo, "pkg.py", cache)
+            assert content is not None and "def added():" in content
+            assert "pkg.py" in cache
+
+    def test_read_file_safe_missing_and_binary(self):
+        with tempfile.TemporaryDirectory() as repo:
+            assert _read_file_safe(repo, "nope.py", {}) is None
+            with open(os.path.join(repo, "b.bin"), "wb") as f:
+                f.write(b"\x00\x01")
+            assert _read_file_safe(repo, "b.bin", {}) is None
+
+    def test_read_file_safe_blocks_path_traversal(self):
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            assert _read_file_safe(repo, "../../etc/passwd", {}) is None
+            assert _read_file_safe(repo, "../outside.py", {}) is None
+
+    def test_read_file_safe_skips_oversized(self):
+        from review_context import _MAX_FILE_BYTES
+
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            with open(os.path.join(repo, "big.py"), "w", encoding="utf-8") as f:
+                f.write("x" * (_MAX_FILE_BYTES + 1))
+            assert _read_file_safe(repo, "big.py", {}) is None
 
 
 class TestScaffold:
