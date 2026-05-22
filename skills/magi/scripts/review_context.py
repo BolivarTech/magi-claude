@@ -8,7 +8,7 @@ reads come from one coherent source. Never raises into the orchestrator (R7)."""
 
 from __future__ import annotations
 
-import keyword  # noqa: F401
+import keyword
 import os
 import re
 import subprocess
@@ -44,6 +44,8 @@ _EXTRA_EXCLUDE = frozenset(
         "tuple",
     }
 )
+# keyword.softkwlist was added in CPython 3.12; pyproject pins >=3.9.
+_SOFT_KWLIST: frozenset[str] = frozenset(getattr(keyword, "softkwlist", []))
 
 
 def _contains_diff(text: str) -> bool:
@@ -322,7 +324,7 @@ def _candidate_identifiers(diff_text: str, defined: set[str]) -> list[str]:
         for tok in _IDENT_RE.findall(_code_part(raw[1:])):
             if (
                 tok in keyword.kwlist
-                or tok in keyword.softkwlist
+                or tok in _SOFT_KWLIST
                 or tok in _EXTRA_EXCLUDE
                 or tok in defined
             ):
@@ -513,7 +515,7 @@ def _enrich(
     if root is None:
         return input_content, "enrichment skipped (not a git repo)"
     if not _tree_is_clean(root):
-        return input_content, "enrichment skipped (working tree not clean / not at HEAD)"
+        return input_content, "enrichment skipped (working tree not clean: uncommitted changes)"
     diff_text = input_content if _contains_diff(input_content) else _git_diff(root, base_ref)
     if not diff_text:
         return input_content, "enrichment skipped (no diff context)"
