@@ -18,10 +18,10 @@ from review_context import _assemble
 
 
 def _init_repo(repo: str) -> None:
-    def run(*a):
+    def run(*a: str) -> None:
         subprocess.run(
             ["git", "-C", repo, *a],
-            check=True,  # noqa: E704
+            check=True,
             capture_output=True,
             text=True,
         )
