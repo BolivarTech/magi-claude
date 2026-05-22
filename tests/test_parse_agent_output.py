@@ -104,6 +104,25 @@ def _write_temp(content: str, *, suffix: str = ".json") -> str:
     return path
 
 
+def _sample_agent_payload() -> dict:
+    """A minimal but schema-complete agent verdict for prose-wrapping tests.
+
+    ``findings`` is left empty on purpose so the only JSON object in the
+    serialised payload is the verdict itself — that lets the truncation
+    test assert "no recoverable sub-object survives" without a nested
+    finding accidentally decoding.
+    """
+    return {
+        "agent": "melchior",
+        "verdict": "conditional",
+        "confidence": 0.82,
+        "summary": "API-correct plan, ready after minor fixes.",
+        "reasoning": "Cross-checked every load-bearing call against the source.",
+        "findings": [],
+        "recommendation": "Ship after fixing the dependency-graph error.",
+    }
+
+
 class TestParseAgentOutput:
     """Integration tests for the full parse pipeline."""
 
@@ -224,6 +243,195 @@ class TestParseAgentOutput:
         finally:
             os.unlink(input_path)
             os.unlink(output_path)
+
+
+class TestProseWrappedJson:
+    """Recover the JSON verdict when an agent wraps it in natural language.
+
+    Agents doing multi-turn tool use (e.g. verifying a plan against the
+    real source) emit a transitional sentence before — and occasionally
+    after — the JSON object, such as ``"Now I have enough to render my
+    verdict.\\n\\n{...}"``. The strict ``json.loads`` then raised
+    ``JSONDecodeError`` and, after one failed retry, the orchestrator
+    dropped the agent; with all three dropped it exited 1. The parser
+    must recover the embedded object while still failing closed on
+    output that contains no JSON object at all. (v2.4.2 root cause.)
+
+    Selection is schema-aware (objects carrying the verdict keys), not by
+    character span, and the scan is bounded against oversized/adversarial
+    input — hardening added after the 2.4.2 MAGI self-review.
+    """
+
+    def _round_trip(self, result_text: str) -> dict:
+        """Run *result_text* through the full parser and return the parsed dict."""
+        raw = json.dumps({"result": result_text})
+        input_path = _write_temp(raw)
+        fd, output_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            parse_agent_output(input_path, output_path)
+            with open(output_path, encoding="utf-8") as f:
+                return json.load(f)
+        finally:
+            os.unlink(input_path)
+            os.unlink(output_path)
+
+    def _expect_raises(self, result_text: str) -> None:
+        """Assert *result_text* still fails closed with ``JSONDecodeError``."""
+        raw = json.dumps({"result": result_text})
+        input_path = _write_temp(raw)
+        fd, output_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(input_path, output_path)
+        finally:
+            os.unlink(input_path)
+            os.unlink(output_path)
+
+    def test_prose_preamble_before_json_is_recovered(self):
+        payload = _sample_agent_payload()
+        result = (
+            "I have verified the plan's code against the real source. "
+            "Now I have enough to render my technical verdict.\n\n" + json.dumps(payload)
+        )
+        assert self._round_trip(result) == payload
+
+    def test_trailing_prose_after_json_is_recovered(self):
+        payload = _sample_agent_payload()
+        result = json.dumps(payload) + "\n\nThat concludes my analysis."
+        assert self._round_trip(result) == payload
+
+    def test_partial_key_object_is_ignored(self):
+        """An object with only some verdict keys must not shadow the real verdict."""
+        payload = _sample_agent_payload()
+        result = (
+            'The required schema looks like {"agent": "name"}. '
+            "Here is my verdict:\n\n" + json.dumps(payload)
+        )
+        assert self._round_trip(result) == payload
+
+    def test_echoed_larger_object_without_verdict_keys_is_ignored(self):
+        """A large JSON doc echoed from tool use must not shadow the verdict.
+
+        In code-review mode agents Read source/config and quote it; an
+        echoed object can out-span the verdict. Selection is by verdict
+        keys, not character span, so the echoed object (no ``agent`` /
+        ``verdict``) is ignored even though it is larger.
+        """
+        payload = _sample_agent_payload()
+        echoed = {f"config_key_{i}": f"value_{i}" for i in range(40)}
+        result = (
+            "I read the project config:\n\n"
+            + json.dumps(echoed)
+            + "\n\nBased on that, here is my verdict:\n\n"
+            + json.dumps(payload)
+        )
+        assert self._round_trip(result) == payload
+
+    def test_prose_with_no_json_object_still_raises(self):
+        """No JSON object anywhere → fail closed so the orchestrator can react."""
+        self._expect_raises("I am unable to complete this analysis.")
+
+    def test_preamble_with_truncated_json_still_raises(self):
+        """A truncated verdict with no complete sub-object re-raises."""
+        truncated = json.dumps(_sample_agent_payload())[:-12]
+        self._expect_raises("Here is my verdict:\n\n" + truncated)
+
+    def test_truncated_verdict_with_intact_findings_still_raises(self):
+        """Truncation after a complete findings element must still fail closed.
+
+        The stray complete finding object lacks the verdict keys, so it is
+        not mistaken for the verdict; with no verdict object the parser
+        re-raises rather than returning a partial dict.
+        """
+        payload = _sample_agent_payload()
+        payload["findings"] = [
+            {"severity": "info", "title": "A finding", "detail": "Complete object."}
+        ]
+        full = json.dumps(payload)
+        truncated = full[: full.rindex('"recommendation"')]
+        self._expect_raises("Here is my verdict:\n\n" + truncated)
+
+    def test_oversized_output_skips_recovery_and_raises(self):
+        """Output beyond the recovery size budget is not scanned; it re-raises.
+
+        A multi-MB blob is almost certainly echoed tool-use content, not a
+        clean verdict, and scanning it risks the O(n^2) raw_decode worst case.
+        """
+        import parse_agent_output as pao
+
+        payload = _sample_agent_payload()
+        filler = "x" * (pao._LENIENT_RECOVERY_MAX_CHARS + 1)
+        self._expect_raises(filler + "\n\n" + json.dumps(payload))
+
+    def test_brace_scan_is_bounded(self):
+        """The brace scan stops after a bounded number of probes.
+
+        Guards against adversarial deeply-nested-unterminated input
+        degrading to O(n^2): a verdict placed beyond the probe cap is not
+        recovered.
+        """
+        import parse_agent_output as pao
+
+        payload = _sample_agent_payload()
+        lone_braces = "{" * (pao._MAX_BRACE_PROBES + 5)
+        self._expect_raises(lone_braces + json.dumps(payload))
+
+    def test_multiple_verdict_objects_fail_closed(self):
+        """Two complete verdict-shaped objects are ambiguous → fail closed.
+
+        If an agent quotes the schema example (a full valid verdict) beside
+        its real verdict, or content under review embeds one, picking either
+        risks a fabricated verdict entering consensus. Recover only when a
+        single verdict object is present; otherwise re-raise so the
+        orchestrator retries. (2.4.2 pass-2 review, consensus integrity.)
+        """
+        real = _sample_agent_payload()
+        echoed = _sample_agent_payload()
+        echoed["verdict"] = "approve"
+        echoed["summary"] = "Quoted schema example."
+        result = (
+            "For reference the schema is:\n\n"
+            + json.dumps(echoed)
+            + "\n\nMy actual verdict:\n\n"
+            + json.dumps(real)
+        )
+        self._expect_raises(result)
+
+    def test_deeply_nested_input_raises_json_error_not_recursion(self):
+        """Deeply nested input must surface as JSONDecodeError, not RecursionError.
+
+        CPython's json raises RecursionError on deeply nested input; the
+        orchestrator's retry catches JSONDecodeError, so the parser maps it
+        to keep deeply-nested (echoed or adversarial) output on the
+        fail-closed/retry path rather than letting it escape. (2.4.2 pass-2.)
+        """
+        self._expect_raises('{"a":' * 100_000)
+
+
+class TestPython39Compatibility:
+    """Pin the Python 3.9 compatibility invariant flagged across MAGI reviews."""
+
+    def test_module_annotations_stay_lazy(self):
+        """`from __future__ import annotations` must remain in effect.
+
+        ``parse_agent_output`` uses PEP 604 ``X | None`` annotations, which are
+        runtime-valid only on CPython 3.10+. ``pyproject`` pins ``>=3.9``, so
+        the module relies on ``from __future__ import annotations`` (PEP 563)
+        keeping annotations as non-evaluated strings. This guard fails if a
+        refactor drops that import: on 3.10+ the annotation becomes an
+        evaluated ``types.UnionType`` (caught here); on 3.9 the import itself
+        would break. Pins the recurring review concern as a tested invariant.
+        """
+        import parse_agent_output as pao
+
+        annotation = pao._embedded_verdict_object.__annotations__["return"]
+        assert isinstance(annotation, str), (
+            "annotations must stay lazy strings (from __future__ import "
+            f"annotations); got an evaluated {type(annotation)!r} — PEP 604 "
+            "unions break module import on Python 3.9"
+        )
 
 
 # ---------------------------------------------------------------------------
