@@ -2904,3 +2904,243 @@ class TestEnrichIntegration:
             "code-review", "D", base_ref="main", enrich=True, max_chars=99
         )
         assert out == "D" and "error" in note.lower()
+
+
+class TestProjectRootResolution:
+    """BDD-13: git toplevel with cwd fallback."""
+
+    def test_uses_git_toplevel_when_available(self, monkeypatch):
+        import run_magi
+
+        class FakeCompleted:
+            returncode = 0
+            stdout = "/repo/root\n"
+
+        monkeypatch.setattr(run_magi.subprocess, "run", lambda *a, **k: FakeCompleted())
+        assert run_magi._resolve_project_root() == "/repo/root"
+
+    def test_falls_back_to_cwd_when_not_a_repo(self, monkeypatch):
+        import os
+
+        import run_magi
+
+        class FakeCompleted:
+            returncode = 128
+            stdout = ""
+
+        monkeypatch.setattr(run_magi.subprocess, "run", lambda *a, **k: FakeCompleted())
+        assert run_magi._resolve_project_root() == os.path.realpath(os.getcwd())
+
+    def test_falls_back_to_cwd_when_git_missing(self, monkeypatch):
+        import os
+
+        import run_magi
+
+        def boom(*a, **k):
+            raise FileNotFoundError("git not found")
+
+        monkeypatch.setattr(run_magi.subprocess, "run", boom)
+        assert run_magi._resolve_project_root() == os.path.realpath(os.getcwd())
+
+
+class TestMainLockWiring:
+    """BDD-8/9/14: lock written for temp runs, removed on success, bypassed
+    for explicit --output-dir."""
+
+    def _patch_run(self, monkeypatch, *, output_dir_arg=None):
+        """Stub everything around main() except the temp/lock wiring."""
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(
+            run_magi,
+            "format_report",
+            lambda agents, consensus: "REPORT",
+        )
+
+        async def fake_orch(*a, **k):
+            return {"agents": [], "consensus": {}}
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+
+    def test_lock_written_then_removed_on_success(self, tmp_path, monkeypatch):
+        import run_lock
+        import run_magi
+
+        self._patch_run(monkeypatch)
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+
+        cleanup_calls = {}
+
+        def fake_cleanup(keep, run_root=None):
+            cleanup_calls["keep"] = keep
+            cleanup_calls["root"] = run_root
+
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", fake_cleanup)
+
+        seen = {"lock_present_during_run": None}
+        created = {}
+
+        def fake_create(output_dir, run_root=None):
+            d = tmp_path / "magi-run-xyz"
+            d.mkdir()
+            created["dir"] = str(d)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def fake_orch(*a, **k):
+            # Lock must exist while the orchestrator runs.
+            seen["lock_present_during_run"] = os.path.exists(
+                os.path.join(created["dir"], run_lock.LOCK_FILENAME)
+            )
+            return {"agents": [], "consensus": {}}
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello"])
+
+        run_magi.main()
+
+        assert seen["lock_present_during_run"] is True
+        assert not os.path.exists(os.path.join(created["dir"], run_lock.LOCK_FILENAME)), (
+            "Lock must be removed after a successful run"
+        )
+        # Off-by-one (Bal/Cas): default keep_runs=5 -> cleanup gets 4, namespaced root.
+        assert cleanup_calls["keep"] == 4
+        assert cleanup_calls["root"] == str(tmp_path)
+
+    def test_failure_path_removes_dir_and_lock(self, tmp_path, monkeypatch):
+        """BDD-10: when the orchestrator raises, the run dir AND its lock go."""
+        import run_lock
+        import run_magi
+
+        self._patch_run(monkeypatch)
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+
+        created = {}
+
+        def fake_create(output_dir, run_root=None):
+            d = tmp_path / "magi-run-fail"
+            d.mkdir()
+            created["dir"] = str(d)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def boom_orch(*a, **k):
+            raise RuntimeError("agents failed")
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", boom_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello"])
+
+        with pytest.raises(RuntimeError):
+            run_magi.main()
+
+        assert not os.path.exists(created["dir"]), "Failed run's temp dir must be removed"
+        assert not os.path.exists(os.path.join(created["dir"], run_lock.LOCK_FILENAME))
+
+    def test_cleanup_receives_keep_runs_minus_one_for_keep_1(self, tmp_path, monkeypatch):
+        """Boundary: --keep-runs 1 -> cleanup_old_runs(0) (wipe all non-live)."""
+        import run_magi
+
+        self._patch_run(monkeypatch)
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+
+        cleanup_calls = {}
+        monkeypatch.setattr(
+            run_magi,
+            "cleanup_old_runs",
+            lambda keep, run_root=None: cleanup_calls.update(keep=keep),
+        )
+        monkeypatch.setattr(
+            run_magi, "create_output_dir", lambda output_dir, run_root=None: str(tmp_path)
+        )
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--keep-runs", "1"])
+
+        run_magi.main()
+        assert cleanup_calls["keep"] == 0
+
+    def test_write_lock_receives_timeout_derived_bound(self, tmp_path, monkeypatch):
+        """Cas iter-3: main() writes the staleness_bound_for_timeout(--timeout)."""
+        import run_magi
+        from run_lock import staleness_bound_for_timeout
+
+        self._patch_run(monkeypatch)
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(
+            run_magi, "create_output_dir", lambda output_dir, run_root=None: str(tmp_path)
+        )
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+
+        captured = {}
+        monkeypatch.setattr(
+            run_magi,
+            "write_lock",
+            lambda d, max_age_seconds=None: captured.update(bound=max_age_seconds),
+        )
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--timeout", "14400"])
+
+        run_magi.main()
+        assert captured["bound"] == staleness_bound_for_timeout(14400)
+
+    def test_explicit_output_dir_writes_no_lock(self, tmp_path, monkeypatch):
+        import run_lock
+        import run_magi
+
+        self._patch_run(monkeypatch)
+        out = tmp_path / "explicit"
+        monkeypatch.setattr(
+            sys, "argv", ["run_magi.py", "design", "hello", "--output-dir", str(out)]
+        )
+
+        run_magi.main()
+
+        assert not (out / run_lock.LOCK_FILENAME).exists()
+
+
+class TestNamespaceIntegration:
+    """Cas finding: non-stubbed composition of project_run_root +
+    create_output_dir + write_lock + cleanup_old_runs (real filesystem,
+    no mocks of the units under test)."""
+
+    def test_live_namespaced_dir_survives_peer_cleanup(self, tmp_path):
+        from run_lock import LOCK_FILENAME, write_lock
+        from temp_dirs import cleanup_old_runs, create_output_dir, project_run_root
+
+        with patch("temp_dirs.tempfile.gettempdir", return_value=str(tmp_path)):
+            root = project_run_root(str(tmp_path / "projA"))
+            live = create_output_dir(None, root)
+            write_lock(live)  # current (alive) PID
+            # A peer session prunes as aggressively as possible.
+            cleanup_old_runs(0, root)
+
+        assert os.path.isdir(live), "Live namespaced dir must survive peer cleanup"
+        assert os.path.exists(os.path.join(live, LOCK_FILENAME))
+
+    def test_cross_project_cleanup_does_not_touch_other_project(self, tmp_path):
+        """BDD-1 end-to-end: project B's cleanup never sees project A's dirs."""
+        from temp_dirs import cleanup_old_runs, create_output_dir, project_run_root
+
+        with patch("temp_dirs.tempfile.gettempdir", return_value=str(tmp_path)):
+            root_a = project_run_root(str(tmp_path / "projA"))
+            a_dir = create_output_dir(None, root_a)  # no lock -> eligible if scanned
+            root_b = project_run_root(str(tmp_path / "projB"))
+            cleanup_old_runs(0, root_b)  # wipe-all within B's namespace
+
+        assert os.path.isdir(a_dir), "Project A's dir must be untouched by B's cleanup"
