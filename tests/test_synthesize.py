@@ -2068,3 +2068,93 @@ class TestOptionalFindingFields:
         loaded = load_agent_output(out)
         fn = loaded["findings"][0]
         assert fn["line"] is None, "line=-5 must fail-soft to None, not raise"
+
+
+# ---------------------------------------------------------------------------
+# TestDedupById
+# ---------------------------------------------------------------------------
+
+
+class TestDedupById:
+    """v3.0.0 Block A: dedup by file:line:category id when present; fallback
+    to title when not (design/analysis behavior unchanged)."""
+
+    def _agent(self, name, findings, verdict="conditional", conf=0.8):
+        return {
+            "agent": name,
+            "verdict": verdict,
+            "confidence": conf,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": findings,
+            "recommendation": "rec",
+        }
+
+    def test_same_location_different_title_merges_by_id(self):
+        from synthesize import determine_consensus
+
+        a = self._agent(
+            "melchior",
+            [
+                {
+                    "severity": "warning",
+                    "title": "Overflow in parse",
+                    "detail": "d1",
+                    "file": "src/a.py",
+                    "line": 10,
+                    "category": "logic-error",
+                }
+            ],
+        )
+        b = self._agent(
+            "caspar",
+            [
+                {
+                    "severity": "critical",
+                    "title": "Possible overrun",
+                    "detail": "d2",
+                    "file": "src/a.py",
+                    "line": 10,
+                    "category": "logic-error",
+                }
+            ],
+        )
+        out = determine_consensus([a, b])
+        assert len(out["findings"]) == 1
+        merged = out["findings"][0]
+        assert sorted(merged["sources"]) == ["caspar", "melchior"]
+        assert merged["severity"] == "critical"  # highest wins
+        assert "id" in merged and len(merged["id"]) == 16
+
+    def test_no_location_falls_back_to_title_dedup(self):
+        from synthesize import determine_consensus
+
+        a = self._agent(
+            "melchior",
+            [
+                {
+                    "severity": "info",
+                    "title": "Same Point",
+                    "detail": "d1",
+                    "file": None,
+                    "line": None,
+                    "category": "other",
+                }
+            ],
+        )
+        b = self._agent(
+            "balthasar",
+            [
+                {
+                    "severity": "info",
+                    "title": "same point",
+                    "detail": "d2",
+                    "file": None,
+                    "line": None,
+                    "category": "other",
+                }
+            ],
+        )
+        out = determine_consensus([a, b])
+        assert len(out["findings"]) == 1  # merged by normalized title (today's behavior)
+        assert sorted(out["findings"][0]["sources"]) == ["balthasar", "melchior"]
