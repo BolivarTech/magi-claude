@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 
 class TestAggregateCost:
-    def _raw(self, tmp_path, agent: str, cost: float | None) -> None:
+    def _raw(self, tmp_path: Path, agent: str, cost: float | None) -> None:
         p = tmp_path / f"{agent}.raw.json"
         body: dict[str, Any] = {"type": "result", "result": "{}"}
         if cost is not None:
@@ -60,3 +61,21 @@ class TestAggregateCost:
         out = aggregate_cost(str(tmp_path), ["melchior"])
         assert out["total_usd"] == 0.0
         assert out["per_agent"]["melchior"] == 0.0
+
+    def test_non_finite_cost_is_fail_safe(self, tmp_path: Path) -> None:
+        """Non-finite floats (inf, nan) must contribute 0.0 — json.dumps emits Infinity/NaN
+        which json.load reads back, so they must not leak into the report."""
+        from cost import aggregate_cost
+
+        # Python's json.dumps serialises float("inf") as "Infinity" and float("nan") as
+        # "NaN"; json.load parses those back, so this reproduces the real failure path.
+        (tmp_path / "melchior.raw.json").write_text(
+            json.dumps({"total_cost_usd": float("inf")}), encoding="utf-8"
+        )
+        (tmp_path / "balthasar.raw.json").write_text(
+            json.dumps({"total_cost_usd": float("nan")}), encoding="utf-8"
+        )
+        out = aggregate_cost(str(tmp_path), ["melchior", "balthasar"])
+        assert out["per_agent"]["melchior"] == 0.0
+        assert out["per_agent"]["balthasar"] == 0.0
+        assert out["total_usd"] == 0.0
