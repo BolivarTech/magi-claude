@@ -123,11 +123,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=MAX_HISTORY_RUNS,
         help=(
-            f"Final on-disk count of magi-run-* temp dirs, including the run "
-            f"about to be created (default: {MAX_HISTORY_RUNS}). "
-            f"``--keep-runs 1`` keeps only the current run and wipes all "
-            f"prior ones. ``--keep-runs 0`` is rejected. ``--keep-runs -1`` "
-            f"disables cleanup entirely."
+            f"Maximum number of non-live magi-run-* temp dirs to retain "
+            f"(default: {MAX_HISTORY_RUNS}). Live (locked) dirs are excluded "
+            f"from the count and never deleted, so the on-disk total can "
+            f"exceed this value under concurrent or stale-locked runs. "
+            f"``--keep-runs 1`` wipes all prior non-live runs, keeping only "
+            f"the current one. ``--keep-runs 0`` is rejected. "
+            f"``--keep-runs -1`` disables cleanup entirely."
         ),
     )
     parser.add_argument(
@@ -742,7 +744,7 @@ def _resolve_project_root() -> str:
 
     Used to derive the per-project temp namespace key. A missing ``git``
     binary or a non-repository cwd falls back to the realpath of the
-    current directory (spec R4, BDD-13).
+    current directory.
     """
     try:
         completed = subprocess.run(

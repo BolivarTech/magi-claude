@@ -25,11 +25,11 @@ import time
 from datetime import datetime, timezone
 
 LOCK_FILENAME = ".magi-lock"
-# Floor / default for the per-run staleness guard (spec R13). Each lock
-# persists its own bound derived from --timeout (see
-# staleness_bound_for_timeout); this constant is used only when that bound
-# is absent (2-line legacy lock) or corrupt, and as the lower clamp so a
-# corrupt tiny bound can never drop the threshold below 6h.
+# Floor / default for the per-run staleness guard. Each lock persists its own
+# bound derived from --timeout (see staleness_bound_for_timeout); this
+# constant is used only when that bound is absent (2-line legacy lock) or
+# corrupt, and as the lower clamp so a corrupt tiny bound can never drop the
+# threshold below 6h.
 LOCK_STALE_AFTER_SECONDS = 21_600  # 6 hours
 
 
@@ -91,9 +91,9 @@ def _is_pid_alive_windows(pid: int) -> bool:
     ``ctypes.get_last_error()`` reliable: a null handle with
     ``ERROR_ACCESS_DENIED`` means the process EXISTS but we lack rights to
     open it -> reported **alive** to mirror POSIX ``PermissionError ->
-    alive`` and honor R8's conservative bias; any other null-handle error
-    means the process is gone. An unexpected probe failure (including
-    ``WinDLL`` being absent off-Windows) is conservatively reported alive.
+    alive``; any other null-handle error means the process is gone. An
+    unexpected probe failure (including ``WinDLL`` being absent off-Windows)
+    is conservatively reported alive.
     """
     try:
         import ctypes
@@ -133,7 +133,7 @@ def staleness_bound_for_timeout(timeout: int) -> int:
     retry), so a live run cannot exceed ~2x ``timeout``; ``+600`` adds
     orchestration margin. Floored at :data:`LOCK_STALE_AFTER_SECONDS` so
     short timeouts still get the generous 6h default. Persisting this in
-    the lock closes F9 — a long-``--timeout`` run is never pruned alive.
+    the lock ensures a long-``--timeout`` run is never pruned alive.
     """
     return max(2 * timeout + 600, LOCK_STALE_AFTER_SECONDS)
 
@@ -176,7 +176,7 @@ def _parse_lock(run_dir: str) -> tuple[int | None, float | None, int | None]:
 
     Any element is ``None`` when missing or unparseable. ``age_seconds`` is
     wall-clock seconds since the recorded ISO start timestamp;
-    ``max_age_seconds`` is the persisted per-run staleness bound (R2).
+    ``max_age_seconds`` is the persisted per-run staleness bound.
     """
     try:
         with open(_lock_path(run_dir), encoding="utf-8", errors="replace") as fh:

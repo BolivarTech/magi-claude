@@ -105,14 +105,16 @@ def cleanup_old_runs(keep: int, run_root: str | None = None) -> None:
     compatibility) for ``magi-run-*`` directories. Directories whose
     ``.magi-lock`` shows a still-running owner are **excluded entirely**
     — they are neither counted against ``keep`` nor deleted — so a
-    concurrent session's in-progress run is never pruned (spec R5,
-    BDD-2). Among the remaining (non-live) dirs, the oldest beyond
-    ``keep`` are removed, sorted by ``st_mtime`` descending then path
-    ascending for a deterministic LRU under mtime ties.
+    concurrent session's in-progress run is never pruned. Among the
+    remaining (non-live) dirs, the oldest beyond ``keep`` are removed,
+    sorted by ``st_mtime`` descending then path ascending for a
+    deterministic LRU under mtime ties.
+
+    Live (locked) dirs are excluded from the count, so the on-disk total
+    can exceed ``keep`` when concurrent or stale-locked runs are present.
 
     Total: a missing/unscannable *run_root* and per-entry stat/rmtree
-    errors degrade to no-op/warning, never raising into the orchestrator
-    (spec R10, BDD-15).
+    errors degrade to no-op/warning, never raising into the orchestrator.
 
     Args:
         keep: Maximum number of non-live runs to retain. ``keep < 0``
@@ -173,12 +175,12 @@ def project_run_root(project_root: str) -> str:
     container regardless of casing or symlinks. The container is
     ``<gettempdir>/magi-runs/<key>/``. Runs from different projects live
     under different containers, so one project's cleanup can never see or
-    prune another's (spec R3/R4, BDD-1/12).
+    prune another's.
 
     If the container cannot be created (permissions, read-only temp), it
     degrades to ``tempfile.gettempdir()`` with a warning rather than
     raising into ``main()`` — the namespace is best-effort, consistent
-    with the total-cleanup contract (Mel finding).
+    with the total-cleanup contract.
 
     Args:
         project_root: The resolved project root path (git toplevel or cwd).
@@ -212,9 +214,9 @@ def sweep_legacy_runs_once() -> None:
     marker file under the ``magi-runs`` container so the (potentially
     slow) global temp scan does not recur on every run — deleting only
     dirs older than :data:`run_lock.LOCK_STALE_AFTER_SECONDS` so a
-    concurrently-running old version's in-progress dir is not removed
-    (spec R14, BDD-17). The ``magi-runs`` container itself does not match
-    ``MAGI_DIR_PREFIX`` and is never a candidate (BDD-18).
+    concurrently-running old version's in-progress dir is not removed.
+    The ``magi-runs`` container itself does not match ``MAGI_DIR_PREFIX``
+    and is never a candidate.
 
     Total: every failure path degrades to no-op/warning; never raises
     into the orchestrator.
