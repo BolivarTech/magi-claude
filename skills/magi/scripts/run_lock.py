@@ -126,6 +126,27 @@ def _lock_path(run_dir: str) -> str:
     return os.path.join(run_dir, LOCK_FILENAME)
 
 
+def _dir_is_fresh(run_dir: str) -> bool:
+    """Return True if *run_dir*'s mtime is younger than the staleness floor.
+
+    Used as the liveness fallback whenever a bounded age cannot be computed
+    (corrupt PID line, or alive PID with an unreadable timestamp), so an
+    indeterminate lock cannot keep a directory live forever.  An unreadable
+    mtime is treated as fresh (conservative).
+
+    Args:
+        run_dir: Absolute path of the MAGI run directory to check.
+
+    Returns:
+        True if the directory is younger than :data:`LOCK_STALE_AFTER_SECONDS`,
+        False if it is stale.  Also True on any :exc:`OSError` (cannot stat).
+    """
+    try:
+        return (time.time() - os.path.getmtime(run_dir)) < LOCK_STALE_AFTER_SECONDS
+    except OSError:
+        return True
+
+
 def staleness_bound_for_timeout(timeout: int) -> int:
     """Return the per-run staleness bound (seconds) for a given ``--timeout``.
 
@@ -255,18 +276,19 @@ def _is_dir_live_inner(run_dir: str) -> bool:
             return False
         # Corrupt/empty lock: conservatively live when the dir is fresh,
         # eligible once the dir ages past the staleness floor.
-        try:
-            dir_age = time.time() - os.path.getmtime(run_dir)
-        except OSError:
-            # Cannot stat the dir — be conservative.
-            return True
-        return dir_age < LOCK_STALE_AFTER_SECONDS
+        return _dir_is_fresh(run_dir)
     if not is_pid_alive(pid):
         return False
+    # PID is alive.  If the timestamp is unreadable (age is None), we cannot
+    # compute a bounded age, so fall back to the dir-mtime escape — this
+    # closes the leak for corrupt-timestamp locks (including out-of-range PID +
+    # garbage timestamp) where is_pid_alive returns True conservatively.
+    if age is None:
+        return _dir_is_fresh(run_dir)
     # Floor the threshold so a corrupt-but-parseable tiny/negative bound
     # cannot defeat the conservative bias; a legitimate bound is always
     # >= the floor by construction (staleness_bound_for_timeout).
     threshold = LOCK_STALE_AFTER_SECONDS if bound is None else max(bound, LOCK_STALE_AFTER_SECONDS)
-    if age is not None and age >= threshold:
+    if age >= threshold:
         return False
     return True
