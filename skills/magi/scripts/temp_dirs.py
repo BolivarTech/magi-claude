@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-04-17
+# Version: 1.1.0
+# Date: 2026-05-23
 """Temp-directory housekeeping for the MAGI orchestrator.
 
 Extracted from ``run_magi.py`` so the orchestrator file no longer has to
