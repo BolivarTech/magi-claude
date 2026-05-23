@@ -418,3 +418,65 @@ class TestIsPidAliveTotality:
         # Must not raise; must return True (conservative-live).
         result = is_pid_alive(99999999999999999999)
         assert result is True
+
+
+class TestProbeFailureWarning:
+    """FIX E: unexpected probe failures emit one WARNING to stderr, stay conservative-live."""
+
+    def test_is_pid_alive_unexpected_exception_returns_true_and_warns_once(
+        self, monkeypatch, capsys
+    ):
+        """An unexpected non-OSError from the inner probe must:
+        (a) return True (conservative), and
+        (b) emit exactly one WARNING line to stderr on the FIRST call;
+            subsequent calls stay silent (no per-call spam).
+        """
+        import run_lock
+
+        # Reset the once-per-process flag so the test is self-contained.
+        monkeypatch.setattr(run_lock, "_PROBE_FAILURE_WARNED", False)
+
+        # Force the POSIX branch (platform-independent patch) and make os.kill
+        # raise a non-OSError so the outer except Exception fires.
+        monkeypatch.setattr(run_lock.sys, "platform", "linux")
+        monkeypatch.setattr(run_lock.os, "kill", lambda pid, sig: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        # First call: returns True and emits warning.
+        result1 = run_lock.is_pid_alive(42)
+        assert result1 is True
+        captured1 = capsys.readouterr()
+        assert "WARNING" in captured1.err, f"Expected WARNING on first call, got: {captured1.err!r}"
+
+        # Second call: returns True but no additional warning (flag already set).
+        result2 = run_lock.is_pid_alive(42)
+        assert result2 is True
+        captured2 = capsys.readouterr()
+        assert captured2.err == "", f"Expected no output on second call, got: {captured2.err!r}"
+
+    def test_is_dir_live_unexpected_exception_returns_true_and_warns_once(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """An unexpected Exception from _is_dir_live_inner must:
+        (a) return True (conservative), and
+        (b) emit exactly one WARNING to stderr on the first occurrence.
+        """
+        import run_lock
+
+        # Reset the once-per-process flag.
+        monkeypatch.setattr(run_lock, "_PROBE_FAILURE_WARNED", False)
+
+        # Patch the inner function to raise an unexpected error.
+        monkeypatch.setattr(
+            run_lock, "_is_dir_live_inner", lambda run_dir: (_ for _ in ()).throw(RuntimeError("inner boom"))
+        )
+
+        result1 = run_lock.is_dir_live(str(tmp_path))
+        assert result1 is True
+        captured1 = capsys.readouterr()
+        assert "WARNING" in captured1.err, f"Expected WARNING on first call, got: {captured1.err!r}"
+
+        # Second call: still True, no second warning.
+        result2 = run_lock.is_dir_live(str(tmp_path))
+        assert result2 is True
+        captured2 = capsys.readouterr()
+        assert captured2.err == "", f"Expected no output on second call, got: {captured2.err!r}"
