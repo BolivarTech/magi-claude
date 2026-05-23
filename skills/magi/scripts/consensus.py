@@ -14,6 +14,7 @@ from __future__ import annotations
 import unicodedata
 from typing import Any
 
+from finding_id import generate_finding_id
 from validate import clean_title
 
 VERDICT_WEIGHT: dict[str, float] = {
@@ -115,16 +116,32 @@ def _format_consensus_label(
     return f"HOLD {split_label}"
 
 
-def _deduplicate_findings(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge findings across agents, deduplicating by normalized title.
+def _finding_key(f: dict[str, Any]) -> tuple[str, str]:
+    """Return the dedup key for *f*.
 
-    Two findings are considered the same when their titles collapse to the
-    same :func:`_dedup_key` — i.e. they are equivalent under NFKC
-    normalization and full Unicode case folding after invisible-character
-    stripping. When a collision occurs, the displayed title preserves the
-    form first seen in agent iteration order; the highest severity among
-    the colliding findings wins and each reporting agent is recorded in a
-    ``sources`` list.
+    When the finding carries a concrete location (``file`` + integer
+    ``line``), the key is the title-independent finding id
+    (``("id", <hash>)``) so two agents describing the same defect with
+    different wording merge. Otherwise (design/analysis findings, or
+    code-review findings the agent did not locate) it falls back to the
+    normalized title key (``("title", <key>)``) — today's behavior.
+    """
+    file = f.get("file")
+    line = f.get("line")
+    if isinstance(file, str) and file and isinstance(line, int) and not isinstance(line, bool):
+        return ("id", generate_finding_id(file, line, f.get("category") or "other"))
+    return ("title", _dedup_key(f["title"]))
+
+
+def _deduplicate_findings(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge findings across agents, deduplicating by id-or-title key.
+
+    Located findings (file + line) merge by their stable
+    :func:`finding_id.generate_finding_id`; unlocated findings merge by
+    normalized title (unchanged pre-v3.0.0 behavior). On a collision the
+    first-seen display form is kept, the highest severity wins, each
+    reporting agent is recorded in ``sources``, and located findings carry
+    their ``id``. Sorted by severity (critical first).
 
     Args:
         agents: List of validated agent output dictionaries.
@@ -132,20 +149,23 @@ def _deduplicate_findings(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     Returns:
         Deduplicated findings sorted by severity (critical first).
     """
-    findings_by_title: dict[str, dict[str, Any]] = {}
+    findings_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for a in agents:
         for f in a.get("findings", []):
-            title_key = _dedup_key(f["title"])
-            existing = findings_by_title.get(title_key)
+            key = _finding_key(f)
+            existing = findings_by_key.get(key)
             if existing is None:
-                findings_by_title[title_key] = {**f, "sources": [a["agent"]]}
+                merged = {**f, "sources": [a["agent"]]}
+                if key[0] == "id":
+                    merged["id"] = key[1]
+                findings_by_key[key] = merged
                 continue
             existing["sources"].append(a["agent"])
             if _severity_rank(f["severity"]) < _severity_rank(existing["severity"]):
                 existing["severity"] = f["severity"]
                 existing["detail"] = f["detail"]
 
-    return sorted(findings_by_title.values(), key=lambda f: _severity_rank(f["severity"]))
+    return sorted(findings_by_key.values(), key=lambda f: _severity_rank(f["severity"]))
 
 
 def _compute_confidence(
