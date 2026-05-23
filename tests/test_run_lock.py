@@ -125,3 +125,195 @@ class TestIsPidAliveWindowsBranch:
         if result:
             pytest.skip("PID recycled before probe")
         assert result is False
+
+    def test_posix_permission_error_is_alive(self, monkeypatch):
+        """POSIX: an existing-but-inaccessible process (PermissionError) is alive (R8)."""
+        import run_lock
+
+        def fake_kill(pid, sig):
+            raise PermissionError
+
+        monkeypatch.setattr(run_lock.sys, "platform", "linux")
+        monkeypatch.setattr(run_lock.os, "kill", fake_kill)
+        assert run_lock.is_pid_alive(4242) is True
+
+
+class TestLockFile:
+    """write/read/remove lifecycle of the .magi-lock file."""
+
+    def test_write_then_read_returns_pid(self, tmp_path):
+        from run_lock import LOCK_FILENAME, read_lock, write_lock
+
+        write_lock(str(tmp_path))
+        assert (tmp_path / LOCK_FILENAME).exists()
+        assert read_lock(str(tmp_path)) == os.getpid()
+
+    def test_read_missing_lock_returns_none(self, tmp_path):
+        from run_lock import read_lock
+
+        assert read_lock(str(tmp_path)) is None
+
+    def test_read_corrupt_lock_returns_none(self, tmp_path):
+        from run_lock import LOCK_FILENAME, read_lock
+
+        (tmp_path / LOCK_FILENAME).write_text("not-a-pid\n", encoding="utf-8")
+        assert read_lock(str(tmp_path)) is None
+
+    def test_remove_lock_is_idempotent(self, tmp_path):
+        from run_lock import LOCK_FILENAME, remove_lock, write_lock
+
+        write_lock(str(tmp_path))
+        remove_lock(str(tmp_path))
+        assert not (tmp_path / LOCK_FILENAME).exists()
+        remove_lock(str(tmp_path))  # second call must not raise
+
+
+class TestLockTimestamp:
+    """Pin the Python 3.9 fromisoformat invariant (Mel finding).
+
+    write_lock emits ``datetime.now(timezone.utc).isoformat()`` (``+00:00``
+    offset, never a ``Z`` suffix), which 3.9's restricted fromisoformat
+    round-trips. Any unparseable timestamp must fail safe to ``age=None``
+    (-> conservative live), not crash.
+    """
+
+    def test_isoformat_round_trips_to_finite_age(self, tmp_path):
+        from run_lock import _parse_lock, write_lock
+
+        write_lock(str(tmp_path))
+        pid, age, _ = _parse_lock(str(tmp_path))
+        assert pid == os.getpid()
+        assert age is not None and age >= 0.0
+
+    def test_unparseable_timestamp_degrades_to_none_age(self, tmp_path):
+        from run_lock import LOCK_FILENAME, _parse_lock
+
+        # A non-isoformat timestamp (version-independent: rejected on 3.9+).
+        (tmp_path / LOCK_FILENAME).write_text(
+            f"{os.getpid()}\nnot-a-timestamp\n", encoding="utf-8"
+        )
+        pid, age, _ = _parse_lock(str(tmp_path))
+        assert pid == os.getpid()
+        assert age is None
+
+
+class TestIsDirLive:
+    """BDD-2/3/4/5/16: composed liveness decision."""
+
+    def test_live_when_pid_alive_and_fresh(self, tmp_path):
+        from run_lock import is_dir_live, write_lock
+
+        write_lock(str(tmp_path))  # our own live PID, fresh timestamp
+        assert is_dir_live(str(tmp_path)) is True
+
+    def test_not_live_when_no_lock(self, tmp_path):
+        from run_lock import is_dir_live
+
+        assert is_dir_live(str(tmp_path)) is False
+
+    def test_live_when_lock_corrupt(self, tmp_path):
+        """BDD-5: an existing-but-unparseable lock is conservatively live."""
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        (tmp_path / LOCK_FILENAME).write_text("garbage\n", encoding="utf-8")
+        assert is_dir_live(str(tmp_path)) is True
+
+    def test_not_live_when_pid_dead(self, tmp_path, monkeypatch):
+        """BDD-3/11: a lock whose PID is dead is eligible (not live)."""
+        import run_lock
+        from run_lock import write_lock
+
+        write_lock(str(tmp_path))
+        monkeypatch.setattr(run_lock, "is_pid_alive", lambda pid: False)
+        assert run_lock.is_dir_live(str(tmp_path)) is False
+
+    def test_not_live_when_pid_alive_but_stale(self, tmp_path):
+        """BDD-16: PID alive but lock older than the threshold -> eligible."""
+        from datetime import datetime, timedelta, timezone
+
+        import run_lock
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        old = datetime.now(timezone.utc) - timedelta(
+            seconds=run_lock.LOCK_STALE_AFTER_SECONDS + 60
+        )
+        # 2-line lock (no bound) -> floor LOCK_STALE_AFTER_SECONDS applies.
+        (tmp_path / LOCK_FILENAME).write_text(
+            f"{os.getpid()}\n{old.isoformat()}\n", encoding="utf-8"
+        )
+        assert is_dir_live(str(tmp_path)) is False
+
+    def test_per_run_bound_protects_run_past_6h(self, tmp_path):
+        """BDD-19 (F9 closed): a large persisted bound keeps a 7h-old live run."""
+        from datetime import datetime, timedelta, timezone
+
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        seven_hours_ago = datetime.now(timezone.utc) - timedelta(hours=7)
+        # bound 29400s (~8.17h) > 7h age -> still live (own/live PID).
+        (tmp_path / LOCK_FILENAME).write_text(
+            f"{os.getpid()}\n{seven_hours_ago.isoformat()}\n29400\n", encoding="utf-8"
+        )
+        assert is_dir_live(str(tmp_path)) is True
+
+    def test_missing_bound_falls_back_to_floor(self, tmp_path):
+        """BDD-20: a 2-line lock (no bound) uses LOCK_STALE_AFTER_SECONDS."""
+        from datetime import datetime, timedelta, timezone
+
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        five_hours_ago = datetime.now(timezone.utc) - timedelta(hours=5)
+        (tmp_path / LOCK_FILENAME).write_text(
+            f"{os.getpid()}\n{five_hours_ago.isoformat()}\n", encoding="utf-8"
+        )
+        assert is_dir_live(str(tmp_path)) is True  # 5h < 6h floor
+
+    def test_tiny_corrupt_bound_uses_floor(self, tmp_path):
+        """Mel iter-3: a parseable but tiny/negative bound must not defeat the
+        6h floor (R8 conservative bias)."""
+        from datetime import datetime, timedelta, timezone
+
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        # bound=0 (corrupt-but-parseable); 1h age < 6h floor -> still live.
+        (tmp_path / LOCK_FILENAME).write_text(
+            f"{os.getpid()}\n{one_hour_ago.isoformat()}\n0\n", encoding="utf-8"
+        )
+        assert is_dir_live(str(tmp_path)) is True
+
+    def test_not_live_when_age_exceeds_large_persisted_bound(self, tmp_path):
+        """BDD-16 (non-None bound direction, Mel/Bal iter-4): alive but older
+        than a large explicit bound -> not live (eligible)."""
+        from datetime import datetime, timedelta, timezone
+
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        nine_hours_ago = datetime.now(timezone.utc) - timedelta(hours=9)
+        # bound 29400s (~8.17h) < 9h age -> past bound -> not live.
+        (tmp_path / LOCK_FILENAME).write_text(
+            f"{os.getpid()}\n{nine_hours_ago.isoformat()}\n29400\n", encoding="utf-8"
+        )
+        assert is_dir_live(str(tmp_path)) is False
+
+
+class TestStalenessBound:
+    """BDD-21: staleness_bound_for_timeout = max(2*timeout+600, floor)."""
+
+    def test_short_timeout_uses_floor(self):
+        from run_lock import LOCK_STALE_AFTER_SECONDS, staleness_bound_for_timeout
+
+        assert staleness_bound_for_timeout(900) == LOCK_STALE_AFTER_SECONDS
+
+    def test_long_timeout_exceeds_floor(self):
+        from run_lock import staleness_bound_for_timeout
+
+        assert staleness_bound_for_timeout(14400) == 29400  # 2*14400 + 600
+
+    def test_write_lock_round_trips_bound(self, tmp_path):
+        """The bound passed to write_lock is persisted and parsed back (R2)."""
+        from run_lock import _parse_lock, write_lock
+
+        write_lock(str(tmp_path), 12345)
+        _pid, _age, bound = _parse_lock(str(tmp_path))
+        assert bound == 12345
