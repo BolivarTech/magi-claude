@@ -1978,3 +1978,93 @@ class TestDynamicConsensusLabels:
         ]
         result = determine_consensus(agents)
         assert result["consensus"] == "HOLD -- TIE"
+
+
+# ---------------------------------------------------------------------------
+# TestOptionalFindingFields
+# ---------------------------------------------------------------------------
+
+
+class TestOptionalFindingFields:
+    """v3.0.0 Block A: file/line/category are optional + normalized; absence
+    must not break validation (design/analysis emit none)."""
+
+    def _write(self, tmp_path, finding):
+        import json
+
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [finding],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        return str(p)
+
+    def test_finding_without_optional_fields_validates(self, tmp_path):
+        from synthesize import load_agent_output
+
+        out = self._write(tmp_path, {"severity": "info", "title": "t", "detail": "d"})
+        f = out  # path
+        loaded = load_agent_output(f)
+        fn = loaded["findings"][0]
+        assert fn["file"] is None and fn["line"] is None and fn["category"] == "other"
+
+    def test_finding_with_optional_fields_normalized(self, tmp_path):
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {
+                "severity": "warning",
+                "title": "t",
+                "detail": "d",
+                "file": "src\\a.py",
+                "line": 10,
+                "category": "memory-leak",
+            },
+        )
+        fn = load_agent_output(out)["findings"][0]
+        assert fn["file"] == "src\\a.py" and fn["line"] == 10
+        assert fn["category"] == "other"  # unknown -> other
+
+    def test_invalid_line_type_rejected(self, tmp_path):
+        import pytest
+
+        from synthesize import load_agent_output
+        from validate import ValidationError
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": "ten"},
+        )
+        with pytest.raises(ValidationError):
+            load_agent_output(out)
+
+    def test_line_zero_is_fail_soft_to_none(self, tmp_path):
+        """A4 fail-soft: line=0 must NOT raise ValidationError; finding kept, line -> None."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": 0},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, "line=0 must fail-soft to None, not raise"
+
+    def test_line_negative_is_fail_soft_to_none(self, tmp_path):
+        """A4 fail-soft: line=-5 must NOT raise ValidationError; finding kept, line -> None."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": -5},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, "line=-5 must fail-soft to None, not raise"
