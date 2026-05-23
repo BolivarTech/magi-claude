@@ -386,6 +386,66 @@ class TestCorruptLockMtimeEscape:
         assert is_dir_live(str(tmp_path)) is True
 
 
+class TestFutureDateLockMtimeEscape:
+    """FIX G: a future-dated timestamp produces a negative age which must route
+    through the mtime escape, not be treated as always-live."""
+
+    def test_future_timestamp_old_dir_is_eligible(self, tmp_path):
+        """Future-dated lock + stale dir mtime -> eligible (not live).
+
+        A timestamp ~1h in the future yields a negative age. Without the fix,
+        age < threshold is always True for a negative age (negative < any
+        positive threshold), so the dir is live forever (unbounded leak).
+        With the fix, a non-positive age routes through _dir_is_fresh; a stale
+        dir mtime makes _dir_is_fresh return False -> eligible.
+
+        On Windows os.replace (inside write_lock) bumps the dir mtime, so we
+        call write_lock first, THEN os.utime to backdate.
+        """
+        import run_lock
+        from datetime import timedelta, timezone
+        from datetime import datetime as dt
+
+        from run_lock import is_dir_live, write_lock
+
+        future_ts = dt.now(timezone.utc) + timedelta(hours=1)
+        # write_lock must precede os.utime (Windows: os.replace bumps dir mtime).
+        write_lock(str(tmp_path), max_age_seconds=run_lock.LOCK_STALE_AFTER_SECONDS)
+        # Overwrite the lock content with a future timestamp but the same PID
+        # and a valid bound, then backdate the dir.
+        lock_path = tmp_path / run_lock.LOCK_FILENAME
+        lock_path.write_text(
+            f"{os.getpid()}\n{future_ts.isoformat()}\n{run_lock.LOCK_STALE_AFTER_SECONDS}\n",
+            encoding="utf-8",
+        )
+        old_mtime = time.time() - run_lock.LOCK_STALE_AFTER_SECONDS - 60
+        os.utime(str(tmp_path), (old_mtime, old_mtime))
+        assert is_dir_live(str(tmp_path)) is False
+
+    def test_future_timestamp_fresh_dir_is_live(self, tmp_path):
+        """Future-dated lock + fresh dir mtime -> conservatively live.
+
+        Same future-timestamp lock shape, but the dir mtime is recent.
+        The mtime escape keeps it live (cannot compute a bounded age, dir is
+        young, so conservative = retain).
+        """
+        import run_lock
+        from datetime import timedelta, timezone
+        from datetime import datetime as dt
+
+        from run_lock import is_dir_live, write_lock
+
+        future_ts = dt.now(timezone.utc) + timedelta(hours=1)
+        write_lock(str(tmp_path), max_age_seconds=run_lock.LOCK_STALE_AFTER_SECONDS)
+        lock_path = tmp_path / run_lock.LOCK_FILENAME
+        lock_path.write_text(
+            f"{os.getpid()}\n{future_ts.isoformat()}\n{run_lock.LOCK_STALE_AFTER_SECONDS}\n",
+            encoding="utf-8",
+        )
+        # Dir mtime is ~now (not backdated).
+        assert is_dir_live(str(tmp_path)) is True
+
+
 class TestWriteLockAtomic:
     """write_lock must produce exactly one .magi-lock file with no partial writes."""
 
