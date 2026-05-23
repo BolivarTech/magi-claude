@@ -101,6 +101,7 @@ def _is_pid_alive_windows(pid: int) -> bool:
 
 
 def _lock_path(run_dir: str) -> str:
+    """Return the absolute path of the lock file inside *run_dir*."""
     return os.path.join(run_dir, LOCK_FILENAME)
 
 
