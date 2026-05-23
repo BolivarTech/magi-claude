@@ -13,8 +13,14 @@ Total: any read/parse error degrades to 0 for that agent — never raises.
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
+
+
+def _is_finite_number(value: object) -> bool:
+    """Return True for a real, finite int/float (excludes bool, inf, nan)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _agent_cost(output_dir: str, agent: str) -> float:
@@ -26,9 +32,7 @@ def _agent_cost(output_dir: str, agent: str) -> float:
         if not isinstance(data, dict):
             return 0.0
         value = data.get("total_cost_usd")
-        return (
-            float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
-        )
+        return float(value) if _is_finite_number(value) else 0.0
     except (OSError, json.JSONDecodeError, ValueError):
         return 0.0
 
