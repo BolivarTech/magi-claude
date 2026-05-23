@@ -189,9 +189,7 @@ class TestLockTimestamp:
         from run_lock import LOCK_FILENAME, _parse_lock
 
         # A non-isoformat timestamp (version-independent: rejected on 3.9+).
-        (tmp_path / LOCK_FILENAME).write_text(
-            f"{os.getpid()}\nnot-a-timestamp\n", encoding="utf-8"
-        )
+        (tmp_path / LOCK_FILENAME).write_text(f"{os.getpid()}\nnot-a-timestamp\n", encoding="utf-8")
         pid, age, _ = _parse_lock(str(tmp_path))
         assert pid == os.getpid()
         assert age is None
@@ -234,9 +232,7 @@ class TestIsDirLive:
         import run_lock
         from run_lock import LOCK_FILENAME, is_dir_live
 
-        old = datetime.now(timezone.utc) - timedelta(
-            seconds=run_lock.LOCK_STALE_AFTER_SECONDS + 60
-        )
+        old = datetime.now(timezone.utc) - timedelta(seconds=run_lock.LOCK_STALE_AFTER_SECONDS + 60)
         # 2-line lock (no bound) -> floor LOCK_STALE_AFTER_SECONDS applies.
         (tmp_path / LOCK_FILENAME).write_text(
             f"{os.getpid()}\n{old.isoformat()}\n", encoding="utf-8"
