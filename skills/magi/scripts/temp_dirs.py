@@ -29,12 +29,14 @@ and mtime tie-break behaviors.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sys
 import tempfile
 
 MAGI_DIR_PREFIX = "magi-run-"
+MAGI_RUNS_CONTAINER = "magi-runs"
 
 
 def _scan_magi_dirs(tmp_root: str) -> list[tuple[float, str]]:
@@ -152,3 +154,41 @@ def create_output_dir(output_dir: str | None) -> str:
         return tempfile.mkdtemp(prefix=MAGI_DIR_PREFIX)
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
+
+
+def project_run_root(project_root: str) -> str:
+    """Return (creating if needed) the per-project run container.
+
+    *project_root* is normalized (``normcase`` + ``realpath``) and hashed
+    to a 16-hex-char key so the same project always maps to the same
+    container regardless of casing or symlinks. The container is
+    ``<gettempdir>/magi-runs/<key>/``. Runs from different projects live
+    under different containers, so one project's cleanup can never see or
+    prune another's (spec R3/R4, BDD-1/12).
+
+    If the container cannot be created (permissions, read-only temp), it
+    degrades to ``tempfile.gettempdir()`` with a warning rather than
+    raising into ``main()`` — the namespace is best-effort, consistent
+    with the total-cleanup contract (Mel finding).
+
+    Args:
+        project_root: The resolved project root path (git toplevel or cwd).
+
+    Returns:
+        Absolute path to the created per-project run container, or the
+        system temp dir if the container could not be created.
+    """
+    norm = os.path.normcase(os.path.realpath(project_root))
+    key = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
+    tmp_root = tempfile.gettempdir()
+    root = os.path.join(tmp_root, MAGI_RUNS_CONTAINER, key)
+    try:
+        os.makedirs(root, exist_ok=True)
+    except OSError as exc:
+        print(
+            f"WARNING: could not create per-project run root {root}: {exc}; "
+            f"falling back to {tmp_root}",
+            file=sys.stderr,
+        )
+        return tmp_root
+    return root
