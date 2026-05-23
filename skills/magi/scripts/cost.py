@@ -18,6 +18,10 @@ import os
 from typing import Any
 
 
+_RAW_FILE_SUFFIX = ".raw.json"
+_COST_FIELD = "total_cost_usd"
+
+
 def _is_finite_number(value: object) -> bool:
     """Return True for a real, finite int/float (excludes bool, inf, nan)."""
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
@@ -25,13 +29,13 @@ def _is_finite_number(value: object) -> bool:
 
 def _agent_cost(output_dir: str, agent: str) -> float:
     """Return *agent*'s ``total_cost_usd`` from its raw envelope, or 0.0."""
-    path = os.path.join(output_dir, f"{agent}.raw.json")
+    path = os.path.join(output_dir, f"{agent}{_RAW_FILE_SUFFIX}")
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
             return 0.0
-        value = data.get("total_cost_usd")
+        value = data.get(_COST_FIELD)
         return float(value) if _is_finite_number(value) else 0.0
     except (OSError, json.JSONDecodeError, ValueError):
         return 0.0
