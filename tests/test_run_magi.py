@@ -235,6 +235,13 @@ class TestCreateOutputDir:
         assert output_dir == str(tmp_path / "custom")
         assert os.path.isdir(output_dir)
 
+    def test_create_output_dir_uses_run_root(self, tmp_path):
+        from temp_dirs import MAGI_DIR_PREFIX, create_output_dir
+
+        out = create_output_dir(None, str(tmp_path))
+        assert os.path.dirname(out) == str(tmp_path)
+        assert os.path.basename(out).startswith(MAGI_DIR_PREFIX)
+
 
 class TestRunOrchestrator:
     """Verify full orchestration with mocked agents."""
@@ -562,6 +569,66 @@ class TestCleanupOldRuns:
 
         # Outside dir should not be deleted
         assert outside_dir.exists()
+
+    def test_skips_live_locked_dir_even_when_oldest(self, tmp_path):
+        """BDD-2: a dir whose lock PID is alive is never pruned."""
+        from run_lock import write_lock
+        from temp_dirs import cleanup_old_runs
+
+        live = tmp_path / "magi-run-0000"
+        live.mkdir()
+        os.utime(live, (1000, 1000))  # oldest by mtime
+        write_lock(str(live))  # our own (alive) PID
+
+        for i in (1, 2, 3):
+            d = tmp_path / f"magi-run-{i:04d}"
+            d.mkdir()
+            os.utime(d, (2000 + i, 2000 + i))
+
+        cleanup_old_runs(1, str(tmp_path))
+
+        assert live.exists(), "Live-locked dir must survive even as the oldest"
+
+    def test_deletes_dead_locked_dir(self, tmp_path, monkeypatch):
+        """BDD-3/11: a lock with a dead PID stays eligible for LRU pruning."""
+        import run_lock
+        from run_lock import write_lock
+        from temp_dirs import cleanup_old_runs
+
+        dead = tmp_path / "magi-run-0000"
+        dead.mkdir()
+        os.utime(dead, (1000, 1000))
+        write_lock(str(dead))
+        newer = tmp_path / "magi-run-0001"
+        newer.mkdir()
+        os.utime(newer, (2000, 2000))
+
+        monkeypatch.setattr(run_lock, "is_pid_alive", lambda pid: False)
+        cleanup_old_runs(1, str(tmp_path))
+
+        assert not dead.exists()
+        assert newer.exists()
+
+    def test_run_root_param_overrides_gettempdir(self, tmp_path):
+        """The explicit run_root is scanned; gettempdir is not consulted."""
+        from temp_dirs import cleanup_old_runs
+
+        for i in range(3):
+            d = tmp_path / f"magi-run-{i:04d}"
+            d.mkdir()
+            os.utime(d, (1000 + i, 1000 + i))
+
+        # No gettempdir patch: correctness depends on the run_root arg.
+        cleanup_old_runs(1, str(tmp_path))
+
+        survivors = sorted(p.name for p in tmp_path.iterdir())
+        assert survivors == ["magi-run-0002"]
+
+    def test_missing_run_root_is_noop(self, tmp_path):
+        """BDD-15: a non-existent run_root degrades to no-op (no raise)."""
+        from temp_dirs import cleanup_old_runs
+
+        cleanup_old_runs(1, str(tmp_path / "does-not-exist"))  # must not raise
 
 
 class TestStderrShimModule:
