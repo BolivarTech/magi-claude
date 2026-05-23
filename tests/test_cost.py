@@ -41,3 +41,22 @@ class TestAggregateCost:
 
         out = aggregate_cost(str(tmp_path), ["melchior"])  # no raw file at all
         assert out["total_usd"] == 0.0 and out["per_agent"]["melchior"] == 0.0
+
+    def test_non_dict_json_envelope_is_fail_safe(self, tmp_path):
+        """F1: valid JSON that is not an object (e.g. null, list) must return 0."""
+        from cost import aggregate_cost
+
+        # Write a valid JSON list — data.get(...) raises AttributeError without the guard
+        (tmp_path / "melchior.raw.json").write_text("[]", encoding="utf-8")
+        out = aggregate_cost(str(tmp_path), ["melchior"])
+        assert out["total_usd"] == 0.0
+        assert out["per_agent"]["melchior"] == 0.0
+
+    def test_corrupt_json_file_is_fail_safe(self, tmp_path):
+        """F2: invalid JSON content must return 0 (pins existing JSONDecodeError path)."""
+        from cost import aggregate_cost
+
+        (tmp_path / "melchior.raw.json").write_text("{ this is not json", encoding="utf-8")
+        out = aggregate_cost(str(tmp_path), ["melchior"])
+        assert out["total_usd"] == 0.0
+        assert out["per_agent"]["melchior"] == 0.0
