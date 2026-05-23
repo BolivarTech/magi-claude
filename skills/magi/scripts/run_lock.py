@@ -13,8 +13,12 @@ The lock is advisory and self-healing: a crashed process leaves a stale
 lock behind, but :func:`is_pid_alive` reports the dead PID as not alive
 on the next cleanup, and :data:`LOCK_STALE_AFTER_SECONDS` bounds the
 window in which a reused PID could keep a dead run's directory alive.
-Corrupt or empty locks are reclaimed once the run directory ages past the
-staleness floor, bounding the leak to at most :data:`LOCK_STALE_AFTER_SECONDS`.
+Corrupt or empty locks (unparseable PID, garbage or future-dated timestamp)
+are bounded by the dir-mtime escape: the dir is retained while fresh and
+reclaimed once it ages past :data:`LOCK_STALE_AFTER_SECONDS`.  Residual: a
+corrupt lock carrying a *valid recent timestamp and an implausibly large bound*
+is over-retained up to that bound rather than the floor (bounded over-retention,
+not a crash or an unbounded leak).
 """
 
 from __future__ import annotations
@@ -160,10 +164,13 @@ def _lock_path(run_dir: str) -> str:
 def _dir_is_fresh(run_dir: str) -> bool:
     """Return True if *run_dir*'s mtime is younger than the staleness floor.
 
-    Used as the liveness fallback whenever a bounded age cannot be computed
-    (corrupt PID line, or alive PID with an unreadable timestamp), so an
-    indeterminate lock cannot keep a directory live forever.  An unreadable
-    mtime is treated as fresh (conservative).
+    Used as the liveness fallback for indeterminate locks — corrupt PID,
+    unreadable or future-dated timestamp — bounding the common corrupt-lock
+    shapes via the dir-mtime rather than the lock content.  A corrupt lock
+    with a *valid recent timestamp and a large bound* does not route here; it
+    is handled by the normal age-vs-threshold path and may be over-retained
+    up to that bound (bounded over-retention residual, not a crash).  An
+    unreadable mtime is treated as fresh (conservative).
 
     Args:
         run_dir: Absolute path of the MAGI run directory to check.
