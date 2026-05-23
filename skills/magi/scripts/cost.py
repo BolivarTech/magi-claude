@@ -23,6 +23,8 @@ def _agent_cost(output_dir: str, agent: str) -> float:
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             data = json.load(fh)
+        if not isinstance(data, dict):
+            return 0.0
         value = data.get("total_cost_usd")
         return (
             float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
