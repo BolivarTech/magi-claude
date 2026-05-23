@@ -13,12 +13,15 @@ The lock is advisory and self-healing: a crashed process leaves a stale
 lock behind, but :func:`is_pid_alive` reports the dead PID as not alive
 on the next cleanup, and :data:`LOCK_STALE_AFTER_SECONDS` bounds the
 window in which a reused PID could keep a dead run's directory alive.
+Corrupt or empty locks are reclaimed once the run directory ages past the
+staleness floor, bounding the leak to at most :data:`LOCK_STALE_AFTER_SECONDS`.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 LOCK_FILENAME = ".magi-lock"
@@ -39,7 +42,15 @@ def is_pid_alive(pid: int) -> bool:
     + ``WaitForSingleObject(handle, 0)``; ``WAIT_TIMEOUT`` means still
     running, ``WAIT_OBJECT_0`` means exited. Any probe failure is
     treated conservatively as alive so cleanup never prunes a dir whose
-    liveness it could not verify (spec R8).
+    liveness it could not verify.
+
+    Out-of-range PIDs (exceeding the platform's addressable integer
+    range, e.g. from a corrupt lock file) are returned conservatively
+    as alive rather than raising or silently misreporting as dead.
+    The ``except Exception`` final catch ensures any unexpected probe
+    failure — including ``OverflowError`` on POSIX or future ctypes
+    changes — defaults to the safe side.  ``BaseException`` is NOT
+    caught so ``KeyboardInterrupt`` and ``SystemExit`` propagate normally.
 
     Args:
         pid: Process id to probe.
@@ -49,15 +60,25 @@ def is_pid_alive(pid: int) -> bool:
     """
     if pid <= 0:
         return False
-    if sys.platform == "win32":
-        return _is_pid_alive_windows(pid)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
+    # An out-of-range PID cannot belong to any real process; treat as
+    # conservatively alive rather than letting os.kill raise OverflowError
+    # (POSIX) or ctypes silently wrap the value to a different PID (Windows).
+    if pid > 4_294_967_295:  # max uint32 — no OS supports PIDs above this
         return True
-    return True
+    try:
+        if sys.platform == "win32":
+            return _is_pid_alive_windows(pid)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        return True
+    except Exception:  # noqa: BLE001
+        # Any unexpected failure (OverflowError, ctypes.ArgumentError, …)
+        # defaults to conservatively alive.
+        return True
 
 
 def _is_pid_alive_windows(pid: int) -> bool:
@@ -187,25 +208,49 @@ def remove_lock(run_dir: str) -> None:
 def is_dir_live(run_dir: str) -> bool:
     """Return True if *run_dir* belongs to a still-running MAGI process.
 
-    Decision table (spec R5/R8/R13):
+    Decision table:
 
-    * No lock file at all -> not live (a completed/legacy run; BDD-4).
-    * Lock present but PID unparseable -> conservatively live (BDD-5).
-    * PID present and dead -> not live (BDD-3/11).
+    * No lock file at all -> not live (a completed/legacy run).
+    * Lock present but PID unparseable and dir is fresh -> conservatively live.
+    * Lock present but PID unparseable and dir is stale -> not live (mtime escape).
+    * PID present and dead -> not live.
     * PID present and alive but lock age >= the **persisted per-run bound**
       (falling back to ``LOCK_STALE_AFTER_SECONDS`` when the bound line is
-      absent/corrupt) -> not live, mitigating PID reuse (BDD-16/19/20).
-    * PID present, alive, and within the bound -> live (BDD-2).
+      absent/corrupt) -> not live, mitigating PID reuse.
+    * PID present, alive, and within the bound -> live.
+
+    Structurally total: any unexpected ``Exception`` from a probe returns
+    ``True`` (conservative) so ``cleanup_old_runs``'s comprehension can
+    never raise even if a future probe change regresses.  ``BaseException``
+    is NOT caught so ``KeyboardInterrupt`` and ``SystemExit`` propagate.
     """
+    try:
+        return _is_dir_live_inner(run_dir)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _is_dir_live_inner(run_dir: str) -> bool:
+    """Inner (non-total) implementation of :func:`is_dir_live`."""
     pid, age, bound = _parse_lock(run_dir)
     if pid is None:
-        # Distinguish "no lock" (eligible) from "corrupt lock" (live).
-        return os.path.exists(_lock_path(run_dir))
+        lock = _lock_path(run_dir)
+        if not os.path.exists(lock):
+            # No lock file at all -> eligible (not live).
+            return False
+        # Corrupt/empty lock: conservatively live when the dir is fresh,
+        # eligible once the dir ages past the staleness floor.
+        try:
+            dir_age = time.time() - os.path.getmtime(run_dir)
+        except OSError:
+            # Cannot stat the dir — be conservative.
+            return True
+        return dir_age < LOCK_STALE_AFTER_SECONDS
     if not is_pid_alive(pid):
         return False
     # Floor the threshold so a corrupt-but-parseable tiny/negative bound
-    # cannot defeat the conservative bias (Mel iter-3); a legitimate bound
-    # is always >= the floor by construction (staleness_bound_for_timeout).
+    # cannot defeat the conservative bias; a legitimate bound is always
+    # >= the floor by construction (staleness_bound_for_timeout).
     threshold = LOCK_STALE_AFTER_SECONDS if bound is None else max(bound, LOCK_STALE_AFTER_SECONDS)
     if age is not None and age >= threshold:
         return False
