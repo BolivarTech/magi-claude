@@ -439,7 +439,9 @@ class TestProbeFailureWarning:
         # Force the POSIX branch (platform-independent patch) and make os.kill
         # raise a non-OSError so the outer except Exception fires.
         monkeypatch.setattr(run_lock.sys, "platform", "linux")
-        monkeypatch.setattr(run_lock.os, "kill", lambda pid, sig: (_ for _ in ()).throw(RuntimeError("boom")))
+        monkeypatch.setattr(
+            run_lock.os, "kill", lambda pid, sig: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
 
         # First call: returns True and emits warning.
         result1 = run_lock.is_pid_alive(42)
@@ -467,7 +469,9 @@ class TestProbeFailureWarning:
 
         # Patch the inner function to raise an unexpected error.
         monkeypatch.setattr(
-            run_lock, "_is_dir_live_inner", lambda run_dir: (_ for _ in ()).throw(RuntimeError("inner boom"))
+            run_lock,
+            "_is_dir_live_inner",
+            lambda run_dir: (_ for _ in ()).throw(RuntimeError("inner boom")),
         )
 
         result1 = run_lock.is_dir_live(str(tmp_path))

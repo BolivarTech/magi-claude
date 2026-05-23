@@ -32,6 +32,33 @@ LOCK_FILENAME = ".magi-lock"
 # threshold below 6h.
 LOCK_STALE_AFTER_SECONDS = 21_600  # 6 hours
 
+# Once-per-process gate: after the first unexpected probe failure emits a
+# WARNING, subsequent failures stay silent to avoid per-directory spam.
+# The flag is module-level so it survives across calls in the same process;
+# tests reset it via monkeypatch.setattr to keep isolation.
+_PROBE_FAILURE_WARNED: bool = False
+
+
+def _warn_probe_failure(probe: str, exc: Exception) -> None:
+    """Emit one WARNING per process on an unexpected liveness-probe failure.
+
+    After the first call the module-level :data:`_PROBE_FAILURE_WARNED` flag
+    is set so subsequent failures stay silent (no per-directory spam).  The
+    caller continues to return ``True`` (conservative) regardless.
+
+    Args:
+        probe: Name of the calling function (for context in the message).
+        exc:   The unexpected exception that was caught.
+    """
+    global _PROBE_FAILURE_WARNED  # noqa: PLW0603
+    if not _PROBE_FAILURE_WARNED:
+        _PROBE_FAILURE_WARNED = True
+        print(
+            f"WARNING: run_lock.{probe} unexpected liveness-probe error"
+            f" ({type(exc).__name__}: {exc}); treating as live",
+            file=sys.stderr,
+        )
+
 
 def is_pid_alive(pid: int) -> bool:
     """Return True if a process with *pid* currently exists.
@@ -49,8 +76,10 @@ def is_pid_alive(pid: int) -> bool:
     as alive rather than raising or silently misreporting as dead.
     The ``except Exception`` final catch ensures any unexpected probe
     failure — including ``OverflowError`` on POSIX or future ctypes
-    changes — defaults to the safe side.  ``BaseException`` is NOT
-    caught so ``KeyboardInterrupt`` and ``SystemExit`` propagate normally.
+    changes — defaults to the safe side.  The first such failure emits
+    one ``WARNING`` via :func:`_warn_probe_failure` so a silent regression
+    to no-op cleanup is observable.  ``BaseException`` is NOT caught so
+    ``KeyboardInterrupt`` and ``SystemExit`` propagate normally.
 
     Args:
         pid: Process id to probe.
@@ -75,9 +104,11 @@ def is_pid_alive(pid: int) -> bool:
         except OSError:
             return True
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         # Any unexpected failure (OverflowError, ctypes.ArgumentError, …)
-        # defaults to conservatively alive.
+        # defaults to conservatively alive.  Emit one WARNING per process so
+        # the failure is observable without spamming on every cleanup call.
+        _warn_probe_failure("is_pid_alive", exc)
         return True
 
 
@@ -257,12 +288,16 @@ def is_dir_live(run_dir: str) -> bool:
 
     Structurally total: any unexpected ``Exception`` from a probe returns
     ``True`` (conservative) so ``cleanup_old_runs``'s comprehension can
-    never raise even if a future probe change regresses.  ``BaseException``
-    is NOT caught so ``KeyboardInterrupt`` and ``SystemExit`` propagate.
+    never raise even if a future probe change regresses.  The first such
+    failure emits one ``WARNING`` to stderr via :func:`_warn_probe_failure`
+    to prevent a regression silently becoming a no-op cleanup.
+    ``BaseException`` is NOT caught so ``KeyboardInterrupt`` and
+    ``SystemExit`` propagate.
     """
     try:
         return _is_dir_live_inner(run_dir)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _warn_probe_failure("is_dir_live", exc)
         return True
 
 
