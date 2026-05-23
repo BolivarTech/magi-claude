@@ -2158,3 +2158,23 @@ class TestDedupById:
         out = determine_consensus([a, b])
         assert len(out["findings"]) == 1  # merged by normalized title (today's behavior)
         assert sorted(out["findings"][0]["sources"]) == ["balthasar", "melchior"]
+
+
+# ---------------------------------------------------------------------------
+# TestAgentPromptsDocumentOptionalFindingFields
+# ---------------------------------------------------------------------------
+
+
+class TestAgentPromptsDocumentOptionalFindingFields:
+    """Schema pin: all three agent prompts must document the optional
+    file/line/category fields introduced in v3.0.0 Block A."""
+
+    def test_agent_prompts_document_optional_finding_fields(self):
+        from pathlib import Path
+
+        agents = Path(__file__).parent.parent / "skills" / "magi" / "agents"
+        for name in ("melchior.md", "balthasar.md", "caspar.md"):
+            text = (agents / name).read_text(encoding="utf-8")
+            assert "findings[].category" in text and "findings[].file" in text, (
+                f"{name} is missing findings[].file or findings[].category documentation"
+            )
