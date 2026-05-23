@@ -597,8 +597,10 @@ class TestCleanupOldRuns:
 
         dead = tmp_path / "magi-run-0000"
         dead.mkdir()
-        os.utime(dead, (1000, 1000))
         write_lock(str(dead))
+        # Set mtime AFTER write_lock so the atomic rename does not overwrite
+        # the backdated timestamp with the current time.
+        os.utime(dead, (1000, 1000))
         newer = tmp_path / "magi-run-0001"
         newer.mkdir()
         os.utime(newer, (2000, 2000))

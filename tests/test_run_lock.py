@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -313,6 +314,56 @@ class TestStalenessBound:
         write_lock(str(tmp_path), 12345)
         _pid, _age, bound = _parse_lock(str(tmp_path))
         assert bound == 12345
+
+
+class TestCorruptLockMtimeEscape:
+    """Corrupt/empty lock dirs must age out via mtime escape, not leak forever."""
+
+    def test_corrupt_lock_fresh_dir_is_live(self, tmp_path):
+        """A garbage lock on a fresh dir is conservatively live (dir age < floor)."""
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        (tmp_path / LOCK_FILENAME).write_text("garbage\n", encoding="utf-8")
+        # tmp_path mtime is now; dir_age is ~0 << LOCK_STALE_AFTER_SECONDS
+        assert is_dir_live(str(tmp_path)) is True
+
+    def test_corrupt_lock_old_dir_is_eligible(self, tmp_path):
+        """A garbage lock on a stale dir is eligible (dir age >= floor)."""
+        import run_lock
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        (tmp_path / LOCK_FILENAME).write_text("garbage\n", encoding="utf-8")
+        # Back-date the dir mtime by more than LOCK_STALE_AFTER_SECONDS.
+        old_mtime = time.time() - run_lock.LOCK_STALE_AFTER_SECONDS - 60
+        os.utime(str(tmp_path), (old_mtime, old_mtime))
+        assert is_dir_live(str(tmp_path)) is False
+
+    def test_empty_lock_old_dir_is_eligible(self, tmp_path):
+        """An empty lock file on a stale dir is also eligible."""
+        import run_lock
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        (tmp_path / LOCK_FILENAME).write_text("", encoding="utf-8")
+        old_mtime = time.time() - run_lock.LOCK_STALE_AFTER_SECONDS - 60
+        os.utime(str(tmp_path), (old_mtime, old_mtime))
+        assert is_dir_live(str(tmp_path)) is False
+
+
+class TestWriteLockAtomic:
+    """write_lock must produce exactly one .magi-lock file with no partial writes."""
+
+    def test_write_lock_is_atomic_no_partial(self, tmp_path):
+        """After write_lock, exactly .magi-lock exists and no .magi-lock.tmp remains."""
+        from run_lock import LOCK_FILENAME, write_lock
+
+        write_lock(str(tmp_path))
+        lock = tmp_path / LOCK_FILENAME
+        tmp = tmp_path / (LOCK_FILENAME + ".tmp")
+        assert lock.exists(), ".magi-lock must exist after write_lock"
+        assert not tmp.exists(), ".magi-lock.tmp must not remain after write_lock"
+        # Verify the file has the expected 3 lines (pid, timestamp, bound).
+        lines = lock.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3, f"Expected 3 lines, got {len(lines)}: {lines}"
 
 
 class TestIsPidAliveTotality:
