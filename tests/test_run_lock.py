@@ -313,3 +313,20 @@ class TestStalenessBound:
         write_lock(str(tmp_path), 12345)
         _pid, _age, bound = _parse_lock(str(tmp_path))
         assert bound == 12345
+
+
+class TestIsPidAliveTotality:
+    """Out-of-range and unexpected-exception paths must return True (conservative-live)."""
+
+    def test_out_of_range_pid_is_conservatively_alive(self):
+        """An astronomically large PID must return True, never raise.
+
+        On POSIX, os.kill(huge, 0) raises OverflowError. On Windows the
+        ctypes call raises ctypes.ArgumentError. Neither is in the current
+        except clause so the exception would propagate without the fix.
+        """
+        from run_lock import is_pid_alive
+
+        # Must not raise; must return True (conservative-live).
+        result = is_pid_alive(99999999999999999999)
+        assert result is True

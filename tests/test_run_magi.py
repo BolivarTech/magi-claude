@@ -630,6 +630,28 @@ class TestCleanupOldRuns:
 
         cleanup_old_runs(1, str(tmp_path / "does-not-exist"))  # must not raise
 
+    def test_cleanup_total_on_out_of_range_pid_lock(self, tmp_path):
+        """cleanup_old_runs must not raise when a lock contains an out-of-range PID.
+
+        A corrupt lock whose first line is an astronomically large integer
+        causes os.kill(huge, 0) to raise OverflowError (POSIX) or the ctypes
+        call to raise ctypes.ArgumentError (Windows). Without the fix, that
+        exception propagates through is_dir_live into the comprehension and
+        out of cleanup_old_runs, breaking every subsequent launch.
+        The dir must be treated as live (conservative) so it is NOT deleted.
+        """
+        from run_lock import LOCK_FILENAME
+        from temp_dirs import cleanup_old_runs
+
+        run_dir = tmp_path / "magi-run-poisoned"
+        run_dir.mkdir()
+        # Write a lock whose PID line is out of range for any OS call.
+        (run_dir / LOCK_FILENAME).write_text("99999999999999999999\n", encoding="utf-8")
+
+        # Must not raise; and the dir must survive (treated as live).
+        cleanup_old_runs(0, str(tmp_path))
+        assert run_dir.exists(), "Out-of-range-PID dir must be treated as live (not deleted)"
+
 
 class TestStderrShimModule:
     """C-2: the stderr-buffering machinery lives in its own module.
