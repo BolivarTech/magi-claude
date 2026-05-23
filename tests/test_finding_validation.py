@@ -38,7 +38,8 @@ class TestValidateFindings:
         vf, rg = self._ranges()
         kept, dropped, annotated = validate_findings(
             [{"severity": "warning", "title": "x", "detail": "d", "file": "ghost.py", "line": 1}],
-            vf, rg,
+            vf,
+            rg,
         )
         assert kept == [] and dropped == 1 and annotated == 0
 
@@ -48,7 +49,8 @@ class TestValidateFindings:
         vf, rg = self._ranges()
         kept, dropped, annotated = validate_findings(
             [{"severity": "warning", "title": "x", "detail": "d", "file": "src/a.py", "line": 999}],
-            vf, rg,
+            vf,
+            rg,
         )
         assert dropped == 0 and annotated == 1 and len(kept) == 1
         assert "outside changed range" in kept[0]["detail"]
@@ -67,7 +69,8 @@ class TestValidateFindings:
         vf, rg = self._ranges()
         kept, dropped, annotated = validate_findings(
             [{"severity": "warning", "title": "x", "detail": "d", "file": "src/a.py", "line": 11}],
-            vf, rg,
+            vf,
+            rg,
         )
         assert dropped == 0 and annotated == 0 and kept[0]["detail"] == "d"
 
@@ -82,7 +85,8 @@ class TestValidateFindings:
         # _DIFF touches src/a.py; basename "a.py" is unique in the diff.
         kept, dropped, annotated = validate_findings(
             [{"severity": "warning", "title": "x", "detail": "d", "file": "a.py", "line": 11}],
-            vf, rg,
+            vf,
+            rg,
         )
         assert dropped == 0 and annotated == 1 and len(kept) == 1
         assert "[path unverified]" in kept[0]["detail"]
@@ -94,7 +98,8 @@ class TestValidateFindings:
         vf, rg = self._ranges()
         kept, dropped, annotated = validate_findings(
             [{"severity": "warning", "title": "x", "detail": "d", "file": "ghost.py", "line": 5}],
-            vf, rg,
+            vf,
+            rg,
         )
         assert kept == [] and dropped == 1 and annotated == 0
 
@@ -127,7 +132,8 @@ class TestValidateFindings:
 
         kept, dropped, annotated = validate_findings(
             [{"severity": "warning", "title": "x", "detail": "d", "file": "x/a.py", "line": 2}],
-            vf, rg,
+            vf,
+            rg,
         )
         # Ambiguous basename -> hard-drop (too weak a signal)
         assert kept == [] and dropped == 1 and annotated == 0
