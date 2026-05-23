@@ -348,6 +348,43 @@ class TestCorruptLockMtimeEscape:
         os.utime(str(tmp_path), (old_mtime, old_mtime))
         assert is_dir_live(str(tmp_path)) is False
 
+    def test_out_of_range_pid_corrupt_ts_old_dir_is_eligible(self, tmp_path):
+        """Out-of-range PID + garbage timestamp + stale dir -> eligible (not live).
+
+        is_pid_alive returns True (conservative) for huge PIDs, so without the
+        age-None mtime-escape extension the lock keeps the dir live forever.
+        The dir-mtime fallback must close this leak shape.
+
+        Note: write_lock is called BEFORE os.utime so the dir mtime reflects
+        the backdate, not the subsequent lock-file creation.
+        """
+        import run_lock
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        # Backdate the dir first, then write the lock (so dir mtime == old_mtime).
+        old_mtime = time.time() - run_lock.LOCK_STALE_AFTER_SECONDS - 60
+        os.utime(str(tmp_path), (old_mtime, old_mtime))
+        (tmp_path / LOCK_FILENAME).write_text(
+            "99999999999999999999\nnot-a-timestamp\n", encoding="utf-8"
+        )
+        # Backdate again after writing the lock file (write updated dir mtime).
+        os.utime(str(tmp_path), (old_mtime, old_mtime))
+        assert is_dir_live(str(tmp_path)) is False
+
+    def test_out_of_range_pid_corrupt_ts_fresh_dir_is_live(self, tmp_path):
+        """Out-of-range PID + garbage timestamp + fresh dir -> conservatively live.
+
+        Same lock shape as above, but the dir mtime is recent, so the mtime
+        escape keeps it live (conservative: we cannot compute a bounded age).
+        """
+        from run_lock import LOCK_FILENAME, is_dir_live
+
+        (tmp_path / LOCK_FILENAME).write_text(
+            "99999999999999999999\nnot-a-timestamp\n", encoding="utf-8"
+        )
+        # Dir mtime is ~now (tmp_path freshly created).
+        assert is_dir_live(str(tmp_path)) is True
+
 
 class TestWriteLockAtomic:
     """write_lock must produce exactly one .magi-lock file with no partial writes."""
