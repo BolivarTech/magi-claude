@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timezone
 
 LOCK_FILENAME = ".magi-lock"
 # Floor / default for the per-run staleness guard (spec R13). Each lock
@@ -97,3 +98,114 @@ def _is_pid_alive_windows(pid: int) -> bool:
             kernel32.CloseHandle(handle)
     except (OSError, AttributeError, ImportError):
         return True
+
+
+def _lock_path(run_dir: str) -> str:
+    return os.path.join(run_dir, LOCK_FILENAME)
+
+
+def staleness_bound_for_timeout(timeout: int) -> int:
+    """Return the per-run staleness bound (seconds) for a given ``--timeout``.
+
+    The orchestrator kills each agent at ``timeout`` (x2 with the single
+    retry), so a live run cannot exceed ~2x ``timeout``; ``+600`` adds
+    orchestration margin. Floored at :data:`LOCK_STALE_AFTER_SECONDS` so
+    short timeouts still get the generous 6h default. Persisting this in
+    the lock closes F9 — a long-``--timeout`` run is never pruned alive.
+    """
+    return max(2 * timeout + 600, LOCK_STALE_AFTER_SECONDS)
+
+
+def write_lock(run_dir: str, max_age_seconds: int | None = None) -> None:
+    """Write ``<run_dir>/.magi-lock`` with PID, start time, and staleness bound.
+
+    Three lines: the integer PID, the ISO-8601 UTC start timestamp, and
+    the per-run staleness bound in seconds (R2/R13). ``max_age_seconds=None``
+    falls back to :data:`LOCK_STALE_AFTER_SECONDS`. Best-effort — an I/O
+    error is reported to stderr and swallowed; a missing lock merely
+    degrades this one dir to pre-2.6.0 behavior, it does not break the run.
+    """
+    bound = LOCK_STALE_AFTER_SECONDS if max_age_seconds is None else int(max_age_seconds)
+    payload = f"{os.getpid()}\n{datetime.now(timezone.utc).isoformat()}\n{bound}\n"
+    try:
+        with open(_lock_path(run_dir), "w", encoding="utf-8") as fh:
+            fh.write(payload)
+    except OSError as exc:
+        print(f"WARNING: could not write run lock in {run_dir}: {exc}", file=sys.stderr)
+
+
+def _parse_lock(run_dir: str) -> tuple[int | None, float | None, int | None]:
+    """Return ``(pid, age_seconds, max_age_seconds)`` parsed from the lock.
+
+    Any element is ``None`` when missing or unparseable. ``age_seconds`` is
+    wall-clock seconds since the recorded ISO start timestamp;
+    ``max_age_seconds`` is the persisted per-run staleness bound (R2).
+    """
+    try:
+        with open(_lock_path(run_dir), encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return None, None, None
+    pid: int | None = None
+    age: float | None = None
+    bound: int | None = None
+    if lines:
+        try:
+            pid = int(lines[0].strip())
+        except ValueError:
+            pid = None
+    if len(lines) > 1:
+        try:
+            started = datetime.fromisoformat(lines[1].strip())
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - started).total_seconds()
+        except ValueError:
+            age = None
+    if len(lines) > 2:
+        try:
+            bound = int(lines[2].strip())
+        except ValueError:
+            bound = None
+    return pid, age, bound
+
+
+def read_lock(run_dir: str) -> int | None:
+    """Return the PID recorded in the lock, or None if absent/corrupt."""
+    return _parse_lock(run_dir)[0]
+
+
+def remove_lock(run_dir: str) -> None:
+    """Remove the lock file if present. Best-effort, never raises."""
+    try:
+        os.remove(_lock_path(run_dir))
+    except OSError:
+        pass
+
+
+def is_dir_live(run_dir: str) -> bool:
+    """Return True if *run_dir* belongs to a still-running MAGI process.
+
+    Decision table (spec R5/R8/R13):
+
+    * No lock file at all -> not live (a completed/legacy run; BDD-4).
+    * Lock present but PID unparseable -> conservatively live (BDD-5).
+    * PID present and dead -> not live (BDD-3/11).
+    * PID present and alive but lock age >= the **persisted per-run bound**
+      (falling back to ``LOCK_STALE_AFTER_SECONDS`` when the bound line is
+      absent/corrupt) -> not live, mitigating PID reuse (BDD-16/19/20).
+    * PID present, alive, and within the bound -> live (BDD-2).
+    """
+    pid, age, bound = _parse_lock(run_dir)
+    if pid is None:
+        # Distinguish "no lock" (eligible) from "corrupt lock" (live).
+        return os.path.exists(_lock_path(run_dir))
+    if not is_pid_alive(pid):
+        return False
+    # Floor the threshold so a corrupt-but-parseable tiny/negative bound
+    # cannot defeat the conservative bias (Mel iter-3); a legitimate bound
+    # is always >= the floor by construction (staleness_bound_for_timeout).
+    threshold = LOCK_STALE_AFTER_SECONDS if bound is None else max(bound, LOCK_STALE_AFTER_SECONDS)
+    if age is not None and age >= threshold:
+        return False
+    return True
