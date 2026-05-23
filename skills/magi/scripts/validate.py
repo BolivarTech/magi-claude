@@ -15,6 +15,8 @@ import os
 import re
 from typing import Any
 
+from finding_id import normalize_category
+
 
 class ValidationError(Exception):
     """Raised when agent output fails validation.
@@ -273,5 +275,32 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
                 f"of {_MAX_DETAIL_LENGTH} characters.",
                 filepath,
             )
+        # --- optional structured fields (v3.0.0 Block A) ---
+        # file/line are optional (null in design/analysis); type-checked only
+        # when present. category defaults to a normalized slug ("other" when
+        # absent/unknown) so downstream id/dedup always has a value.
+        file_val = finding.get("file")
+        if file_val is not None and not isinstance(file_val, str):
+            raise ValidationError(
+                f"Finding at index {idx} field 'file' must be a string or null, "
+                f"got {type(file_val).__name__}.",
+                filepath,
+            )
+        line_val = finding.get("line")
+        if line_val is not None and (not isinstance(line_val, int) or isinstance(line_val, bool)):
+            raise ValidationError(
+                f"Finding at index {idx} field 'line' must be an integer or null, "
+                f"got {type(line_val).__name__}.",
+                filepath,
+            )
+        # A4 (fail-soft, iter-3): a non-positive line is a minor agent slip; drop
+        # it to None (keep the finding) rather than raise — a hard ValidationError
+        # here would reject the whole agent and risks an asymmetric Caspar drop
+        # (§2.2.5). A wrong-TYPE line (e.g. "ten") is still rejected above.
+        if isinstance(line_val, int) and not isinstance(line_val, bool) and line_val <= 0:
+            line_val = None
+        finding["file"] = file_val
+        finding["line"] = line_val
+        finding["category"] = normalize_category(finding.get("category"))
 
     return dict(data)  # type-narrow from Any
