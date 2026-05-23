@@ -34,11 +34,13 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
-from run_lock import is_dir_live
+from run_lock import LOCK_STALE_AFTER_SECONDS, is_dir_live
 
 MAGI_DIR_PREFIX = "magi-run-"
 MAGI_RUNS_CONTAINER = "magi-runs"
+LEGACY_SWEEP_MARKER = ".legacy-swept"
 
 
 def _scan_magi_dirs(tmp_root: str) -> list[tuple[float, str]]:
@@ -199,3 +201,48 @@ def project_run_root(project_root: str) -> str:
         )
         return tmp_root
     return root
+
+
+def sweep_legacy_runs_once() -> None:
+    """One-shot removal of pre-2.6.0 ``magi-run-*`` dirs directly under temp.
+
+    Older MAGI versions created run dirs directly under
+    ``tempfile.gettempdir()`` without the per-project namespace or a lock
+    file, so they are now orphaned. This removes them once — guarded by a
+    marker file under the ``magi-runs`` container so the (potentially
+    slow) global temp scan does not recur on every run — deleting only
+    dirs older than :data:`run_lock.LOCK_STALE_AFTER_SECONDS` so a
+    concurrently-running old version's in-progress dir is not removed
+    (spec R14, BDD-17). The ``magi-runs`` container itself does not match
+    ``MAGI_DIR_PREFIX`` and is never a candidate (BDD-18).
+
+    Total: every failure path degrades to no-op/warning; never raises
+    into the orchestrator.
+    """
+    tmp_root = tempfile.gettempdir()
+    container = os.path.join(tmp_root, MAGI_RUNS_CONTAINER)
+    marker = os.path.join(container, LEGACY_SWEEP_MARKER)
+
+    try:
+        os.makedirs(container, exist_ok=True)
+        if os.path.exists(marker):
+            return
+    except OSError:
+        return
+
+    now = time.time()
+    safe_prefix = _safe_temp_prefix(tmp_root)
+    try:
+        entries = _scan_magi_dirs(tmp_root)
+    except OSError:
+        entries = []
+
+    for mtime, path in entries:
+        if now - mtime >= LOCK_STALE_AFTER_SECONDS:
+            _safe_rmtree_under(path, safe_prefix)
+
+    try:
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write("swept\n")
+    except OSError:
+        pass
