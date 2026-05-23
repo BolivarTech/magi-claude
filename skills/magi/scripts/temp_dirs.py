@@ -35,6 +35,8 @@ import shutil
 import sys
 import tempfile
 
+from run_lock import is_dir_live
+
 MAGI_DIR_PREFIX = "magi-run-"
 MAGI_RUNS_CONTAINER = "magi-runs"
 
@@ -94,66 +96,71 @@ def _safe_rmtree_under(path: str, safe_prefix: str) -> None:
         )
 
 
-def cleanup_old_runs(keep: int) -> None:
-    """Remove oldest MAGI temp directories, keeping the most recent ones.
+def cleanup_old_runs(keep: int, run_root: str | None = None) -> None:
+    """Remove oldest MAGI temp directories under *run_root*, keeping recent ones.
 
-    Scans the system temp directory for directories matching the
-    :data:`MAGI_DIR_PREFIX` and removes the oldest so that at most
-    ``keep`` remain. Entries are sorted by ``st_mtime`` descending and,
-    for deterministic LRU under mtime ties, by path ascending - the
-    lexicographically smallest path is treated as the canonical
-    survivor. Symlinks are resolved and validated against the temp root
-    before deletion to prevent traversal attacks on shared systems.
+    Scans *run_root* (defaulting to the system temp dir for backward
+    compatibility) for ``magi-run-*`` directories. Directories whose
+    ``.magi-lock`` shows a still-running owner are **excluded entirely**
+    — they are neither counted against ``keep`` nor deleted — so a
+    concurrent session's in-progress run is never pruned (spec R5,
+    BDD-2). Among the remaining (non-live) dirs, the oldest beyond
+    ``keep`` are removed, sorted by ``st_mtime`` descending then path
+    ascending for a deterministic LRU under mtime ties.
 
-    Intended to be called **before** the current run's temp dir is
-    created, so the caller should pass ``keep_runs - 1`` when they want
-    a final on-disk count of ``keep_runs`` after :func:`create_output_dir`
-    adds the new dir. Without the off-by-one adjustment the final count
-    is always ``keep_runs + 1``.
+    Total: a missing/unscannable *run_root* and per-entry stat/rmtree
+    errors degrade to no-op/warning, never raising into the orchestrator
+    (spec R10, BDD-15).
 
     Args:
-        keep: Maximum number of existing runs to retain.
-            ``keep >= 0``: valid; ``keep == 0`` removes every matching
-            dir (the caller is reserving the only slot for the run it
-            is about to create). ``keep < 0`` disables cleanup entirely.
+        keep: Maximum number of non-live runs to retain. ``keep < 0``
+            disables cleanup; ``keep == 0`` removes every non-live dir.
+        run_root: Directory to scan. ``None`` -> ``tempfile.gettempdir()``.
     """
     if keep < 0:
         return
 
-    tmp_root = tempfile.gettempdir()
-    magi_dirs = _scan_magi_dirs(tmp_root)
+    if run_root is None:
+        run_root = tempfile.gettempdir()
 
-    # Fast path: nothing to prune - skip the sort and the per-entry loop.
-    # Never triggered when keep == 0 and at least one dir exists, so the
-    # "wipe everything" case falls through to the slice below.
-    if len(magi_dirs) <= keep:
+    try:
+        magi_dirs = _scan_magi_dirs(run_root)
+    except OSError:
         return
 
-    # Explicit key so the tie-breaking direction is documented and cannot
-    # drift if someone later replaces the list of tuples with a different
-    # container.
-    magi_dirs.sort(key=lambda entry: (-entry[0], entry[1]))
+    # Protect live dirs first: exclude from both the survivor budget and
+    # the deletion set.
+    candidates = [(mtime, path) for (mtime, path) in magi_dirs if not is_dir_live(path)]
 
-    safe_prefix = _safe_temp_prefix(tmp_root)
-    for _, path in magi_dirs[keep:]:
+    if len(candidates) <= keep:
+        return
+
+    candidates.sort(key=lambda entry: (-entry[0], entry[1]))
+
+    safe_prefix = _safe_temp_prefix(run_root)
+    for _, path in candidates[keep:]:
         _safe_rmtree_under(path, safe_prefix)
 
 
-def create_output_dir(output_dir: str | None) -> str:
+def create_output_dir(output_dir: str | None, run_root: str | None = None) -> str:
     """Create and return the output directory.
-
-    Uses ``tempfile.mkdtemp`` for cross-platform compatibility.
 
     Args:
         output_dir: Explicit path, or None to create a temp dir.
+        run_root: Parent directory for the temp dir when *output_dir* is
+            None. Defaults to ``tempfile.gettempdir()`` for backward
+            compatibility; the namespaced flow passes the per-project
+            container from :func:`project_run_root`.
 
     Returns:
         Path to the created output directory.
     """
-    if output_dir is None:
-        return tempfile.mkdtemp(prefix=MAGI_DIR_PREFIX)
-    os.makedirs(output_dir, exist_ok=True)
-    return output_dir
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        return output_dir
+    if run_root is None:
+        run_root = tempfile.gettempdir()
+    return tempfile.mkdtemp(prefix=MAGI_DIR_PREFIX, dir=run_root)
 
 
 def project_run_root(project_root: str) -> str:
