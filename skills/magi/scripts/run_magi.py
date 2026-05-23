@@ -22,6 +22,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -51,10 +52,13 @@ from subprocess_utils import (  # noqa: E402
     reap_and_drain_stderr as _reap_and_drain_stderr,
     write_stderr_log as _write_stderr_log,
 )
+from run_lock import remove_lock, staleness_bound_for_timeout, write_lock  # noqa: E402
 from temp_dirs import (  # noqa: E402
     MAGI_DIR_PREFIX,
     cleanup_old_runs,
     create_output_dir,
+    project_run_root,
+    sweep_legacy_runs_once,
 )
 from review_context import enrich_code_review_context  # noqa: E402
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
@@ -733,6 +737,29 @@ def _enable_utf8_console_io() -> None:
         reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
+def _resolve_project_root() -> str:
+    """Return the git toplevel of the cwd, or the realpath of cwd if not a repo.
+
+    Used to derive the per-project temp namespace key. A missing ``git``
+    binary or a non-repository cwd falls back to the realpath of the
+    current directory (spec R4, BDD-13).
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if completed.returncode == 0:
+            top = completed.stdout.strip()
+            if top:
+                return top
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return os.path.realpath(os.getcwd())
+
+
 def main() -> None:
     """CLI entry point for MAGI orchestrator."""
     # Must run BEFORE any ``print`` or ``sys.exit`` — every output
@@ -774,11 +801,21 @@ def main() -> None:
 
     is_temp_dir = args.output_dir is None
     if is_temp_dir:
+        # One-shot removal of pre-2.6.0 dirs directly under temp.
+        sweep_legacy_runs_once()
+        # Per-project namespace so concurrent runs from other projects are
+        # isolated and never see each other's run dirs.
+        run_root = project_run_root(_resolve_project_root())
         # Prune to ``keep_runs - 1`` existing dirs so the run about to be
-        # created below brings the total to exactly ``keep_runs``. Without
-        # the ``- 1`` the final count is always ``keep_runs + 1``.
-        cleanup_old_runs(args.keep_runs - 1)
-    output_dir = create_output_dir(args.output_dir)
+        # created below brings the total to exactly ``keep_runs``. Live
+        # dirs (locked by a running session) are excluded from the budget.
+        cleanup_old_runs(args.keep_runs - 1, run_root)
+        output_dir = create_output_dir(None, run_root)
+        # Mark this run live with a per-run staleness bound derived from
+        # --timeout (closes F9) so a concurrent session's cleanup skips it.
+        write_lock(output_dir, staleness_bound_for_timeout(args.timeout))
+    else:
+        output_dir = create_output_dir(args.output_dir)
 
     print("+==================================================+")
     print("|          MAGI SYSTEM -- INITIALIZING              |")
@@ -826,6 +863,12 @@ def main() -> None:
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     print(f"\nFull report saved to: {report_path}")
+
+    if is_temp_dir:
+        # Run completed: drop the liveness lock so this dir becomes
+        # ordinary podable history for future cleanups. The failure path
+        # (except BaseException -> rmtree) already removes it with the dir.
+        remove_lock(output_dir)
 
 
 if __name__ == "__main__":
