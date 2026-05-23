@@ -389,8 +389,8 @@ class TestCorruptLockMtimeEscape:
 class TestWriteLockAtomic:
     """write_lock must produce exactly one .magi-lock file with no partial writes."""
 
-    def test_write_lock_is_atomic_no_partial(self, tmp_path):
-        """After write_lock, exactly .magi-lock exists and no .magi-lock.tmp remains."""
+    def test_write_lock_leaves_complete_lock_no_tmp(self, tmp_path):
+        """After write_lock, exactly .magi-lock exists (3 lines) and no .magi-lock.tmp remains."""
         from run_lock import LOCK_FILENAME, write_lock
 
         write_lock(str(tmp_path))
