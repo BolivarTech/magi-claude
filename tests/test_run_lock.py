@@ -11,6 +11,21 @@ import sys
 import time
 
 import pytest
+import run_lock
+
+
+@pytest.fixture(autouse=True)
+def _reset_probe_warned():
+    """Reset the module-global _PROBE_FAILURE_WARNED flag before each test.
+
+    The flag persists across calls in the same process (once-per-process
+    gate).  Without this fixture, a test that triggers the warning leaves
+    the flag set, coupling later tests that check whether a WARNING is
+    emitted.  The autouse fixture restores isolation without requiring each
+    test to carry an inline monkeypatch reset.
+    """
+    run_lock._PROBE_FAILURE_WARNED = False
+    yield
 
 
 class TestIsPidAlive:
@@ -469,9 +484,12 @@ class TestIsPidAliveTotality:
     def test_out_of_range_pid_is_conservatively_alive(self):
         """An astronomically large PID must return True, never raise.
 
-        On POSIX, os.kill(huge, 0) raises OverflowError. On Windows the
-        ctypes call raises ctypes.ArgumentError. Neither is in the current
-        except clause so the exception would propagate without the fix.
+        The uint32 guard (``if pid > 4_294_967_295: return True``) intercepts
+        the value before any OS call, so neither os.kill nor ctypes is invoked.
+        This test pins that guard: if it were removed, POSIX would raise
+        OverflowError from os.kill and Windows would silently wrap the value
+        via ctypes — both unsafe paths avoided by returning conservatively alive
+        at the guard instead.
         """
         from run_lock import is_pid_alive
 
@@ -490,11 +508,11 @@ class TestProbeFailureWarning:
         (a) return True (conservative), and
         (b) emit exactly one WARNING line to stderr on the FIRST call;
             subsequent calls stay silent (no per-call spam).
+
+        _PROBE_FAILURE_WARNED is reset before this test by the module-level
+        autouse fixture _reset_probe_warned.
         """
         import run_lock
-
-        # Reset the once-per-process flag so the test is self-contained.
-        monkeypatch.setattr(run_lock, "_PROBE_FAILURE_WARNED", False)
 
         # Force the POSIX branch (platform-independent patch) and make os.kill
         # raise a non-OSError so the outer except Exception fires.
@@ -521,11 +539,11 @@ class TestProbeFailureWarning:
         """An unexpected Exception from _is_dir_live_inner must:
         (a) return True (conservative), and
         (b) emit exactly one WARNING to stderr on the first occurrence.
+
+        _PROBE_FAILURE_WARNED is reset before this test by the module-level
+        autouse fixture _reset_probe_warned.
         """
         import run_lock
-
-        # Reset the once-per-process flag.
-        monkeypatch.setattr(run_lock, "_PROBE_FAILURE_WARNED", False)
 
         # Patch the inner function to raise an unexpected error.
         monkeypatch.setattr(

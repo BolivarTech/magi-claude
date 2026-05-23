@@ -35,7 +35,7 @@ LOCK_STALE_AFTER_SECONDS = 21_600  # 6 hours
 # Once-per-process gate: after the first unexpected probe failure emits a
 # WARNING, subsequent failures stay silent to avoid per-directory spam.
 # The flag is module-level so it survives across calls in the same process;
-# tests reset it via monkeypatch.setattr to keep isolation.
+# tests reset it via the autouse fixture _reset_probe_warned in test_run_lock.py.
 _PROBE_FAILURE_WARNED: bool = False
 
 
