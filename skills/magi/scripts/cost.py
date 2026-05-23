@@ -22,11 +22,6 @@ _RAW_FILE_SUFFIX = ".raw.json"
 _COST_FIELD = "total_cost_usd"
 
 
-def _is_finite_number(value: object) -> bool:
-    """Return True for a real, finite int/float (excludes bool, inf, nan)."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
 def _agent_cost(output_dir: str, agent: str) -> float:
     """Return *agent*'s ``total_cost_usd`` from its raw envelope, or 0.0."""
     path = os.path.join(output_dir, f"{agent}{_RAW_FILE_SUFFIX}")
