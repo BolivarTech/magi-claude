@@ -36,7 +36,9 @@ def _agent_cost(output_dir: str, agent: str) -> float:
         if not isinstance(data, dict):
             return 0.0
         value = data.get(_COST_FIELD)
-        return float(value) if _is_finite_number(value) else 0.0
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return 0.0
+        return float(value) if math.isfinite(value) else 0.0
     except (OSError, json.JSONDecodeError, ValueError):
         return 0.0
 
