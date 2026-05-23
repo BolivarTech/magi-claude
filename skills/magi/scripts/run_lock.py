@@ -314,11 +314,12 @@ def _is_dir_live_inner(run_dir: str) -> bool:
         return _dir_is_fresh(run_dir)
     if not is_pid_alive(pid):
         return False
-    # PID is alive.  If the timestamp is unreadable (age is None), we cannot
-    # compute a bounded age, so fall back to the dir-mtime escape — this
-    # closes the leak for corrupt-timestamp locks (including out-of-range PID +
-    # garbage timestamp) where is_pid_alive returns True conservatively.
-    if age is None:
+    # PID is alive.  If the timestamp is unreadable (age is None) OR negative
+    # (future-dated timestamp from clock skew or a corrupt lock), we cannot
+    # compute a meaningful bounded age, so fall back to the dir-mtime escape.
+    # A negative age must NOT be compared against the threshold: it would
+    # always satisfy age < threshold (unbounded live leak).
+    if age is None or age < 0:
         return _dir_is_fresh(run_dir)
     # Floor the threshold so a corrupt-but-parseable tiny/negative bound
     # cannot defeat the conservative bias; a legitimate bound is always
