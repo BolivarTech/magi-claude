@@ -142,18 +142,33 @@ def write_lock(run_dir: str, max_age_seconds: int | None = None) -> None:
     """Write ``<run_dir>/.magi-lock`` with PID, start time, and staleness bound.
 
     Three lines: the integer PID, the ISO-8601 UTC start timestamp, and
-    the per-run staleness bound in seconds (R2/R13). ``max_age_seconds=None``
-    falls back to :data:`LOCK_STALE_AFTER_SECONDS`. Best-effort — an I/O
-    error is reported to stderr and swallowed; a missing lock merely
-    degrades this one dir to pre-2.6.0 behavior, it does not break the run.
+    the per-run staleness bound in seconds. ``max_age_seconds=None``
+    falls back to :data:`LOCK_STALE_AFTER_SECONDS`.
+
+    The write is atomic: the payload is first written to a ``.magi-lock.tmp``
+    sibling, then moved into place via :func:`os.replace`. A crash between
+    the two steps leaves a zero-byte or partial ``.magi-lock`` absent (the
+    original is gone only after ``os.replace`` succeeds), so readers never
+    see a partial payload in the canonical filename.
+
+    Best-effort — an I/O error is reported to stderr and swallowed; a
+    missing lock merely degrades this one dir to pre-2.6.0 behavior, it
+    does not break the run.
     """
     bound = LOCK_STALE_AFTER_SECONDS if max_age_seconds is None else int(max_age_seconds)
     payload = f"{os.getpid()}\n{datetime.now(timezone.utc).isoformat()}\n{bound}\n"
+    final = _lock_path(run_dir)
+    tmp = final + ".tmp"
     try:
-        with open(_lock_path(run_dir), "w", encoding="utf-8") as fh:
+        with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(payload)
+        os.replace(tmp, final)
     except OSError as exc:
         print(f"WARNING: could not write run lock in {run_dir}: {exc}", file=sys.stderr)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def _parse_lock(run_dir: str) -> tuple[int | None, float | None, int | None]:
