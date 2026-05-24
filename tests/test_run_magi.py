@@ -3870,3 +3870,154 @@ class TestFindingGuardWiring:
         assert not ("$0.00" in err and "[!] WARNING" in err), (
             f"Zero-cost warning must NOT appear when cost > 0; got:\n{err!r}"
         )
+
+    def test_e2e_fabricated_finding_dropped_score_unchanged(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """FIX 5 (coverage pin): end-to-end BDD-14 invariant through main().
+
+        Drives main() in code-review mode with a real diff (touching x.py only)
+        and a stubbed orchestrator that returns two agents: melchior with a
+        fabricated finding on ghost.py (not in the diff) plus a real finding on
+        x.py, and balthasar with no findings.
+
+        Asserts:
+        (a) The saved magi-report.json Key Findings do NOT contain the fabricated
+            finding (guard dropped it).
+        (b) The consensus score/verdict/label equals the baseline run without the
+            fabricated finding (the guard filters findings, not votes).
+
+        This is a coverage pin — the behaviour already works via _apply_finding_guard.
+        It closes the unit-only gap documented in the FIX 5 spec: no single test
+        previously drove a real fabricated finding through main()'s actual guard +
+        consensus-recompute path.
+        """
+        import io
+        import json as _json
+
+        import run_magi
+        from synthesize import determine_consensus
+
+        # Stub the boilerplate that is orthogonal to this test.
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {}, "total_usd": 0.50},
+        )
+
+        # Real diff touching only x.py (line 2 added).
+        real_diff = (
+            "diff --git a/x.py b/x.py\n"
+            "--- a/x.py\n"
+            "+++ b/x.py\n"
+            "@@ -1,2 +1,3 @@\n"
+            " ctx\n"
+            "+added\n"
+            " ctx2\n"
+        )
+        # Thread the real diff through _diff_files_and_ranges (real implementation).
+        monkeypatch.setattr(run_magi, "resolve_diff", lambda *a, **k: real_diff)
+
+        created: dict[str, str] = {}
+
+        def fake_create(output_dir: object, run_root: object = None) -> str:
+            d = tmp_path / "magi-run-e2e"
+            d.mkdir(exist_ok=True)
+            created["dir"] = str(d)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        # Real finding on x.py (in diff) and fabricated finding on ghost.py (not in diff).
+        fabricated_finding: dict[str, Any] = {
+            "severity": "critical",
+            "title": "Fabricated hallucination",
+            "detail": "fabricated",
+            "file": "ghost.py",
+            "line": 99,
+            "category": "other",
+        }
+        real_finding: dict[str, Any] = {
+            "severity": "warning",
+            "title": "Real finding on x.py",
+            "detail": "real",
+            "file": "x.py",
+            "line": 2,
+            "category": "other",
+        }
+
+        def _agent_dict(
+            name: str, findings: list[dict[str, Any]], verdict: str = "approve"
+        ) -> dict[str, Any]:
+            return {
+                "agent": name,
+                "verdict": verdict,
+                "confidence": 0.8,
+                "summary": "s",
+                "reasoning": "r",
+                "recommendation": "rec",
+                "findings": findings,
+            }
+
+        # Orchestrator returns two agents (melchior has both findings; balthasar none).
+        async def fake_orch(*a: object, **k: object) -> dict[str, Any]:
+            return {
+                "agents": [
+                    _agent_dict("melchior", [fabricated_finding, real_finding]),
+                    _agent_dict("balthasar", []),
+                ],
+                "consensus": {},
+            }
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "code-review", "hello"])
+
+        buf: io.StringIO = io.StringIO()
+        with monkeypatch.context() as mp:
+            mp.setattr(sys, "stderr", buf)
+            run_magi.main()
+
+        report_path = created["dir"] + "/magi-report.json"
+        with open(report_path, encoding="utf-8") as fh:
+            saved = _json.load(fh)
+
+        # (a) Fabricated finding must not appear in consensus findings.
+        consensus_findings = saved.get("consensus", {}).get("findings", [])
+        fabricated_titles = [f["title"] for f in consensus_findings if "ghost" in f.get("file", "")]
+        assert fabricated_titles == [], (
+            f"Fabricated finding on ghost.py must be dropped; still present: {fabricated_titles}"
+        )
+        all_titles = [f["title"] for f in consensus_findings]
+        assert "Fabricated hallucination" not in all_titles, (
+            f"Fabricated finding title must not appear in consensus findings: {all_titles}"
+        )
+
+        # (b) Score/verdict must match the baseline (same agents, same votes, no fabricated finding).
+        baseline_agents = [
+            _agent_dict("melchior", [real_finding]),
+            _agent_dict("balthasar", []),
+        ]
+        baseline_consensus = determine_consensus(baseline_agents)
+        saved_consensus = saved.get("consensus", {})
+        assert saved_consensus["consensus"] == baseline_consensus["consensus"], (
+            f"Guard must not change consensus label: "
+            f"got {saved_consensus['consensus']!r}, expected {baseline_consensus['consensus']!r}"
+        )
+        assert saved_consensus["consensus_verdict"] == baseline_consensus["consensus_verdict"], (
+            "Guard must not change consensus_verdict"
+        )
+        assert saved_consensus["confidence"] == baseline_consensus["confidence"], (
+            "Guard must not change confidence"
+        )
