@@ -235,10 +235,9 @@ class TestF2NonGitDiffParity:
     def test_deleted_comment_adjacent_to_addition_is_not_phantom_file(self):
         """Adversarial (Caspar): a DELETED '-- ' comment line (rendered '--- ')
         immediately followed by an ADDED '++ ' line (rendered '+++ ') must not be
-        misparsed as a phantom file header. A real header is followed by '@@';
-        this content adjacency is not — so only the real file is recognized (no
-        phantom). The '++ new note' content line is left uncounted (the documented
-        off-by-one), which is acceptable; a phantom file would not be."""
+        misparsed as a phantom file header. Hunk-body line counting keeps both
+        inside the open hunk, so only the real file is recognized (no phantom) and
+        the '++ new note' line is counted as a normal addition under it."""
         from finding_validation import parse_diff_ranges, valid_files
 
         diff = (
@@ -252,14 +251,14 @@ class TestF2NonGitDiffParity:
             " ctx2\n"
         )
         assert valid_files(diff) == {"db.sql"}, "deleted '--'/added '++' must not create a phantom"
-        # No phantom key in the ranges either (the '++ new note' content line is
-        # left uncounted — the documented off-by-one — but never a phantom file).
+        # No phantom key in the ranges either; the '++ new note' line is counted
+        # under db.sql (a legitimate addition), never as a separate file.
         assert set(parse_diff_ranges(diff).keys()) == {"db.sql"}
 
     def test_new_file_with_content_is_recognized(self):
         """A new file WITH content carries '--- /dev/null' / '+++ b/new.py' / '@@'
-        (verified against git output), so the '@@'-anchored header rule recognizes
-        it — the trailing-'@@' requirement causes no recall loss for real files."""
+        (verified against git output). Its header is outside any open hunk, so the
+        walker recognizes it — no recall loss for real new files."""
         from finding_validation import parse_diff_ranges, valid_files
 
         diff = (
@@ -278,8 +277,8 @@ class TestF2NonGitDiffParity:
     def test_empty_new_file_emits_no_header_and_is_not_touched(self):
         """An EMPTY new file emits only 'diff --git' + 'new file mode' (verified:
         git emits NO '---'/'+++' for a 0-byte file), so there is no header to
-        recognize. The '@@' rule causes no regression here — non-recognition is
-        git's doing, and an empty file has no citable lines."""
+        recognize — non-recognition is git's doing, and an empty file has no
+        citable lines anyway."""
         from finding_validation import valid_files
 
         diff = "diff --git a/empty.py b/empty.py\nnew file mode 100644\nindex 0000000..e69de29\n"

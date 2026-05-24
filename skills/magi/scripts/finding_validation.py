@@ -15,12 +15,14 @@ from typing import Any
 
 from finding_id import normalize_path
 
-#: ``@@ -a,b +c,d @@`` — capture the new-file (post-image) start + count.
-_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+#: ``@@ -a,b +c,d @@`` — old start/count (g1/g2) and new start/count (g3/g4).
+#: The counts drive hunk-body line tracking in :func:`_iter_diff_events`; an
+#: absent count means 1 (git omits ``,1``).
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 #: New-file (post-image) header path. The ``b/`` prefix is git-specific; plain
 #: ``diff -u`` output omits it, so it is optional. A literal ``+++`` line is
-#: promoted to a header only by :func:`_iter_diff_events` (which also requires
-#: the preceding ``--- `` and a following ``@@``), never by this pattern alone.
+#: promoted to a header only by :func:`_iter_diff_events` (outside any open hunk
+#: body), never by this pattern alone.
 _NEWFILE_RE = re.compile(r"^\+\+\+ (?:b/)?(.+)$")
 #: Old-file header prefix; it opens a candidate ``--- ``/``+++ `` header pair.
 _OLDFILE_PREFIX = "--- "
@@ -53,76 +55,85 @@ def _iter_diff_events(diff: str) -> Iterator[tuple[Any, ...]]:
     * ``("file", path)`` — a new-file header (raw post-image path).
     * ``("add", lineno, body)`` — an added post-image line (``+`` stripped).
 
-    Header recognition: a ``+++ `` line is a new-file header only when it
-    directly follows a ``--- `` line and is itself followed by an ``@@`` hunk
-    header. The trailing-``@@`` requirement prevents a deleted ``-- ``-comment
-    line (rendered ``--- ``) adjacent to an added ``++ `` line (rendered
-    ``+++ ``) from being misparsed as a phantom file header. The git ``b/``
-    prefix is optional; ``/dev/null`` targets and ``diff -u`` tab-timestamps are
-    stripped (see :func:`_clean_newfile_path`). The ``@@`` requirement loses no
-    real file: a content-bearing file's header is always followed by a hunk, and
-    an empty new file emits no ``--- ``/``+++ `` header at all (git verified), so
-    there was never a header to recognize — and an empty file has no citable line.
+    Header vs content is disambiguated by **hunk-body line counting**: an
+    ``@@ -a,b +c,d @@`` opens a hunk of ``b`` old and ``d`` new lines, counted
+    down as body lines are consumed (context decrements both, ``-`` the old,
+    ``+`` the new). While a hunk is open, every line — including one that renders
+    as ``--- `` or ``+++ `` (a deleted ``-- `` comment, an added ``++ `` line) —
+    is content, never a file header. A ``--- ``/``+++ `` pair is promoted to a
+    header only **outside** any open hunk, which is why a ``-- ``/``++ ``
+    adjacency cannot inject a phantom file even when it sits right before the next
+    ``@@``. A ``diff --git`` line force-closes the current hunk (a hard file
+    boundary), keeping git diffs robust even when a hunk's ``@@`` counts
+    under/over-state its body. An added line whose body begins with ``++ `` is
+    counted correctly (it is consumed by the ``+`` branch inside the hunk).
 
+    The git ``b/`` prefix is optional; ``/dev/null`` targets (deleted files) and
+    ``diff -u`` tab-timestamps are stripped (see :func:`_clean_newfile_path`).
     Paths are yielded raw for callers that read them from disk;
     :func:`parse_diff_ranges` applies :func:`normalize_path` itself, so the
     consumers share recognition but differ in path normalization (a caller
-    comparing across them must normalize, as the guard does). Limitation: git
-    C-quoted paths (octal-escaped unicode/control chars) are not unquoted —
-    pre-existing and low-likelihood.
+    comparing across them must normalize, as the guard does).
+
+    Limitations (both low-likelihood): a non-git diff whose ``@@`` counts
+    mis-state a multi-file hunk body can mis-bound a hunk (no ``diff --git`` to
+    reset); git C-quoted paths (octal-escaped unicode/control chars) are not
+    unquoted.
     """
     lines = diff.splitlines()
     n = len(lines)
     current: str | None = None
     new_line = 0
+    old_rem = 0  # old-side lines left in the open hunk (0 and new_rem 0 => no hunk)
+    new_rem = 0  # new-side lines left in the open hunk
     i = 0
     while i < n:
         raw = lines[i]
+        if raw.startswith("diff --git "):
+            old_rem = new_rem = 0  # new file section: force-close any open hunk
+            i += 1
+            continue
+        if old_rem > 0 or new_rem > 0:
+            # Inside a hunk body: every line is content. A line rendering as
+            # '--- '/'+++ ' here is a deleted/added line, never a file header.
+            if raw.startswith("\\ "):
+                i += 1  # "\ No newline at end of file" — not a real line
+                continue
+            if raw.startswith("+"):
+                if current is not None:
+                    yield ("add", new_line, raw[1:])
+                new_line += 1
+                new_rem -= 1
+                i += 1
+                continue
+            if raw.startswith("-"):
+                old_rem -= 1  # deletion: no post-image line
+                i += 1
+                continue
+            new_line += 1  # context line advances the post-image counter
+            old_rem -= 1
+            new_rem -= 1
+            i += 1
+            continue
+        # Outside any hunk: only structural lines (headers, '@@', index, modes).
         if raw.startswith(_OLDFILE_PREFIX):
-            # A real file header is '--- ' then '+++ ' then '@@'. Requiring the
-            # trailing '@@' (count-free, so it tolerates imprecise hunk counts)
-            # disambiguates a real header from a deleted '-- '-comment line
-            # adjacent to an added '++ ' line — both render as '--- '/'+++ '.
-            if i + 2 < n and _HUNK_RE.match(lines[i + 2]):
-                m = _NEWFILE_RE.match(lines[i + 1])
-                if m:
-                    current = _clean_newfile_path(m.group(1))
-                    if current is not None:
-                        yield ("file", current)
-                    i += 2  # consume '--- ' and '+++ '; '@@' handled next loop
-                    continue
-            i += 1  # '--- ' is a deletion/content line, not a header
+            m = _NEWFILE_RE.match(lines[i + 1]) if i + 1 < n else None
+            if m:
+                current = _clean_newfile_path(m.group(1))
+                if current is not None:
+                    yield ("file", current)
+                i += 2  # consume '--- ' and its paired '+++ '
+                continue
+            i += 1  # lone '--- ' without a '+++ ' pair — not a header
             continue
         h = _HUNK_RE.match(raw)
         if h:
-            new_line = int(h.group(1))
+            new_line = int(h.group(3))
+            old_rem = int(h.group(2)) if h.group(2) else 1
+            new_rem = int(h.group(4)) if h.group(4) else 1
             i += 1
             continue
-        if current is None:
-            i += 1
-            continue
-        if raw.startswith("+++") or raw.startswith("---"):
-            # A '+++ '/'--- ' line that reached here is content, not a header
-            # (real headers are consumed above). It is skipped rather than
-            # counted: an added line whose body itself begins with '++ ' is left
-            # uncounted (a documented off-by-one), the conservative choice — it
-            # avoids miscounting a malformed/truncated '+++ ' header (e.g. a
-            # trailing '+++ /dev/null' deletion with no hunk) as a real line.
-            i += 1
-            continue
-        if raw.startswith("\\ "):
-            i += 1  # "\ No newline at end of file" marker — not a real line
-            continue
-        if raw.startswith("+"):
-            yield ("add", new_line, raw[1:])
-            new_line += 1
-            i += 1
-            continue
-        if raw.startswith("-"):
-            i += 1  # deletion: no post-image line
-            continue
-        new_line += 1  # context line advances the post-image counter
-        i += 1
+        i += 1  # 'index', mode, prose, etc. — ignored outside a hunk
 
 
 def extract_touched_files(diff: str) -> list[str]:
