@@ -10,19 +10,19 @@ planned. Pure stdlib and **total** — never raises into the orchestrator.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any
 
 from finding_id import normalize_path
 
 #: ``@@ -a,b +c,d @@`` — capture the new-file (post-image) start + count.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
-#: New-file (post-image) header. The ``b/`` prefix is git-specific; plain
+#: New-file (post-image) header path. The ``b/`` prefix is git-specific; plain
 #: ``diff -u`` output omits it, so it is optional. A literal ``+++`` line is
-#: only honored as a header when it directly follows a ``--- `` old-file header
-#: (see :func:`_iter_newfile_paths`); that pairing prevents an added content
-#: line that renders as ``+++ ...`` from being misread as a file header.
+#: promoted to a header only by :func:`_iter_diff_events` (which also requires
+#: the preceding ``--- `` and a following ``@@``), never by this pattern alone.
 _NEWFILE_RE = re.compile(r"^\+\+\+ (?:b/)?(.+)$")
-#: Old-file header prefix; its presence gates whether the next ``+++`` is a header.
+#: Old-file header prefix; it opens a candidate ``--- ``/``+++ `` header pair.
 _OLDFILE_PREFIX = "--- "
 #: A finding's ``line`` may be off by a few from the diff's exact post-image
 #: numbering (LLM counting fuzz); accept within this margin of a changed line.
@@ -42,103 +42,115 @@ def _clean_newfile_path(captured: str) -> str | None:
     return path
 
 
-def extract_touched_files(diff: str) -> list[str]:
-    """Return the ordered post-image paths a unified diff touches.
+def _iter_diff_events(diff: str) -> Iterator[tuple[Any, ...]]:
+    """Walk a unified diff once, yielding its structural events.
 
-    Single source of truth for new-file recognition, shared with
-    :func:`parse_diff_ranges` so the finding guard and the enrichment layer
-    can never disagree on which files a diff touches. Honors a ``+++ `` header
-    only when it follows a ``--- `` header (git ``b/`` prefix optional), skips
-    ``/dev/null`` targets, and strips ``diff -u`` tab timestamps. Paths are
-    returned raw (not normalized) for callers that read them from disk.
+    The single source of truth for the three diff consumers
+    (:func:`extract_touched_files`, :func:`added_lines_by_file`,
+    :func:`parse_diff_ranges`) so they can never disagree on which files a diff
+    touches or where its added lines fall. Yields:
+
+    * ``("file", path)`` — a new-file header (raw post-image path).
+    * ``("add", lineno, body)`` — an added post-image line (``+`` stripped).
+
+    Header recognition: a ``+++ `` line is a new-file header only when it
+    directly follows a ``--- `` line and is itself followed by an ``@@`` hunk
+    header. The trailing-``@@`` requirement prevents a deleted ``-- ``-comment
+    line (rendered ``--- ``) adjacent to an added ``++ `` line (rendered
+    ``+++ ``) from being misparsed as a phantom file header. The git ``b/``
+    prefix is optional; ``/dev/null`` targets and ``diff -u`` tab-timestamps are
+    stripped (see :func:`_clean_newfile_path`).
+
+    Paths are yielded raw for callers that read them from disk;
+    :func:`parse_diff_ranges` applies :func:`normalize_path` itself, so the
+    consumers share recognition but differ in path normalization (a caller
+    comparing across them must normalize, as the guard does). Limitation: git
+    C-quoted paths (octal-escaped unicode/control chars) are not unquoted —
+    pre-existing and low-likelihood.
     """
-    files: list[str] = []
-    prev_minus = False
-    for raw in diff.splitlines():
+    lines = diff.splitlines()
+    n = len(lines)
+    current: str | None = None
+    new_line = 0
+    i = 0
+    while i < n:
+        raw = lines[i]
         if raw.startswith(_OLDFILE_PREFIX):
-            prev_minus = True
-            continue
-        if prev_minus:
-            prev_minus = False
-            m = _NEWFILE_RE.match(raw)
+            # Behaviour-preserving recognition: '--- ' followed by a '+++ '.
+            m = _NEWFILE_RE.match(lines[i + 1]) if i + 1 < n else None
             if m:
-                path = _clean_newfile_path(m.group(1))
-                if path is not None:
-                    files.append(path)
-    return files
+                current = _clean_newfile_path(m.group(1))
+                if current is not None:
+                    yield ("file", current)
+                i += 2  # consume '--- ' and '+++ '
+                continue
+            i += 1  # '--- ' is a deletion/content line, not a header
+            continue
+        h = _HUNK_RE.match(raw)
+        if h:
+            new_line = int(h.group(1))
+            i += 1
+            continue
+        if current is None:
+            i += 1
+            continue
+        if raw.startswith("+++") or raw.startswith("---"):
+            i += 1
+            continue
+        if raw.startswith("\\ "):
+            i += 1  # "\ No newline at end of file" marker — not a real line
+            continue
+        if raw.startswith("+"):
+            yield ("add", new_line, raw[1:])
+            new_line += 1
+            i += 1
+            continue
+        if raw.startswith("-"):
+            i += 1  # deletion: no post-image line
+            continue
+        new_line += 1  # context line advances the post-image counter
+        i += 1
+
+
+def extract_touched_files(diff: str) -> list[str]:
+    """Return the ordered (raw) post-image paths a unified diff touches.
+
+    Thin consumer of :func:`_iter_diff_events`; paths are raw (not normalized)
+    for callers that read them from disk.
+    """
+    return [ev[1] for ev in _iter_diff_events(diff) if ev[0] == "file"]
 
 
 def added_lines_by_file(diff: str) -> dict[str, list[str]]:
-    """Map each post-image path to its added (``+``) line bodies.
+    """Map each (raw) post-image path to its added (``+``) line bodies.
 
-    Uses the same new-file recognition as :func:`extract_touched_files` (the
-    ``--- ``/``+++ `` pairing, optional ``b/``, tab-timestamp + ``/dev/null``
-    handling) so the enrichment coherence check keys added lines under the SAME
-    paths the touched-file set uses — the two can never disagree (F2). The
-    leading ``+`` is stripped from each returned body.
+    Thin consumer of :func:`_iter_diff_events` so the enrichment coherence check
+    keys added lines under the SAME paths the touched-file set uses (F2).
     """
     result: dict[str, list[str]] = {}
     current: str | None = None
-    prev_minus = False
-    for raw in diff.splitlines():
-        if raw.startswith(_OLDFILE_PREFIX):
-            prev_minus = True
-            continue
-        if prev_minus:
-            prev_minus = False
-            m = _NEWFILE_RE.match(raw)
-            if m:
-                current = _clean_newfile_path(m.group(1))
-                continue
-        if current and raw.startswith("+") and not raw.startswith("+++"):
-            result.setdefault(current, []).append(raw[1:])
+    for ev in _iter_diff_events(diff):
+        if ev[0] == "file":
+            current = ev[1]
+        elif current is not None:  # ("add", lineno, body)
+            result.setdefault(current, []).append(ev[2])
     return result
 
 
 def parse_diff_ranges(diff: str) -> dict[str, set[int]]:
-    """Map each touched file to the set of changed post-image line numbers.
+    """Map each touched file (normalized) to its changed post-image line numbers.
 
-    Walks the unified diff: a ``--- `` header followed by a ``+++ <file>``
-    header opens a file (git ``b/`` prefix optional), ``@@`` resets the
-    post-image counter, added/context lines advance it (deletions do not). The
-    ``--- ``/``+++ `` pairing (same primitive as :func:`extract_touched_files`)
-    distinguishes a real header from an added content line rendered as ``+++``.
+    Thin consumer of :func:`_iter_diff_events`; applies :func:`normalize_path`
+    so the guard's file/line keys match normalized finding paths.
     """
     ranges: dict[str, set[int]] = {}
     current: str | None = None
-    new_line = 0
-    prev_minus = False
-    for raw in diff.splitlines():
-        if raw.startswith(_OLDFILE_PREFIX):
-            prev_minus = True
-            continue
-        if prev_minus:
-            prev_minus = False
-            m = _NEWFILE_RE.match(raw)
-            if m:
-                path = _clean_newfile_path(m.group(1))
-                current = normalize_path(path) if path is not None else None
-                if current is not None:
-                    ranges.setdefault(current, set())
-                continue
-            # '--- ' not followed by a '+++ ' header: fall through to handle raw.
-        h = _HUNK_RE.match(raw)
-        if h:
-            new_line = int(h.group(1))
-            continue
-        if current is None:
-            continue
-        if raw.startswith("+++") or raw.startswith("---"):
-            continue
-        if raw.startswith("\\ "):
-            continue  # "\ No newline at end of file" marker — not a real line
-        if raw.startswith("+"):
-            ranges[current].add(new_line)
-            new_line += 1
-        elif raw.startswith("-"):
-            continue  # deletion: no post-image line
-        else:
-            new_line += 1  # context line advances the post-image counter
+    for ev in _iter_diff_events(diff):
+        if ev[0] == "file":
+            current = normalize_path(ev[1])
+            ranges.setdefault(current, set())
+        elif current is not None:  # ("add", lineno, body)
+            ranges[current].add(ev[1])
     return ranges
 
 
