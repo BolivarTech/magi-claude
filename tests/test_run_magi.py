@@ -4524,3 +4524,41 @@ class TestF4GuardObservability:
         assert saved["guard"]["active"] is True
         assert saved["guard"]["total_dropped"] == 1
         assert "Ghost" in saved["guard"]["per_agent"]["melchior"]["dropped_titles"]
+
+    def test_dropped_titles_handles_duplicate_titles(self):
+        """F4 (loop-1): two findings sharing a title — one dropped (file not in
+        diff), one kept (file in diff) — must still list the dropped title. A
+        title-set reconstruction silently omits it (the kept one masks it)."""
+        import run_magi
+
+        agents = [
+            _guard_agent(
+                [
+                    {
+                        "severity": "critical",
+                        "title": "Same title",
+                        "detail": "d",
+                        "file": "ghost.py",
+                        "line": 5,
+                        "category": "null-deref",
+                    },
+                    {
+                        "severity": "warning",
+                        "title": "Same title",
+                        "detail": "d2",
+                        "file": "x.py",
+                        "line": 2,
+                        "category": "other",
+                    },
+                ]
+            )
+        ]
+        summary: dict[str, Any] = {}
+        run_magi._apply_finding_guard(
+            agents, "code-review", {"x.py"}, {"x.py": {2}}, summary=summary
+        )
+        pa = summary["per_agent"]["melchior"]
+        assert pa["dropped"] == 1
+        assert "Same title" in pa["dropped_titles"], (
+            "the dropped finding's title must appear even when a kept finding shares it"
+        )
