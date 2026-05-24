@@ -60,7 +60,9 @@ from temp_dirs import (  # noqa: E402
     project_run_root,
     sweep_legacy_runs_once,
 )
-from review_context import enrich_code_review_context  # noqa: E402
+from review_context import enrich_code_review_context, resolve_diff  # noqa: E402
+from cost import aggregate_cost  # noqa: E402
+from finding_validation import parse_diff_ranges  # noqa: E402
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
 
 # Public star-import contract. Underscore-prefixed symbols from
@@ -476,6 +478,7 @@ def _maybe_enrich(
     base_ref: str,
     enrich: bool,
     max_chars: int,
+    diff: str = "",
 ) -> tuple[str, str | None]:
     """Enrich code-review input; pass-through otherwise. Boundary fail-safe —
     never raises into the orchestrator.
@@ -484,6 +487,15 @@ def _maybe_enrich(
     ``True``. All other modes and ``--no-enrich`` receive the original
     content unchanged with ``None`` as the note.
 
+    The *diff* is the run's single resolved diff source (A2): ``main`` resolves
+    it once via :func:`review_context.resolve_diff` and passes the same value to
+    both this enrichment path and the finding guard so the two can never diverge.
+    Enrichment is still driven from the original *content* (its prompt body is
+    preserved byte-for-byte — :func:`enrich_code_review_context` re-resolves the
+    same diff deterministically via the same :func:`resolve_diff` seam under the
+    clean-tree precondition). *diff* is threaded here only to make the shared
+    source explicit and testable.
+
     Args:
         mode: Analysis mode (e.g. "code-review", "design", "analysis").
         content: The loaded input content to potentially enrich.
@@ -491,6 +503,7 @@ def _maybe_enrich(
         enrich: Whether enrichment is enabled (``False`` when ``--no-enrich``
             was passed).
         max_chars: Maximum characters allowed for the enriched output.
+        diff: The run's resolved diff (``""`` when none). Shared with the guard.
 
     Returns:
         Tuple ``(content, note)`` where ``content`` is the (possibly
@@ -739,6 +752,71 @@ def _enable_utf8_console_io() -> None:
         reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
+def _diff_files_and_ranges(diff: str) -> tuple[set[str], dict[str, set[int]]]:
+    """Return (valid_files, changed_ranges) for the guard. Fail-safe -> empty.
+
+    Parses *diff* into the set of touched files and their changed post-image
+    line numbers. Any failure degrades to ``(set(), {})`` so the guard becomes
+    a no-op rather than crashing the run (R10).
+
+    Args:
+        diff: The resolved unified diff text (``""`` when none).
+
+    Returns:
+        Tuple ``(files, ranges)`` where ``files`` is the set of normalized
+        touched paths and ``ranges`` maps each path to its changed lines.
+    """
+    try:
+        ranges = parse_diff_ranges(diff)
+        return set(ranges.keys()), ranges
+    except Exception:  # noqa: BLE001 — boundary fail-safe
+        return set(), {}
+
+
+def _apply_finding_guard(
+    agents: list[dict[str, Any]], mode: str, files: set[str], ranges: dict[str, set[int]]
+) -> list[dict[str, Any]]:
+    """In code-review, drop/annotate each agent's findings against the diff.
+
+    Hard-drops findings whose ``file`` is not in the diff (hallucination guard)
+    and soft-annotates findings whose ``line`` falls outside the changed range,
+    per :func:`finding_validation.validate_findings`. A no-op in non-code-review
+    modes or when there is no diff (empty *files*). The guard filters the
+    findings section only — it never touches an agent's verdict/confidence, so
+    the consensus score (computed downstream by ``determine_consensus`` from
+    verdict+confidence) is unaffected. Never raises (each agent is guarded
+    independently behind a boundary).
+
+    Args:
+        agents: The successful agents' validated output dicts.
+        mode: Analysis mode; the guard runs only for ``"code-review"``.
+        files: Set of valid (diff-present) normalized file paths.
+        ranges: Per-file set of changed post-image line numbers.
+
+    Returns:
+        A new list of agent dicts with guarded findings (same order). Agents
+        for which the guard fails are passed through with original findings.
+    """
+    if mode != "code-review" or not files:
+        return agents
+    from finding_validation import validate_findings
+
+    out: list[dict[str, Any]] = []
+    for a in agents:
+        try:
+            kept, dropped, annotated = validate_findings(a.get("findings", []), files, ranges)
+            a = {**a, "findings": kept}
+            if dropped or annotated:
+                print(
+                    f"[guard] {a['agent']}: dropped {dropped}, annotated {annotated}",
+                    file=sys.stderr,
+                )
+        except Exception as exc:  # noqa: BLE001 — boundary fail-safe
+            print(f"WARNING: finding guard failed for {a['agent']}: {exc}", file=sys.stderr)
+        out.append(a)
+    return out
+
+
 def _resolve_project_root() -> str:
     """Return the git toplevel of the cwd, or the realpath of cwd if not a repo.
 
@@ -777,12 +855,21 @@ def main() -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    # A2: resolve the review diff ONCE (code-review only) and thread the same
+    # value to BOTH the enrichment path and the finding guard so they can never
+    # diverge. ``resolve_diff`` is TOTAL (returns "" on any failure); "" makes
+    # the guard a no-op.
+    review_diff = (
+        resolve_diff(input_content, os.getcwd(), args.base) if args.mode == "code-review" else ""
+    )
+
     input_content, enrich_note = _maybe_enrich(
         args.mode,
         input_content,
         base_ref=args.base,
         enrich=args.enrich,
         max_chars=args.enrich_max_chars,
+        diff=review_diff,
     )
 
     try:
@@ -859,12 +946,47 @@ def main() -> None:
                 )
         raise
 
+    # A2 + R8: apply the diff-grounded finding guard to each agent BEFORE the
+    # consensus that ends up in the report. ``determine_consensus`` stays
+    # mode-agnostic (it never receives the diff); the guard runs here, on the
+    # successful agents, using the single resolved ``review_diff`` shared with
+    # enrichment. ``files`` empty (non-code-review or no diff) makes it a no-op.
+    files, ranges = _diff_files_and_ranges(review_diff)
+    report["agents"] = _apply_finding_guard(report["agents"], args.mode, files, ranges)
+
+    # A5: outside code-review there is no diff to ground file/line against, so
+    # strip them to ``None`` — this forces title-based dedup for design/analysis
+    # regardless of what the agent emitted, keeping their behaviour identical to
+    # the pre-3.0.0 contract.
+    if args.mode != "code-review":
+        for a in report["agents"]:
+            for fnd in a.get("findings", []):
+                fnd["file"] = None
+                fnd["line"] = None
+
+    # Recompute the consensus on the guarded agents so the rendered report's
+    # findings section reflects the filtering. The score/verdict/label are
+    # invariant under the guard (it only touches the findings section, never an
+    # agent's verdict or confidence — pinned by the BDD-14 score-invariance
+    # test); only the deduplicated ``findings`` list changes. Guarded by the
+    # ``>= 2`` precondition of ``determine_consensus`` — real runs always reach
+    # here with >= 2 agents (the orchestrator raised otherwise), so this only
+    # skips the refresh under stubbed/degenerate agent lists.
+    if len(report["agents"]) >= 2:
+        report["consensus"] = determine_consensus(report["agents"])
+
     print(format_report(report["agents"], report["consensus"]))
+
+    # A1: aggregate per-run cost into the report BEFORE it is serialized so the
+    # saved magi-report.json carries the ``cost`` block. Fail-safe (a missing or
+    # corrupt raw envelope contributes 0 for that agent).
+    report["cost"] = aggregate_cost(output_dir, [a["agent"] for a in report["agents"]])
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     print(f"\nFull report saved to: {report_path}")
+    print(f"Cost: ${report['cost']['total_usd']:.4f} ({len(report['agents'])} agents)")
 
     if is_temp_dir:
         # Run completed: drop the liveness lock so this dir becomes

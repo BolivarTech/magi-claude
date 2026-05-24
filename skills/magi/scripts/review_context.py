@@ -434,6 +434,40 @@ def _git_diff(repo_root: str, base_ref: str) -> "str | None":
     return out or None
 
 
+def resolve_diff(input_content: str, repo_root: str, base_ref: str) -> str:
+    """Resolve the review diff: input-embedded diff, else ``git diff <base>...HEAD``.
+
+    This is the single shared diff-resolution seam used by BOTH enrichment and
+    the finding guard, so the two never diverge (decision A2). Resolution rules
+    mirror :func:`_enrich`:
+
+    * If *input_content* already contains a unified diff, it is returned verbatim.
+    * Otherwise, under a clean working tree (== HEAD, decision F),
+      ``git diff <base_ref>...HEAD`` is returned.
+    * Any no-op condition — not a git repo, dirty tree, empty diff — yields ``""``.
+
+    TOTAL — returns ``""`` on ANY failure. It now runs in ``main()`` outside the
+    ``_maybe_enrich`` boundary, so it must never raise into the orchestrator.
+
+    Args:
+        input_content: The raw review content (may itself embed a diff).
+        repo_root: Path to start git resolution from (e.g. ``os.getcwd()``).
+        base_ref: The base git ref to diff against HEAD.
+
+    Returns:
+        The resolved unified diff text, or ``""`` when no diff is available.
+    """
+    try:
+        if _contains_diff(input_content):
+            return input_content
+        root = _git_toplevel(repo_root or os.getcwd())
+        if root is None or not _tree_is_clean(root):
+            return ""
+        return _git_diff(root, base_ref) or ""
+    except Exception:  # noqa: BLE001 — TOTAL: runs in main() outside _maybe_enrich
+        return ""
+
+
 def _assemble(
     input_content: str,
     touched: list[tuple[str, str]],
@@ -520,7 +554,13 @@ def _enrich(
         return input_content, "enrichment skipped (not a git repo)"
     if not _tree_is_clean(root):
         return input_content, "enrichment skipped (working tree not clean: uncommitted changes)"
-    diff_text = input_content if _contains_diff(input_content) else _git_diff(root, base_ref)
+    # Resolve the diff via the shared seam so enrichment and the finding guard
+    # see the same diff (A2). The repo/clean gates above are kept for their
+    # distinct skip notes; past them, ``resolve_diff`` is byte-for-byte
+    # equivalent to the prior ``input_content if _contains_diff(...) else
+    # _git_diff(...)`` expression (it returns "" rather than None for an empty
+    # diff, which the ``not diff_text`` guard below treats identically).
+    diff_text = resolve_diff(input_content, root, base_ref)
     if not diff_text:
         return input_content, "enrichment skipped (no diff context)"
     cache: dict[str, str | None] = {}
