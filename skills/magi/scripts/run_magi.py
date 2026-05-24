@@ -985,9 +985,11 @@ def main() -> None:
     print(format_report(report["agents"], report["consensus"]))
 
     # A1: aggregate per-run cost into the report BEFORE it is serialized so the
-    # saved magi-report.json carries the ``cost`` block. Fail-safe (a missing or
-    # corrupt raw envelope contributes 0 for that agent).
-    report["cost"] = aggregate_cost(output_dir, [a["agent"] for a in report["agents"]])
+    # saved magi-report.json carries the ``cost`` block. Aggregate over all
+    # canonical agent names (AGENTS), not just report["agents"], so a failed or
+    # timed-out agent that wrote its raw envelope still contributes to the total.
+    # Fail-safe: a missing or corrupt envelope contributes 0 for that agent.
+    report["cost"] = aggregate_cost(output_dir, list(AGENTS))
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
