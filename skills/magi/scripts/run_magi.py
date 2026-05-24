@@ -62,7 +62,7 @@ from temp_dirs import (  # noqa: E402
 )
 from review_context import enrich_code_review_context, resolve_diff  # noqa: E402
 from cost import aggregate_cost  # noqa: E402
-from finding_validation import parse_diff_ranges  # noqa: E402
+from finding_validation import parse_diff_ranges, validate_findings  # noqa: E402
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
 
 # Public star-import contract. Underscore-prefixed symbols from
@@ -806,7 +806,6 @@ def _apply_finding_guard(
     """
     if mode != "code-review" or not files:
         return agents
-    from finding_validation import validate_findings
 
     out: list[dict[str, Any]] = []
     for a in agents:
