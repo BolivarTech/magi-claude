@@ -13,6 +13,8 @@ import os
 import re
 import subprocess
 
+from finding_validation import extract_touched_files
+
 _ENRICH_MAX_CHARS = 512_000
 _DEF_WINDOW_LINES = 40
 _MAX_CANDIDATES = 60
@@ -64,24 +66,20 @@ def _contains_diff(text: str) -> bool:
 def _extract_touched_files(diff_text: str) -> list[str]:
     """Return the list of paths modified by diff_text (new-file side only).
 
-    Skips /dev/null targets (deleted files) and strips the ``b/`` prefix
-    that git unified diffs add.
+    Thin wrapper over :func:`finding_validation.extract_touched_files`, the
+    single source of truth for new-file recognition. Sharing it guarantees the
+    enrichment layer and the finding guard agree on the touched-file set, so the
+    guard can never hard-drop a finding that cites a file enrichment grounded on
+    (F2). Skips /dev/null targets, honors git's optional ``b/`` prefix, and
+    strips ``diff -u`` tab timestamps.
 
     Args:
-        diff_text: A unified diff string (git format).
+        diff_text: A unified diff string (git or plain ``diff -u`` format).
 
     Returns:
         Ordered list of relative file paths that were added or modified.
     """
-    files: list[str] = []
-    for line in diff_text.splitlines():
-        if line.startswith("+++ "):
-            path = line[4:].strip()
-            if path.startswith("b/"):
-                path = path[2:]
-            if path and path != "/dev/null":
-                files.append(path)
-    return files
+    return extract_touched_files(diff_text)
 
 
 def _read_file_safe(repo_root: str, rel_path: str, cache: "dict[str, str | None]") -> "str | None":
