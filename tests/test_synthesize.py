@@ -2110,6 +2110,54 @@ class TestOptionalFindingFields:
         fn = loaded["findings"][0]
         assert fn["line"] is None, f"line=True must fail-soft to None, got {fn['line']!r}"
 
+    def test_line_inf_fails_soft_to_none(self, tmp_path):
+        """BUG 2: line=float('inf') must fail-soft to None; must NOT raise
+        OverflowError (int(float('inf')) crashes), dropping the whole agent."""
+        from unittest.mock import patch
+
+        from synthesize import load_agent_output
+
+        # float('inf') is not valid JSON; inject it by patching json.load to return
+        # a dict with the non-finite float already parsed.
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [{"severity": "info", "title": "t", "detail": "d", "line": float("inf")}],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior_inf.json"
+        p.write_text("{}", encoding="utf-8")  # non-empty placeholder for os.path.getsize
+        with patch("validate.json.load", return_value=data):
+            loaded = load_agent_output(str(p))
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, f"line=inf must fail-soft to None, got {fn['line']!r}"
+
+    def test_line_nan_fails_soft_to_none(self, tmp_path):
+        """BUG 2: line=float('nan') must fail-soft to None; must NOT raise
+        ValueError (int(float('nan')) crashes), dropping the whole agent."""
+        from unittest.mock import patch
+
+        from synthesize import load_agent_output
+
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [{"severity": "info", "title": "t", "detail": "d", "line": float("nan")}],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior_nan.json"
+        p.write_text("{}", encoding="utf-8")
+        with patch("validate.json.load", return_value=data):
+            loaded = load_agent_output(str(p))
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, f"line=nan must fail-soft to None, got {fn['line']!r}"
+
 
 # ---------------------------------------------------------------------------
 # TestDedupById
