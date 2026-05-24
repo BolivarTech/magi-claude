@@ -85,6 +85,11 @@ def _iter_diff_events(diff: str) -> Iterator[tuple[Any, ...]]:
       ``-- ``/``++ `` phantom edge; the two are structurally indistinguishable
       without counts. Git diffs are immune: ``diff --git`` force-closes each hunk
       and git's counts are exact.
+    * **Non-git understated-count misparse (the dual).** Symmetrically, a non-git
+      diff whose ``@@`` count *understates* its body closes the hunk early, so
+      trailing body lines are read as structural — a ``-- ``/``++ `` content
+      adjacency there can register a phantom file and trailing added lines are
+      missed. Same root cause and same immunity (git counts are exact).
     * **C-quoted paths.** Git C-quoted paths (octal-escaped unicode/control
       chars) are not unquoted.
     """

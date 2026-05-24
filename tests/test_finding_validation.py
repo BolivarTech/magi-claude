@@ -349,6 +349,27 @@ class TestF2NonGitDiffParity:
         )
         assert valid_files(diff) == {"a.py", "b.py"}
 
+    def test_non_git_understated_count_misparses_trailing_body(self):
+        """W6 — KNOWN LIMITATION (dual of W5): a non-git diff whose '@@' count
+        UNDERSTATES its body closes the hunk early, so trailing body lines are
+        read as structural — a '--- '/'+++ ' content adjacency there registers a
+        phantom file. Git diffs are immune (diff --git + exact counts). Pinned so
+        the dual trade-off is tracked, not silently changed."""
+        from finding_validation import valid_files
+
+        diff = (
+            "--- a.py\n"
+            "+++ a.py\n"
+            "@@ -1,1 +1,1 @@\n"  # claims 1 old/1 new, but the body is longer
+            " ctx\n"  # context closes the hunk early (old->0, new->0)
+            "--- note comment\n"  # now misread as a header candidate
+            "+++ phantom\n"
+            " more\n"
+        )
+        vf = valid_files(diff)
+        assert "a.py" in vf
+        assert "phantom" in vf  # documented misparse: understated count -> phantom
+
 
 class TestF3BasenameLineRangeCheck:
     """F3 (Caspar): a unique-basename match identifies the exact diff file, so
