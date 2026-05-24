@@ -4177,3 +4177,115 @@ class TestInputSizeWiring:
         assert "[!] WARNING" not in err, (
             f"[!] WARNING must NOT appear when threshold is not exceeded; got:\n{err!r}"
         )
+
+    def test_input_size_chars_measures_raw_input_not_enriched(self, tmp_path, monkeypatch):
+        """Regression: input_size.chars must reflect the RAW input length, not the
+        post-enrichment string.  In code-review mode, _maybe_enrich reassigns
+        input_content to a larger string; chars and est_tokens must both be
+        derived from the original raw input so they are consistent
+        (est_tokens == chars // 4).
+
+        With the pre-fix code, chars == len(enriched_body) (wrong), while
+        est_tokens is computed on raw_body (correct). This test fails on the
+        buggy code and passes after the fix.
+        """
+        import json
+
+        import run_magi
+
+        RAW_BODY = "x" * 400  # 400 chars -> 100 est_tokens
+        ENRICHED_SUFFIX = "y" * 5000
+        ENRICHED_BODY = RAW_BODY + ENRICHED_SUFFIX  # 5400 chars, would give 1350 est tokens if raw
+
+        # Monkeypatch _maybe_enrich to return the enriched body (simulating code-review enrichment).
+        monkeypatch.setattr(
+            run_magi, "_maybe_enrich", lambda *a, **k: (ENRICHED_BODY, "enriched context note")
+        )
+        # Use code-review mode so resolve_diff is called; stub it out.
+        monkeypatch.setattr(run_magi, "resolve_diff", lambda content, cwd, base: "")
+
+        # Re-use the rest of the standard _patch_main harness but supply our own
+        # _maybe_enrich above (must be set BEFORE calling _patch_main so it wins).
+        # _patch_main also sets _maybe_enrich; override order matters: we set it
+        # AFTER calling _patch_main so our stub wins.
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: (RAW_BODY, "Inline input"))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {}, "total_usd": 0.75},
+        )
+
+        created: dict[str, str] = {}
+
+        def fake_create(output_dir: object, run_root: object = None) -> str:
+
+            d = tmp_path / "magi-run-raw-chars"
+            d.mkdir(exist_ok=True)
+            created["dir"] = str(d)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def fake_orch(*a: object, **k: object) -> dict[str, Any]:
+            return {
+                "agents": [
+                    {
+                        "agent": "melchior",
+                        "verdict": "approve",
+                        "confidence": 0.9,
+                        "summary": "s",
+                        "reasoning": "r",
+                        "recommendation": "rec",
+                        "findings": [],
+                    },
+                    {
+                        "agent": "balthasar",
+                        "verdict": "approve",
+                        "confidence": 0.8,
+                        "summary": "s2",
+                        "reasoning": "r2",
+                        "recommendation": "rec2",
+                        "findings": [],
+                    },
+                ],
+                "consensus": {},
+            }
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        # Set _maybe_enrich AFTER all other stubs so this override wins.
+        monkeypatch.setattr(
+            run_magi, "_maybe_enrich", lambda *a, **k: (ENRICHED_BODY, "enriched context note")
+        )
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "code-review", "hello"])
+
+        import io
+
+        buf: io.StringIO = io.StringIO()
+        with monkeypatch.context() as mp:
+            mp.setattr(sys, "stderr", buf)
+            run_magi.main()
+
+        report_path = os.path.join(created["dir"], "magi-report.json")
+        with open(report_path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+
+        raw_len = len(RAW_BODY)  # 400
+        assert saved["input_size"]["chars"] == raw_len, (
+            f"input_size.chars must be the RAW input length ({raw_len}), "
+            f"not the enriched length ({len(ENRICHED_BODY)}); "
+            f"got {saved['input_size']['chars']!r}"
+        )
+        assert saved["input_size"]["est_tokens"] == raw_len // 4, (
+            f"est_tokens must equal chars // 4 == {raw_len // 4}; "
+            f"got {saved['input_size']['est_tokens']!r}"
+        )
