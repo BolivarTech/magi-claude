@@ -176,6 +176,20 @@ class TestParseArgs:
         args = parse_args(["code-review", "input.py", "--keep-runs", "1"])
         assert args.keep_runs == 1
 
+    def test_warn_input_tokens_zero_or_negative_rejected(self):
+        """``--warn-input-tokens`` must be a positive integer.
+
+        A value <= 0 makes ``check_input_size`` flag every input as
+        oversize (``chars > 0`` is always True), producing spurious
+        warnings on trivial inputs. The CLI rejects non-positive values
+        at argparse, mirroring the ``--keep-runs 0`` guard.
+        """
+        import run_magi
+
+        for bad in ("0", "-1"):
+            with pytest.raises(SystemExit):
+                run_magi.parse_args(["code-review", "x", "--warn-input-tokens", bad])
+
 
 class TestModeModelLockstepInvariant:
     """Pin the lockstep invariant claimed by the 2.2.3 docstrings.
