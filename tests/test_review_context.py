@@ -423,3 +423,42 @@ class TestResolveDiff:
         monkeypatch.setattr(review_context, "_tree_is_clean", lambda root: True)
         monkeypatch.setattr(review_context, "_git_diff", lambda root, base: None)
         assert resolve_diff("Review the branch.", "/repo", "main") == ""
+
+
+class TestF2CoherenceParserParity:
+    """F2 follow-up (Loop-1 review): the coherence parser ``_added_lines_by_file``
+    must key added lines under the SAME clean paths as ``_extract_touched_files``.
+    Otherwise, for a non-git diff (no ``b/``, tab-timestamp), the keys diverge
+    and ``_collect_touched`` looks up ``[]`` -> ``_coheres(content, [])`` is
+    vacuously True, silently bypassing the HEAD-coherence gate (decision F)."""
+
+    _NONGIT = (
+        "--- app.py\t2026-05-24 10:00:00\n"
+        "+++ app.py\t2026-05-24 10:05:00\n"
+        "@@ -1,2 +1,3 @@\n"
+        " real_line_one\n"
+        "+fabricated_added_line\n"
+        " real_line_two\n"
+    )
+
+    def test_added_lines_keyed_under_clean_path(self):
+        """The added line must be keyed under the clean path 'app.py', matching
+        the touched-file set (not 'app.py\\t<timestamp>')."""
+        from review_context import _added_lines_by_file, _extract_touched_files
+
+        files = set(_extract_touched_files(self._NONGIT))
+        added = _added_lines_by_file(self._NONGIT)
+        assert set(added.keys()) <= files, "added-line keys must be clean paths in the touched set"
+        assert added.get("app.py") == ["fabricated_added_line"]
+
+    def test_collect_touched_coherence_engages_for_non_git_diff(self):
+        """End-to-end: a non-git diff whose added line is ABSENT from the file
+        must be reported as mismatched, not silently treated as coherent."""
+        import review_context
+
+        with tempfile.TemporaryDirectory() as repo:
+            with open(os.path.join(repo, "app.py"), "w", encoding="utf-8") as f:
+                f.write("real_line_one\nreal_line_two\n")
+            touched, mismatched = review_context._collect_touched(repo, self._NONGIT, {})
+            assert "app.py" in mismatched, "non-git coherence check must engage (not vacuous)"
+            assert touched == []
