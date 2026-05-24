@@ -131,22 +131,24 @@ def validate_findings(
     * Finding without ``file`` -> kept untouched (not validatable).
     * ``file`` (normalized) in *files* -> in-diff; if ``line`` is outside its
       changed range (+/- *margin*) -> soft-annotate ``"[outside changed range] "``.
-    * ``file`` not exact but its **basename** matches a diff file (A3) -> the
-      agent under-qualified the path: soft-annotate ``"[path unverified] "`` and
-      **skip the line-range check** (the path->line mapping is untrusted). This
-      deliberately trades a possible false-keep on a common basename for not
-      false-dropping a real finding; hard-drop is reserved for clearly fabricated
-      files (no exact and no basename match).
-    * No exact and no basename match -> **hard-drop** (hallucinated file).
+    * ``file`` not exact but its **basename** uniquely matches a diff file (A3)
+      -> the agent under-qualified the path: soft-annotate ``"[path unverified] "``.
+      Because a unique basename identifies the exact file, the line-range check
+      (F3) STILL runs against that file; a ``line`` outside its changed range
+      additionally gets ``"[outside changed range] "``. The finding is kept
+      regardless (recall preserved) — these are observability markers, not drops.
+    * No exact and no unique-basename match -> **hard-drop** (hallucinated file).
     Never raises.
     """
     # A3 (iter-3): only a UNIQUE basename is a strong enough signal for the
     # soft-annotate fallback; an ambiguous basename (shared by 2+ diff files) is
     # hard-dropped — too weak to tell a real finding from a fabrication.
     base_counts: dict[str, int] = {}
+    base_to_file: dict[str, str] = {}
     for vf in files:
         b = vf.rsplit("/", 1)[-1]
         base_counts[b] = base_counts.get(b, 0) + 1
+        base_to_file[b] = vf  # only consulted when the basename is unique
     kept: list[dict[str, Any]] = []
     dropped = 0
     annotated = 0
@@ -165,7 +167,17 @@ def validate_findings(
                     annotated += 1
             kept.append(f)
         elif base_counts.get(nf.rsplit("/", 1)[-1], 0) == 1:
-            f = {**f, "detail": "[path unverified] " + str(f.get("detail", ""))}
+            # F3: a unique basename resolves to exactly one diff file, so run the
+            # line-range check against it instead of skipping it. Both markers may
+            # apply; the finding is kept either way (observability, not a drop).
+            resolved = base_to_file[nf.rsplit("/", 1)[-1]]
+            detail = str(f.get("detail", ""))
+            line = f.get("line")
+            if isinstance(line, int) and not isinstance(line, bool):
+                rng = ranges.get(resolved, set())
+                if rng and not any(abs(line - r) <= margin for r in rng):
+                    detail = "[outside changed range] " + detail
+            f = {**f, "detail": "[path unverified] " + detail}
             annotated += 1
             kept.append(f)
         else:
