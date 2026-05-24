@@ -3168,3 +3168,265 @@ class TestNamespaceIntegration:
             cleanup_old_runs(0, root_b)  # wipe-all within B's namespace
 
         assert os.path.isdir(a_dir), "Project A's dir must be untouched by B's cleanup"
+
+
+def _guard_agent(findings):
+    """Build a minimal valid agent dict carrying the given findings."""
+    return {
+        "agent": "melchior",
+        "verdict": "approve",
+        "confidence": 0.9,
+        "summary": "s",
+        "reasoning": "r",
+        "recommendation": "rec",
+        "findings": findings,
+    }
+
+
+class TestFindingGuardWiring:
+    """v3.0.0 Block A: code-review applies the diff guard per agent before
+    consensus; design/analysis do not; cost is aggregated in all modes."""
+
+    def test_resolve_diff_for_guard_returns_files_and_ranges(self):
+        import run_magi
+
+        diff = (
+            "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+            "@@ -1,2 +1,3 @@\n ctx\n+added\n ctx2\n"
+        )
+        files, ranges = run_magi._diff_files_and_ranges(diff)
+        assert files == {"x.py"} and 2 in ranges["x.py"]
+
+    def test_diff_files_and_ranges_failsafe_returns_empty(self, monkeypatch):
+        """A malformed-diff failure degrades to empty, never raises (R10)."""
+        import run_magi
+
+        monkeypatch.setattr(
+            run_magi,
+            "parse_diff_ranges",
+            lambda diff: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        files, ranges = run_magi._diff_files_and_ranges("anything")
+        assert files == set() and ranges == {}
+
+    def test_guard_applied_only_in_code_review(self):
+        import run_magi
+
+        agents = [
+            {
+                "agent": "melchior",
+                "verdict": "approve",
+                "confidence": 0.9,
+                "summary": "s",
+                "reasoning": "r",
+                "recommendation": "rec",
+                "findings": [
+                    {
+                        "severity": "warning",
+                        "title": "t",
+                        "detail": "d",
+                        "file": "ghost.py",
+                        "line": 1,
+                        "category": "other",
+                    }
+                ],
+            }
+        ]
+        files, ranges = {"x.py"}, {"x.py": {2}}
+        cr = run_magi._apply_finding_guard(agents, "code-review", files, ranges)
+        assert cr[0]["findings"] == []
+        dz = run_magi._apply_finding_guard(agents, "design", files, ranges)
+        assert len(dz[0]["findings"]) == 1
+
+    def test_guard_noop_when_no_diff(self):
+        """Empty file-set (no diff resolved) -> guard is a no-op even in code-review."""
+        import run_magi
+
+        agents = [
+            _guard_agent(
+                [
+                    {
+                        "severity": "warning",
+                        "title": "t",
+                        "detail": "d",
+                        "file": "ghost.py",
+                        "line": 1,
+                        "category": "other",
+                    }
+                ]
+            )
+        ]
+        out = run_magi._apply_finding_guard(agents, "code-review", set(), {})
+        assert len(out[0]["findings"]) == 1
+
+    def test_cost_block_in_saved_report(self, tmp_path, monkeypatch):
+        """BDD-13 wiring half: magi-report.json on disk carries a cost block."""
+        import run_magi
+
+        # Mirror TestMainLockWiring._patch_run: stub everything but the wiring
+        # under test (cost aggregation into the saved report).
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+
+        created = {}
+
+        def fake_create(output_dir, run_root=None):
+            d = tmp_path / "magi-run-cost"
+            d.mkdir()
+            created["dir"] = str(d)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def fake_orch(*a, **k):
+            return {"agents": [_guard_agent([])], "consensus": {}}
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        # Stub cost aggregation so the test does not depend on raw-envelope files.
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {"melchior": 0.25}, "total_usd": 0.25},
+        )
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello"])
+
+        run_magi.main()
+
+        report_path = os.path.join(created["dir"], "magi-report.json")
+        import json
+
+        with open(report_path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        assert "cost" in saved
+        assert saved["cost"]["total_usd"] == 0.25
+        assert saved["cost"]["per_agent"] == {"melchior": 0.25}
+
+    def test_score_invariant_under_fabricated_finding(self):
+        """BDD-14: a finding the guard would drop does not change the consensus
+        verdict/score/label. The guard filters findings, never the score."""
+        from synthesize import determine_consensus
+
+        clean = [
+            _guard_agent([]),
+            {
+                "agent": "balthasar",
+                "verdict": "reject",
+                "confidence": 0.8,
+                "summary": "s2",
+                "reasoning": "r2",
+                "recommendation": "rec2",
+                "findings": [],
+            },
+        ]
+        fabricated = [
+            _guard_agent(
+                [
+                    {
+                        "severity": "critical",
+                        "title": "ghost",
+                        "detail": "d",
+                        "file": "ghost.py",
+                        "line": 1,
+                        "category": "other",
+                    }
+                ]
+            ),
+            {
+                "agent": "balthasar",
+                "verdict": "reject",
+                "confidence": 0.8,
+                "summary": "s2",
+                "reasoning": "r2",
+                "recommendation": "rec2",
+                "findings": [],
+            },
+        ]
+        c1 = determine_consensus(clean)
+        c2 = determine_consensus(fabricated)
+        assert c1["consensus"] == c2["consensus"]
+        assert c1["consensus_verdict"] == c2["consensus_verdict"]
+        assert c1["confidence"] == c2["confidence"]
+
+    def test_shared_diff_source_feeds_enrichment_and_guard(self, tmp_path, monkeypatch):
+        """A2: under code-review, main() resolves the diff ONCE and the SAME
+        value flows to both the enrichment path and the finding guard."""
+        import run_magi
+
+        sentinel = "SENTINEL-DIFF-VALUE"
+        resolve_calls = {"n": 0}
+
+        def fake_resolve(input_content, repo_root, base_ref):
+            resolve_calls["n"] += 1
+            return sentinel
+
+        # resolve_diff is referenced in run_magi's namespace.
+        monkeypatch.setattr(run_magi, "resolve_diff", fake_resolve)
+
+        seen = {"enrich_diff": None, "guard_diff": None}
+
+        def fake_enrich(mode, content, *, base_ref, enrich, max_chars, diff):
+            seen["enrich_diff"] = diff
+            return content, None
+
+        monkeypatch.setattr(run_magi, "_maybe_enrich", fake_enrich)
+
+        def fake_files_and_ranges(diff):
+            seen["guard_diff"] = diff
+            return {"x.py"}, {"x.py": {1}}
+
+        monkeypatch.setattr(run_magi, "_diff_files_and_ranges", fake_files_and_ranges)
+
+        # Stub the rest of main()'s wiring.
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {}, "total_usd": 0.0},
+        )
+
+        def fake_create(output_dir, run_root=None):
+            d = tmp_path / "magi-run-shared"
+            d.mkdir()
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        captured = {"guard_agents": None}
+
+        def fake_guard(agents, mode, files, ranges):
+            captured["guard_agents"] = agents
+            return agents
+
+        monkeypatch.setattr(run_magi, "_apply_finding_guard", fake_guard)
+
+        async def fake_orch(*a, **k):
+            return {"agents": [_guard_agent([])], "consensus": {}}
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "code-review", "hello"])
+
+        run_magi.main()
+
+        assert resolve_calls["n"] == 1, "resolve_diff must be called exactly once"
+        assert seen["enrich_diff"] == sentinel
+        assert seen["guard_diff"] == sentinel

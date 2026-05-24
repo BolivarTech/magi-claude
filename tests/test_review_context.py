@@ -313,3 +313,62 @@ class TestBudgetAndFailSafe:
             _init_repo(repo)
             content, note = enrich_code_review_context(_SAMPLE_DIFF, repo_root=repo)
         assert content == _SAMPLE_DIFF and "error" in note.lower()
+
+
+class TestResolveDiff:
+    """A2: resolve_diff is the shared diff-resolution seam used by BOTH
+    enrichment and the finding guard. TOTAL — returns "" on any failure."""
+
+    def test_input_embedded_diff_returned(self):
+        from review_context import resolve_diff
+
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            assert resolve_diff(_SAMPLE_DIFF, repo, "main") == _SAMPLE_DIFF
+
+    def test_clean_tree_no_embedded_diff_uses_git_diff(self, monkeypatch):
+        import review_context
+        from review_context import resolve_diff
+
+        sentinel = "diff --git a/auto.py b/auto.py\n+++ b/auto.py\n@@ -0,0 +1 @@\n+x = 1\n"
+        monkeypatch.setattr(review_context, "_git_toplevel", lambda start: "/repo")
+        monkeypatch.setattr(review_context, "_tree_is_clean", lambda root: True)
+        monkeypatch.setattr(review_context, "_git_diff", lambda root, base: sentinel)
+        assert resolve_diff("Review the branch.", "/repo", "main") == sentinel
+
+    def test_dirty_tree_returns_empty(self, monkeypatch):
+        import review_context
+        from review_context import resolve_diff
+
+        monkeypatch.setattr(review_context, "_git_toplevel", lambda start: "/repo")
+        monkeypatch.setattr(review_context, "_tree_is_clean", lambda root: False)
+        assert resolve_diff("Review.", "/repo", "main") == ""
+
+    def test_non_git_returns_empty(self, monkeypatch):
+        import review_context
+        from review_context import resolve_diff
+
+        monkeypatch.setattr(review_context, "_git_toplevel", lambda start: None)
+        assert resolve_diff("Review.", "/not-a-repo", "main") == ""
+
+    def test_git_failure_returns_empty(self, monkeypatch):
+        """TOTAL: any exception inside resolution degrades to ""."""
+        import review_context
+        from review_context import resolve_diff
+
+        monkeypatch.setattr(
+            review_context,
+            "_git_toplevel",
+            lambda start: (_ for _ in ()).throw(RuntimeError("git exploded")),
+        )
+        assert resolve_diff("Review.", "/repo", "main") == ""
+
+    def test_git_diff_empty_returns_empty(self, monkeypatch):
+        """No diff between base and HEAD -> "" (no-op for both consumers)."""
+        import review_context
+        from review_context import resolve_diff
+
+        monkeypatch.setattr(review_context, "_git_toplevel", lambda start: "/repo")
+        monkeypatch.setattr(review_context, "_tree_is_clean", lambda root: True)
+        monkeypatch.setattr(review_context, "_git_diff", lambda root, base: None)
+        assert resolve_diff("Review the branch.", "/repo", "main") == ""
