@@ -103,6 +103,29 @@ class TestValidateFindings:
         )
         assert kept == [] and dropped == 1 and annotated == 0
 
+    def test_parse_diff_ranges_ignores_no_newline_marker(self):
+        """FIX 1: a backslash-space 'no newline at end of file' marker must not
+        advance the post-image line counter — subsequent line numbers must be exact."""
+        from finding_validation import parse_diff_ranges
+
+        diff = (
+            "diff --git a/z.py b/z.py\n"
+            "--- a/z.py\n"
+            "+++ b/z.py\n"
+            "@@ -1,2 +1,3 @@\n"
+            " ctx\n"
+            "+added_line\n"
+            "\\ No newline at end of file\n"
+            "+second_added\n"
+        )
+        ranges = parse_diff_ranges(diff)
+        # added_line is at post-image line 2, second_added at 3.
+        # If the marker is mistakenly counted as a context line, second_added
+        # would be recorded as line 4 (off-by-one).
+        assert ranges == {"z.py": {2, 3}}, (
+            f"no-newline marker must not advance the line counter; got {ranges}"
+        )
+
     def test_a3_ambiguous_basename_is_hard_dropped(self):
         """A3 (iter-3): diff with TWO files sharing basename a.py (src/a.py + lib/a.py)
         and a finding file="x/a.py" -> hard-dropped because the basename is not unique
