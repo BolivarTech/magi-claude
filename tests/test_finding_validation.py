@@ -256,6 +256,35 @@ class TestF2NonGitDiffParity:
         # left uncounted — the documented off-by-one — but never a phantom file).
         assert set(parse_diff_ranges(diff).keys()) == {"db.sql"}
 
+    def test_new_file_with_content_is_recognized(self):
+        """A new file WITH content carries '--- /dev/null' / '+++ b/new.py' / '@@'
+        (verified against git output), so the '@@'-anchored header rule recognizes
+        it — the trailing-'@@' requirement causes no recall loss for real files."""
+        from finding_validation import parse_diff_ranges, valid_files
+
+        diff = (
+            "diff --git a/new.py b/new.py\n"
+            "new file mode 100644\n"
+            "index 0000000..422c2b7\n"
+            "--- /dev/null\n"
+            "+++ b/new.py\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+a\n"
+            "+b\n"
+        )
+        assert valid_files(diff) == {"new.py"}
+        assert parse_diff_ranges(diff) == {"new.py": {1, 2}}
+
+    def test_empty_new_file_emits_no_header_and_is_not_touched(self):
+        """An EMPTY new file emits only 'diff --git' + 'new file mode' (verified:
+        git emits NO '---'/'+++' for a 0-byte file), so there is no header to
+        recognize. The '@@' rule causes no regression here — non-recognition is
+        git's doing, and an empty file has no citable lines."""
+        from finding_validation import valid_files
+
+        diff = "diff --git a/empty.py b/empty.py\nnew file mode 100644\nindex 0000000..e69de29\n"
+        assert valid_files(diff) == set()
+
 
 class TestF3BasenameLineRangeCheck:
     """F3 (Caspar): a unique-basename match identifies the exact diff file, so

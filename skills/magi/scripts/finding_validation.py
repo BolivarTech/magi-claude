@@ -59,7 +59,10 @@ def _iter_diff_events(diff: str) -> Iterator[tuple[Any, ...]]:
     line (rendered ``--- ``) adjacent to an added ``++ `` line (rendered
     ``+++ ``) from being misparsed as a phantom file header. The git ``b/``
     prefix is optional; ``/dev/null`` targets and ``diff -u`` tab-timestamps are
-    stripped (see :func:`_clean_newfile_path`).
+    stripped (see :func:`_clean_newfile_path`). The ``@@`` requirement loses no
+    real file: a content-bearing file's header is always followed by a hunk, and
+    an empty new file emits no ``--- ``/``+++ `` header at all (git verified), so
+    there was never a header to recognize — and an empty file has no citable line.
 
     Paths are yielded raw for callers that read them from disk;
     :func:`parse_diff_ranges` applies :func:`normalize_path` itself, so the
