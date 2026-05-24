@@ -4335,3 +4335,192 @@ class TestInputSizeWiring:
             f"est_tokens must equal chars // 4 == {raw_len // 4}; "
             f"got {saved['input_size']['est_tokens']!r}"
         )
+
+
+class TestF4GuardObservability:
+    """F4: the finding guard drops/annotates findings but the consensus keeps the
+    agent's vote. Without surfacing the drops, an agent can vote (e.g. reject)
+    yet show no Key Findings, with no record of why. The guard must populate an
+    optional ``summary`` out-param so ``main()`` can write a ``guard`` block to
+    magi-report.json — the audit artifact then explains the empty findings."""
+
+    def test_guard_summary_records_drops_and_annotations(self):
+        """A populated summary carries per-agent dropped/annotated counts, the
+        dropped titles (not the kept-but-annotated ones), and totals."""
+        import run_magi
+
+        agents = [
+            _guard_agent(
+                [
+                    {
+                        "severity": "critical",
+                        "title": "Ghost",
+                        "detail": "d",
+                        "file": "ghost.py",
+                        "line": 5,
+                        "category": "null-deref",
+                    },
+                    {
+                        "severity": "warning",
+                        "title": "Outside",
+                        "detail": "d2",
+                        "file": "x.py",
+                        "line": 999,
+                        "category": "other",
+                    },
+                    {
+                        "severity": "info",
+                        "title": "Good",
+                        "detail": "d3",
+                        "file": "x.py",
+                        "line": 2,
+                        "category": "other",
+                    },
+                ]
+            )
+        ]
+        summary: dict[str, Any] = {}
+        run_magi._apply_finding_guard(
+            agents, "code-review", {"x.py"}, {"x.py": {2}}, summary=summary
+        )
+        assert summary["active"] is True
+        assert summary["files_in_diff"] == 1
+        assert summary["total_dropped"] == 1
+        assert summary["total_annotated"] == 1
+        pa = summary["per_agent"]["melchior"]
+        assert pa["dropped"] == 1 and pa["annotated"] == 1
+        assert "Ghost" in pa["dropped_titles"]
+        assert "Outside" not in pa["dropped_titles"], "annotated (kept) finding is not a drop"
+
+    def test_guard_summary_inactive_in_non_code_review(self):
+        """design/analysis -> guard is a no-op; summary records active=False only."""
+        import run_magi
+
+        agents = [
+            _guard_agent(
+                [
+                    {
+                        "severity": "warning",
+                        "title": "t",
+                        "detail": "d",
+                        "file": "ghost.py",
+                        "line": 1,
+                    }
+                ]
+            )
+        ]
+        summary: dict[str, Any] = {}
+        out = run_magi._apply_finding_guard(
+            agents, "design", {"x.py"}, {"x.py": {2}}, summary=summary
+        )
+        assert summary == {"active": False}
+        assert len(out[0]["findings"]) == 1
+
+    def test_guard_summary_inactive_when_no_diff(self):
+        """code-review with no resolvable diff (empty files) -> active=False."""
+        import run_magi
+
+        agents = [
+            _guard_agent(
+                [
+                    {
+                        "severity": "warning",
+                        "title": "t",
+                        "detail": "d",
+                        "file": "ghost.py",
+                        "line": 1,
+                    }
+                ]
+            )
+        ]
+        summary: dict[str, Any] = {}
+        run_magi._apply_finding_guard(agents, "code-review", set(), {}, summary=summary)
+        assert summary == {"active": False}
+
+    def test_guard_summary_omits_clean_agents(self):
+        """An agent whose findings all survive contributes nothing to per_agent."""
+        import run_magi
+
+        agents = [
+            _guard_agent(
+                [{"severity": "info", "title": "ok", "detail": "d", "file": "x.py", "line": 2}]
+            )
+        ]
+        summary: dict[str, Any] = {}
+        run_magi._apply_finding_guard(
+            agents, "code-review", {"x.py"}, {"x.py": {2}}, summary=summary
+        )
+        assert summary["active"] is True
+        assert summary["total_dropped"] == 0 and summary["total_annotated"] == 0
+        assert summary["per_agent"] == {}
+
+    def test_guard_block_in_saved_report(self, tmp_path, monkeypatch):
+        """F4 wiring: in code-review, magi-report.json carries a 'guard' block
+        with the per-agent dropped titles, explaining an agent's empty findings."""
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        # Control the diff so the guard runs with a known file-set/ranges.
+        monkeypatch.setattr(run_magi, "resolve_diff", lambda content, cwd, base: "DIFF")
+        monkeypatch.setattr(
+            run_magi, "_diff_files_and_ranges", lambda diff: ({"x.py"}, {"x.py": {2}})
+        )
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {}, "total_usd": 0.0},
+        )
+
+        created = {}
+
+        def fake_create(output_dir, run_root=None):
+            d = tmp_path / "magi-run-guard"
+            d.mkdir()
+            created["dir"] = str(d)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def fake_orch(*a, **k):
+            agent = _guard_agent(
+                [
+                    {
+                        "severity": "critical",
+                        "title": "Ghost",
+                        "detail": "d",
+                        "file": "ghost.py",
+                        "line": 5,
+                        "category": "null-deref",
+                    }
+                ]
+            )
+            agent["verdict"] = "reject"
+            return {
+                "agents": [agent],
+                "consensus": {"consensus": "x", "consensus_verdict": "reject"},
+            }
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "code-review", "hello"])
+
+        run_magi.main()
+
+        import json
+
+        with open(os.path.join(created["dir"], "magi-report.json"), encoding="utf-8") as fh:
+            saved = json.load(fh)
+        assert "guard" in saved
+        assert saved["guard"]["active"] is True
+        assert saved["guard"]["total_dropped"] == 1
+        assert "Ghost" in saved["guard"]["per_agent"]["melchior"]["dropped_titles"]
