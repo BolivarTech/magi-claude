@@ -847,7 +847,7 @@ def test_agent_prompts_document_likelihood_calibration():
     for name in ("melchior.md", "balthasar.md", "caspar.md"):
         low = (agents / name).read_text(encoding="utf-8").lower()
         assert "likelihood" in low, name
-        for level in ("certain", "likely", "possible", "unlikely"):
+        for level in ("`certain`", "`likely`", "`possible`", "`unlikely`"):
             assert level in low, f"{name}: missing likelihood level {level}"
         assert "code-review mode only" in low, f"{name}: missing mode-gate phrase"
         assert "downgrade rule" in low, f"{name}: missing downgrade rule"
@@ -873,6 +873,34 @@ def test_caspar_prompt_documents_critic_override():
     for name in ("melchior.md", "balthasar.md"):
         other = (agents / name).read_text(encoding="utf-8").lower()
         assert "critic's override" not in other, f"{name} must not carry Caspar's override"
+
+
+def test_calibration_blocks_identical_except_caspar_override():
+    """Block B: the shared calibration section is byte-identical across the three
+    prompts; only caspar.md additionally carries the Critic's override. Guards
+    against silent per-agent prompt drift."""
+    from pathlib import Path
+
+    agents = Path(__file__).parent.parent / "skills" / "magi" / "agents"
+
+    def section(name: str) -> str:
+        text = (agents / name).read_text(encoding="utf-8")
+        start = text.index("## Finding calibration")
+        end = text.index("## Output format", start)
+        return text[start:end]
+
+    mel = section("melchior.md")
+    bal = section("balthasar.md")
+    cas = section("caspar.md")
+    assert mel == bal, "melchior and balthasar calibration sections must be byte-identical"
+    assert "Critic's override" in cas, "caspar must carry the Critic's override paragraph"
+    assert "Critic's override" not in mel, "melchior must not carry Caspar's override"
+    # The shared prefix of caspar's block (everything before the override) must
+    # equal melchior's block verbatim.
+    cas_shared = cas[: cas.index("**Critic's override")]
+    assert cas_shared.strip() == mel.strip(), (
+        "caspar's shared calibration block must match melchior's verbatim"
+    )
 
 
 # ---------------------------------------------------------------------------
