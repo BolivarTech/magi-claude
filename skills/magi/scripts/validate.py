@@ -281,11 +281,11 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
         # absent/unknown) so downstream id/dedup always has a value.
         file_val = finding.get("file")
         if file_val is not None and not isinstance(file_val, str):
-            raise ValidationError(
-                f"Finding at index {idx} field 'file' must be a string or null, "
-                f"got {type(file_val).__name__}.",
-                filepath,
-            )
+            # Fail-soft to None for symmetry with the line field (A4 rationale):
+            # a non-str file value is a minor LLM slip on an optional field;
+            # raising ValidationError here would drop the entire agent, risking
+            # an asymmetric Caspar drop (§2.2.5). Keep the finding, null the field.
+            file_val = None
         line_val = finding.get("line")
         if line_val is not None:
             if isinstance(line_val, bool):
