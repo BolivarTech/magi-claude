@@ -834,6 +834,48 @@ class TestDetermineConsensus:
 
 
 # ---------------------------------------------------------------------------
+# Block B pins — likelihood calibration + Caspar override
+# ---------------------------------------------------------------------------
+
+
+def test_agent_prompts_document_likelihood_calibration():
+    """v3.0.0 Block B: all three code-review prompts document the likelihood
+    calibration, the mode-gate, the downgrade rule, and the 5 shared few-shots."""
+    from pathlib import Path
+
+    agents = Path(__file__).parent.parent / "skills" / "magi" / "agents"
+    for name in ("melchior.md", "balthasar.md", "caspar.md"):
+        low = (agents / name).read_text(encoding="utf-8").lower()
+        assert "likelihood" in low, name
+        for level in ("certain", "likely", "possible", "unlikely"):
+            assert level in low, f"{name}: missing likelihood level {level}"
+        assert "code-review mode only" in low, f"{name}: missing mode-gate phrase"
+        assert "downgrade rule" in low, f"{name}: missing downgrade rule"
+        assert "unless the context shows otherwise" in low, f"{name}: missing escape clause"
+        for phrase in (
+            "surrounding code now violate",
+            "shared fixture",
+            "resource cleanup",
+            "framework's documented contract",
+            "cannot fail",
+        ):
+            assert phrase in low, f"{name}: missing few-shot phrase {phrase!r}"
+
+
+def test_caspar_prompt_documents_critic_override():
+    """v3.0.0 Block B: only Caspar's prompt grants the retain-unlikely override."""
+    from pathlib import Path
+
+    agents = Path(__file__).parent.parent / "skills" / "magi" / "agents"
+    caspar = (agents / "caspar.md").read_text(encoding="utf-8").lower()
+    assert "critic's override" in caspar
+    assert "retain" in caspar
+    for name in ("melchior.md", "balthasar.md"):
+        other = (agents / name).read_text(encoding="utf-8").lower()
+        assert "critic's override" not in other, f"{name} must not carry Caspar's override"
+
+
+# ---------------------------------------------------------------------------
 # TestFindingsDedup
 # ---------------------------------------------------------------------------
 
