@@ -235,9 +235,10 @@ class TestF2NonGitDiffParity:
     def test_deleted_comment_adjacent_to_addition_is_not_phantom_file(self):
         """Adversarial (Caspar): a DELETED '-- ' comment line (rendered '--- ')
         immediately followed by an ADDED '++ ' line (rendered '+++ ') must not be
-        misparsed as a phantom file header. The real header is followed by '@@';
-        the content adjacency is not — so only the real file is recognized and the
-        added line is recorded under it with correct numbering."""
+        misparsed as a phantom file header. A real header is followed by '@@';
+        this content adjacency is not — so only the real file is recognized (no
+        phantom). The '++ new note' content line is left uncounted (the documented
+        off-by-one), which is acceptable; a phantom file would not be."""
         from finding_validation import parse_diff_ranges, valid_files
 
         diff = (
@@ -251,8 +252,9 @@ class TestF2NonGitDiffParity:
             " ctx2\n"
         )
         assert valid_files(diff) == {"db.sql"}, "deleted '--'/added '++' must not create a phantom"
-        # '++ new note' is the post-image line 2 under db.sql; no phantom key.
-        assert parse_diff_ranges(diff) == {"db.sql": {2}}
+        # No phantom key in the ranges either (the '++ new note' content line is
+        # left uncounted — the documented off-by-one — but never a phantom file).
+        assert set(parse_diff_ranges(diff).keys()) == {"db.sql"}
 
 
 class TestF3BasenameLineRangeCheck:

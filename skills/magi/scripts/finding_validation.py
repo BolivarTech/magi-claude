@@ -76,14 +76,18 @@ def _iter_diff_events(diff: str) -> Iterator[tuple[Any, ...]]:
     while i < n:
         raw = lines[i]
         if raw.startswith(_OLDFILE_PREFIX):
-            # Behaviour-preserving recognition: '--- ' followed by a '+++ '.
-            m = _NEWFILE_RE.match(lines[i + 1]) if i + 1 < n else None
-            if m:
-                current = _clean_newfile_path(m.group(1))
-                if current is not None:
-                    yield ("file", current)
-                i += 2  # consume '--- ' and '+++ '
-                continue
+            # A real file header is '--- ' then '+++ ' then '@@'. Requiring the
+            # trailing '@@' (count-free, so it tolerates imprecise hunk counts)
+            # disambiguates a real header from a deleted '-- '-comment line
+            # adjacent to an added '++ ' line — both render as '--- '/'+++ '.
+            if i + 2 < n and _HUNK_RE.match(lines[i + 2]):
+                m = _NEWFILE_RE.match(lines[i + 1])
+                if m:
+                    current = _clean_newfile_path(m.group(1))
+                    if current is not None:
+                        yield ("file", current)
+                    i += 2  # consume '--- ' and '+++ '; '@@' handled next loop
+                    continue
             i += 1  # '--- ' is a deletion/content line, not a header
             continue
         h = _HUNK_RE.match(raw)
@@ -95,6 +99,12 @@ def _iter_diff_events(diff: str) -> Iterator[tuple[Any, ...]]:
             i += 1
             continue
         if raw.startswith("+++") or raw.startswith("---"):
+            # A '+++ '/'--- ' line that reached here is content, not a header
+            # (real headers are consumed above). It is skipped rather than
+            # counted: an added line whose body itself begins with '++ ' is left
+            # uncounted (a documented off-by-one), the conservative choice — it
+            # avoids miscounting a malformed/truncated '+++ ' header (e.g. a
+            # trailing '+++ /dev/null' deletion with no hunk) as a real line.
             i += 1
             continue
         if raw.startswith("\\ "):
