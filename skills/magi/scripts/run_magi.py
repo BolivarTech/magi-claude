@@ -862,17 +862,25 @@ def _apply_finding_guard(
             kept, dropped, annotated = validate_findings(original, files, ranges)
             a = {**a, "findings": kept}
             if dropped or annotated:
-                # Compute dropped titles by title-set difference so annotated
-                # (soft-annotated, KEPT) findings — whose original dict object
-                # is replaced by a new dict — are not mistakenly listed as
-                # dropped. Annotated findings retain their original title, so
-                # any title still present in *kept* belongs to a kept finding.
-                kept_titles = {str(f.get("title", "")) for f in kept}
-                dropped_titles = [
-                    str(f.get("title", ""))
-                    for f in original
-                    if str(f.get("title", "")) not in kept_titles
-                ]
+                # Compute dropped titles by an order-preserving walk of
+                # *original* against *kept*. ``validate_findings`` keeps survivors
+                # in original order (annotated ones replaced by new dicts with the
+                # same title/file/line, only ``detail`` changed) and removes the
+                # dropped ones, so a two-pointer match by (title, file, line)
+                # identifies exactly which originals survived. A title-set diff
+                # would wrongly hide a dropped finding whose title is shared by a
+                # kept one (duplicate titles across different files).
+                kept_idx = 0
+                dropped_titles = []
+                for orig in original:
+                    if kept_idx < len(kept) and (
+                        kept[kept_idx].get("title") == orig.get("title")
+                        and kept[kept_idx].get("file") == orig.get("file")
+                        and kept[kept_idx].get("line") == orig.get("line")
+                    ):
+                        kept_idx += 1  # this original survived (possibly annotated)
+                    else:
+                        dropped_titles.append(str(orig.get("title", "")))
                 print(
                     f"[guard] {a['agent']}: dropped {dropped} "
                     f"titles={dropped_titles}, annotated {annotated}",
