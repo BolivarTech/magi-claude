@@ -3359,7 +3359,17 @@ class TestFindingGuardWiring:
 
     def test_shared_diff_source_feeds_enrichment_and_guard(self, tmp_path, monkeypatch):
         """A2: under code-review, main() resolves the diff ONCE and the SAME
-        value flows to both the enrichment path and the finding guard."""
+        value flows to both the enrichment path and the finding guard.
+
+        This drives the REAL ``_maybe_enrich`` + enrichment path (only the
+        orchestrator/temp/lock are stubbed). ``resolve_diff`` is monkeypatched
+        on BOTH the ``run_magi`` namespace (where ``main`` resolves it) and the
+        ``review_context`` namespace (where ``_enrich`` would re-resolve it) so
+        a single shared counter sees every resolution attempt. With A2 realized,
+        ``main`` resolves once and threads that value into enrichment, so the
+        counter is exactly 1; if enrichment re-resolves internally the counter
+        would read 2 (the bug this test pins shut)."""
+        import review_context
         import run_magi
 
         sentinel = "SENTINEL-DIFF-VALUE"
@@ -3369,16 +3379,33 @@ class TestFindingGuardWiring:
             resolve_calls["n"] += 1
             return sentinel
 
-        # resolve_diff is referenced in run_magi's namespace.
+        # resolve_diff is referenced both in run_magi's namespace (main()
+        # resolves it once) and in review_context's namespace (_enrich would
+        # re-resolve it if it ignored the threaded value). Patch BOTH so the
+        # single shared counter catches a double-resolution.
         monkeypatch.setattr(run_magi, "resolve_diff", fake_resolve)
+        monkeypatch.setattr(review_context, "resolve_diff", fake_resolve)
+
+        # Force the enrichment git gates open deterministically (independent of
+        # the test runner's own working-tree state) so _enrich proceeds to the
+        # point where the bug would re-resolve the diff.
+        monkeypatch.setattr(review_context, "_git_toplevel", lambda start: str(tmp_path))
+        monkeypatch.setattr(review_context, "_tree_is_clean", lambda root: True)
 
         seen = {"enrich_diff": None, "guard_diff": None}
 
-        def fake_enrich(mode, content, *, base_ref, enrich, max_chars, diff):
-            seen["enrich_diff"] = diff
-            return content, None
+        # Spy on enrich_code_review_context's diff kwarg by WRAPPING the real
+        # function (not replacing it), so the REAL _maybe_enrich -> _enrich path
+        # runs. With the bug, _enrich re-invokes review_context.resolve_diff
+        # (the shared counter then reads 2); with A2 realized, the wrapper sees
+        # the diff threaded from main() and _enrich consumes it (counter == 1).
+        real_enrich = review_context.enrich_code_review_context
 
-        monkeypatch.setattr(run_magi, "_maybe_enrich", fake_enrich)
+        def spy_enrich_lib(content, **kwargs):
+            seen["enrich_diff"] = kwargs.get("diff")
+            return real_enrich(content, **kwargs)
+
+        monkeypatch.setattr(run_magi, "enrich_code_review_context", spy_enrich_lib)
 
         def fake_files_and_ranges(diff):
             seen["guard_diff"] = diff
@@ -3427,6 +3454,13 @@ class TestFindingGuardWiring:
 
         run_magi.main()
 
-        assert resolve_calls["n"] == 1, "resolve_diff must be called exactly once"
-        assert seen["enrich_diff"] == sentinel
-        assert seen["guard_diff"] == sentinel
+        assert resolve_calls["n"] == 1, (
+            f"resolve_diff must be called exactly once (got {resolve_calls['n']}): "
+            f"main() resolves it; enrichment must consume that value, not re-resolve."
+        )
+        assert seen["enrich_diff"] == sentinel, (
+            "enrichment must receive the diff resolved once by main()"
+        )
+        assert seen["guard_diff"] == sentinel, (
+            "the guard must receive the same diff resolved once by main()"
+        )
