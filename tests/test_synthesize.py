@@ -2032,18 +2032,19 @@ class TestOptionalFindingFields:
         assert fn["file"] == "src\\a.py" and fn["line"] == 10
         assert fn["category"] == "other"  # unknown -> other
 
-    def test_invalid_line_type_rejected(self, tmp_path):
-        import pytest
-
+    def test_invalid_line_type_fails_soft_to_none(self, tmp_path):
+        """FIX 2: line="ten" (string) must fail-soft to None; NEVER raise
+        ValidationError for a bad line value (A4 fail-soft rule extended to
+        non-int types — dropping the whole agent is disproportionate)."""
         from synthesize import load_agent_output
-        from validate import ValidationError
 
         out = self._write(
             tmp_path,
             {"severity": "info", "title": "t", "detail": "d", "line": "ten"},
         )
-        with pytest.raises(ValidationError):
-            load_agent_output(out)
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, f"line='ten' must fail-soft to None, got {fn['line']!r}"
 
     def test_line_zero_is_fail_soft_to_none(self, tmp_path):
         """A4 fail-soft: line=0 must NOT raise ValidationError; finding kept, line -> None."""
@@ -2068,6 +2069,46 @@ class TestOptionalFindingFields:
         loaded = load_agent_output(out)
         fn = loaded["findings"][0]
         assert fn["line"] is None, "line=-5 must fail-soft to None, not raise"
+
+    def test_line_whole_float_coerced_to_int(self, tmp_path):
+        """FIX 2: line=42.0 (whole-valued float) must be coerced to int(42),
+        NOT raise ValidationError dropping the whole agent."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": 42.0},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] == 42, f"line=42.0 must coerce to int 42, got {fn['line']!r}"
+        assert isinstance(fn["line"], int), f"coerced line must be int, got {type(fn['line'])}"
+
+    def test_line_non_whole_float_fails_soft_to_none(self, tmp_path):
+        """FIX 2: line=42.5 (non-whole float) must fail-soft to None, NOT
+        raise ValidationError and drop the entire agent."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": 42.5},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, f"line=42.5 must fail-soft to None, got {fn['line']!r}"
+
+    def test_line_bool_fails_soft_to_none(self, tmp_path):
+        """FIX 2: line=True (bool — isinstance(True, int) is True, so must be
+        explicitly treated as invalid) must fail-soft to None, NOT raise."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": True},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, f"line=True must fail-soft to None, got {fn['line']!r}"
 
 
 # ---------------------------------------------------------------------------
