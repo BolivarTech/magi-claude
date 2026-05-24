@@ -79,11 +79,13 @@ Respond with ONLY a JSON object. No markdown fences, no preamble, no text outsid
 
 Example structure:
 
-{"agent": "balthasar", "verdict": "approve", "confidence": 0.85, "summary": "One-line verdict", "reasoning": "Your practical analysis", "findings": [{"severity": "warning", "title": "Short title", "detail": "Practical explanation with context"}], "recommendation": "What you recommend"}
+{"agent": "balthasar", "verdict": "approve", "confidence": 0.85, "summary": "One-line verdict", "reasoning": "Your practical analysis", "findings": [{"severity": "warning", "title": "Short title", "detail": "Practical explanation with context", "file": "src/x.py", "line": 42, "category": "logic-error"}], "recommendation": "What you recommend"}
 
 Valid values:
 - verdict: "approve", "reject", or "conditional"
 - confidence: number between 0.0 and 1.0
 - findings[].severity: "critical", "warning", or "info"
+- findings[].file / findings[].line (OPTIONAL): include ONLY when the finding refers to a concrete code location (typical in code-review). Use the repo-relative path and the line number. In design/analysis (no code under review) omit them or use null.
+- findings[].category (OPTIONAL): one of buffer-overflow, null-deref, resource-leak, unvalidated-input, race-condition, error-handling, hardcoded-secret, integer-overflow, injection, logic-error, type-mismatch, deprecated-api, performance, style, documentation, other. Unknown values are treated as "other".
 
 IMPORTANT: Your entire response must be parseable by json.loads() AND must contain all seven top-level keys exactly — `agent`, `verdict`, `confidence`, `summary`, `reasoning`, `findings`, `recommendation`. Any missing key causes the output to be rejected by the schema validator and drops you from the consensus. Output nothing else.
