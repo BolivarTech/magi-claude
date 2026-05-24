@@ -899,6 +899,7 @@ def main() -> None:
     # Pure/total — never raises. Runs after load so the enriched content is NOT
     # measured here (enrichment happens below); we measure the raw user input.
     est_tokens, oversize = check_input_size(input_content, args.warn_input_tokens)
+    raw_input_chars = len(input_content)  # capture BEFORE _maybe_enrich reassigns input_content
 
     # A2: resolve the review diff ONCE (code-review only) and thread the same
     # value to BOTH the enrichment path and the finding guard so they can never
@@ -1046,10 +1047,11 @@ def main() -> None:
 
     # Input-size telemetry: record the raw-input footprint in the report so the
     # saved magi-report.json carries observable per-run size data (mirrors the
-    # ``cost`` block discipline: set BEFORE json.dump). ``est_tokens`` and
-    # ``oversize`` were computed right after _load_input_content above.
+    # ``cost`` block discipline: set BEFORE json.dump). ``est_tokens``,
+    # ``oversize``, and ``raw_input_chars`` were all computed right after
+    # _load_input_content, before _maybe_enrich could reassign input_content.
     report["input_size"] = {
-        "chars": len(input_content),
+        "chars": raw_input_chars,
         "est_tokens": est_tokens,
     }
 
@@ -1058,7 +1060,7 @@ def main() -> None:
         json.dump(report, f, indent=2)
     print(f"\nFull report saved to: {report_path}")
     print(f"Cost: ${report['cost']['total_usd']:.4f} ({len(report['agents'])} agents)")
-    print(f"Input size: ~{est_tokens} tokens ({len(input_content)} chars)")
+    print(f"Input size: ~{est_tokens} tokens ({raw_input_chars} chars)")
     if oversize:
         print(
             f"[!] WARNING: input ~{est_tokens} tokens is very large; MAGI reviews it whole "
