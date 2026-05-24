@@ -75,10 +75,18 @@ def _iter_diff_events(diff: str) -> Iterator[tuple[Any, ...]]:
     consumers share recognition but differ in path normalization (a caller
     comparing across them must normalize, as the guard does).
 
-    Limitations (both low-likelihood): a non-git diff whose ``@@`` counts
-    mis-state a multi-file hunk body can mis-bound a hunk (no ``diff --git`` to
-    reset); git C-quoted paths (octal-escaped unicode/control chars) are not
-    unquoted.
+    Limitations (both low-likelihood, accepted trade-offs):
+
+    * **Non-git overstated-count recall loss.** A non-git diff (no ``diff --git``
+      boundary) whose hunk ``@@`` count *overstates* its body keeps the hunk
+      "open", so a later file's ``--- ``/``+++ `` header is read as content and
+      that file is left unrecognized — a finding on it is then hard-dropped. This
+      is the deliberate cost of using hunk-counting to immunize against the
+      ``-- ``/``++ `` phantom edge; the two are structurally indistinguishable
+      without counts. Git diffs are immune: ``diff --git`` force-closes each hunk
+      and git's counts are exact.
+    * **C-quoted paths.** Git C-quoted paths (octal-escaped unicode/control
+      chars) are not unquoted.
     """
     lines = diff.splitlines()
     n = len(lines)

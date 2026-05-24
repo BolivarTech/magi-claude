@@ -307,6 +307,48 @@ class TestF2NonGitDiffParity:
         assert valid_files(diff) == {"db.sql"}, "content adjacency before a hunk must not phantom"
         assert set(parse_diff_ranges(diff).keys()) == {"db.sql"}
 
+    def test_non_git_overstated_count_can_swallow_next_file_header(self):
+        """W5 — KNOWN LIMITATION (accepted trade-off of hunk-counting): a non-git
+        diff (no 'diff --git' to reset) whose first hunk's '@@' count OVERSTATES
+        its body keeps the hunk open, so the second file's '--- '/'+++ ' header is
+        read as content and that file is NOT recognized (its findings would be
+        hard-dropped). Pinned so the trade-off is tracked, not silently changed."""
+        from finding_validation import valid_files
+
+        diff = (
+            "--- a.py\n"
+            "+++ a.py\n"
+            "@@ -1,1 +1,9 @@\n"  # claims 9 new lines, only 1 follows
+            "+only_one_added\n"
+            "--- b.py\n"  # file2 header — swallowed by file1's still-open hunk
+            "+++ b.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "+b_line\n"
+        )
+        vf = valid_files(diff)
+        assert "a.py" in vf
+        assert "b.py" not in vf  # documented recall loss (no diff --git boundary)
+
+    def test_git_diff_immune_to_overstated_count_via_diff_git_reset(self):
+        """Contrast to W5: with 'diff --git' boundaries an overstated '@@' count
+        cannot swallow the next file — 'diff --git' force-closes the prior hunk,
+        so both files are recognized. This is why the git workflow is unaffected."""
+        from finding_validation import valid_files
+
+        diff = (
+            "diff --git a/a.py b/a.py\n"
+            "--- a/a.py\n"
+            "+++ b/a.py\n"
+            "@@ -1,1 +1,9 @@\n"  # overstated, but the next 'diff --git' resets it
+            "+only_one_added\n"
+            "diff --git a/b.py b/b.py\n"
+            "--- a/b.py\n"
+            "+++ b/b.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "+b_line\n"
+        )
+        assert valid_files(diff) == {"a.py", "b.py"}
+
 
 class TestF3BasenameLineRangeCheck:
     """F3 (Caspar): a unique-basename match identifies the exact diff file, so
