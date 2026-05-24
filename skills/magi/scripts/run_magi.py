@@ -1002,6 +1002,15 @@ def main() -> None:
     # timed-out agent that wrote its raw envelope still contributes to the total.
     # Fail-safe: a missing or corrupt envelope contributes 0 for that agent.
     report["cost"] = aggregate_cost(output_dir, list(AGENTS))
+    # FIX 4: if the aggregated cost is $0.00 despite having at least one agent,
+    # the CLI may have renamed or relocated ``total_cost_usd`` — emit a single
+    # warning so the silent mis-reporting is visible in operator logs.
+    if report["cost"]["total_usd"] == 0.0 and report["agents"]:
+        print(
+            "[!] WARNING: per-run cost resolved to $0.00; the CLI may have "
+            "renamed the total_cost_usd field — check raw envelopes.",
+            file=sys.stderr,
+        )
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
