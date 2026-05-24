@@ -2376,3 +2376,41 @@ class TestAgentPromptsDocumentOptionalFindingFields:
             assert "findings[].category" in text and "findings[].file" in text, (
                 f"{name} is missing findings[].file or findings[].category documentation"
             )
+
+
+# ---------------------------------------------------------------------------
+# Block B: dedup merge invariant pin (R5/BDD-4)
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_same_title_keeps_higher_severity_detail_and_sources():
+    """R5/BDD-4: on an exact-title collision, the higher-severity finding's
+    severity AND detail win, and every reporting agent is recorded in sources.
+    Pins that Caspar's retained warning + justification survive a merge with
+    Mel/Bal info (existing consensus behavior; consensus.py untouched)."""
+    from synthesize import determine_consensus
+
+    def agent(name, sev, detail):
+        return {
+            "agent": name,
+            "verdict": "conditional",
+            "confidence": 0.7,
+            "summary": "s",
+            "reasoning": "r",
+            "recommendation": "rec",
+            "findings": [{"severity": sev, "title": "Shared Title", "detail": detail}],
+        }
+
+    result = determine_consensus(
+        [
+            agent("melchior", "info", "mel softened view"),
+            agent("balthasar", "info", "bal softened view"),
+            agent("caspar", "warning", "caspar impact justification"),
+        ]
+    )
+    merged = [f for f in result["findings"] if f.get("title") == "Shared Title"]
+    assert len(merged) == 1, "same title must dedup to one finding"
+    f = merged[0]
+    assert f["severity"] == "warning", "higher severity must win"
+    assert f["detail"] == "caspar impact justification", "higher-severity detail must win"
+    assert set(f["sources"]) == {"melchior", "balthasar", "caspar"}
