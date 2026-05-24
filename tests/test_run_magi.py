@@ -3259,6 +3259,144 @@ class TestFindingGuardWiring:
         out = run_magi._apply_finding_guard(agents, "code-review", set(), {})
         assert len(out[0]["findings"]) == 1
 
+    def test_guard_logs_dropped_finding_titles(self, capsys: Any) -> None:
+        """FIX 3a: when a finding is dropped, its title must appear in the
+        [guard] stderr line so operators can identify false-drops."""
+        import run_magi
+
+        agents = [
+            _guard_agent(
+                [
+                    {
+                        "severity": "critical",
+                        "title": "Null deref in parser",
+                        "detail": "d",
+                        "file": "ghost.py",
+                        "line": 5,
+                        "category": "null-deref",
+                    },
+                    {
+                        "severity": "warning",
+                        "title": "Real finding",
+                        "detail": "d2",
+                        "file": "x.py",
+                        "line": 2,
+                        "category": "other",
+                    },
+                ]
+            )
+        ]
+        run_magi._apply_finding_guard(agents, "code-review", {"x.py"}, {"x.py": {2}})
+        captured = capsys.readouterr()
+        assert "Null deref in parser" in captured.err, (
+            "dropped finding title must appear in [guard] stderr line"
+        )
+        assert "Real finding" not in captured.err, (
+            "kept finding title must NOT appear in the dropped-titles list"
+        )
+
+    def test_guard_active_signal_with_diff(self, tmp_path: Any, monkeypatch: Any) -> None:
+        """FIX 3b: code-review with a resolvable diff emits '[guard] active: N file(s)'."""
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {}, "total_usd": 1.0},
+        )
+        # Return non-empty files/ranges so the guard reports "active".
+        monkeypatch.setattr(
+            run_magi,
+            "_diff_files_and_ranges",
+            lambda diff: ({"x.py"}, {"x.py": {1}}),
+        )
+
+        def fake_create(output_dir: object, run_root: object = None) -> str:
+            d = tmp_path / "magi-run-active"
+            d.mkdir(exist_ok=True)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def fake_orch(*a: object, **k: object) -> dict[str, Any]:
+            return {"agents": [], "consensus": {}}
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "code-review", "hello"])
+
+        import io
+
+        buf = io.StringIO()
+        with monkeypatch.context() as mp:
+            mp.setattr(sys, "stderr", buf)
+            run_magi.main()
+        assert "[guard] active:" in buf.getvalue(), (
+            "code-review with diff must emit '[guard] active: N file(s)' to stderr"
+        )
+
+    def test_guard_skipped_signal_when_no_diff(self, tmp_path: Any, monkeypatch: Any) -> None:
+        """FIX 3b: code-review without a resolvable diff emits '[guard] skipped: no resolvable diff'."""
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {}, "total_usd": 1.0},
+        )
+        # Empty files -> no diff resolved.
+        monkeypatch.setattr(
+            run_magi,
+            "_diff_files_and_ranges",
+            lambda diff: (set(), {}),
+        )
+
+        def fake_create(output_dir: object, run_root: object = None) -> str:
+            d = tmp_path / "magi-run-skipped"
+            d.mkdir(exist_ok=True)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def fake_orch(*a: object, **k: object) -> dict[str, Any]:
+            return {"agents": [], "consensus": {}}
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "code-review", "hello"])
+
+        import io
+
+        buf = io.StringIO()
+        with monkeypatch.context() as mp:
+            mp.setattr(sys, "stderr", buf)
+            run_magi.main()
+        assert "[guard] skipped:" in buf.getvalue(), (
+            "code-review without diff must emit '[guard] skipped: no resolvable diff' to stderr"
+        )
+
     def test_cost_block_in_saved_report(self, tmp_path, monkeypatch):
         """BDD-13 wiring half: magi-report.json on disk carries a cost block."""
         import run_magi
