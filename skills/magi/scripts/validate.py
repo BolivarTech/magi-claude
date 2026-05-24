@@ -294,9 +294,11 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
             elif isinstance(line_val, int):
                 # Proper integer (already excludes bool above); keep for range check.
                 pass
-            elif isinstance(line_val, float) and line_val == int(line_val):
-                # Whole-valued float (e.g. 42.0 emitted by an LLM) -> coerce to int.
-                # Non-whole floats fall through to the None branch below.
+            elif isinstance(line_val, float) and line_val.is_integer():
+                # Whole-valued finite float (e.g. 42.0 emitted by an LLM) -> coerce
+                # to int. float.is_integer() returns False for inf and nan without
+                # calling int(), avoiding the OverflowError/ValueError that
+                # int(float('inf')) / int(float('nan')) would raise.
                 line_val = int(line_val)
             else:
                 # Non-whole float, str, or other non-numeric type -> fail-soft.
