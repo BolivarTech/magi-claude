@@ -7,6 +7,11 @@ MAGI reviews each input whole (no map-reduce — opus context holds realistic
 diffs). This module estimates the input's token footprint with a stdlib-only
 heuristic (chars / 4, the common English approximation) and flags inputs large
 enough to warrant an operator warning. Pure/total: never raises.
+
+Note on ``estimate_tokens``: the chars/4 divisor is English-calibrated and
+under-counts dense scripts (CJK, Arabic, etc.) where a single token covers
+fewer characters. Treat the result as a rough order-of-magnitude proxy, not a
+precise tokenizer count.
 """
 
 from __future__ import annotations

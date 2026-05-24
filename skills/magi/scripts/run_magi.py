@@ -164,8 +164,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=WARN_INPUT_TOKENS,
         help=(
             f"Warn when estimated input tokens exceed this value "
-            f"(default: {WARN_INPUT_TOKENS}). MAGI reviews the input whole; "
-            f"this is a detect-and-warn guard, not a hard limit."
+            f"(default: {WARN_INPUT_TOKENS}). Warning reflects the RAW input "
+            f"before enrichment; the estimate is approximate (English chars/4). "
+            f"MAGI reviews the input whole; detect-and-warn only, not a hard limit."
         ),
     )
     parser.set_defaults(show_status=True, enrich=True)
