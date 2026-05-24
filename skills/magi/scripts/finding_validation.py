@@ -120,6 +120,18 @@ def valid_files(diff: str) -> set[str]:
     return set(parse_diff_ranges(diff).keys())
 
 
+def _line_outside_range(line: Any, rng: set[int], margin: int) -> bool:
+    """True iff *line* is an integer outside non-empty *rng* (within *margin*).
+
+    A non-int/bool ``line`` or an empty *rng* yields ``False`` (nothing to flag).
+    Shared by the exact-file and unique-basename branches of
+    :func:`validate_findings`.
+    """
+    if not isinstance(line, int) or isinstance(line, bool):
+        return False
+    return bool(rng) and not any(abs(line - r) <= margin for r in rng)
+
+
 def validate_findings(
     findings: list[dict[str, Any]],
     files: set[str],
@@ -159,12 +171,9 @@ def validate_findings(
             continue
         nf = normalize_path(file)
         if nf in files:
-            line = f.get("line")
-            if isinstance(line, int) and not isinstance(line, bool):
-                rng = ranges.get(nf, set())
-                if rng and not any(abs(line - r) <= margin for r in rng):
-                    f = {**f, "detail": "[outside changed range] " + str(f.get("detail", ""))}
-                    annotated += 1
+            if _line_outside_range(f.get("line"), ranges.get(nf, set()), margin):
+                f = {**f, "detail": "[outside changed range] " + str(f.get("detail", ""))}
+                annotated += 1
             kept.append(f)
         elif base_counts.get(nf.rsplit("/", 1)[-1], 0) == 1:
             # F3: a unique basename resolves to exactly one diff file, so run the
@@ -172,11 +181,8 @@ def validate_findings(
             # apply; the finding is kept either way (observability, not a drop).
             resolved = base_to_file[nf.rsplit("/", 1)[-1]]
             detail = str(f.get("detail", ""))
-            line = f.get("line")
-            if isinstance(line, int) and not isinstance(line, bool):
-                rng = ranges.get(resolved, set())
-                if rng and not any(abs(line - r) <= margin for r in rng):
-                    detail = "[outside changed range] " + detail
+            if _line_outside_range(f.get("line"), ranges.get(resolved, set()), margin):
+                detail = "[outside changed range] " + detail
             f = {**f, "detail": "[path unverified] " + detail}
             annotated += 1
             kept.append(f)
