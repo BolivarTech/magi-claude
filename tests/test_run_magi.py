@@ -4165,6 +4165,40 @@ class TestInputSizeWiring:
         assert saved["input_size"]["chars"] == 400
         assert saved["input_size"]["est_tokens"] == 100
 
+    def test_input_size_block_is_self_describing(self, tmp_path, monkeypatch):
+        """Telemetry: input_size block records oversize flag and warn threshold so
+        the block is self-describing without external context.
+
+        Uses a body of 400 chars (100 est tokens) with a low threshold of 50
+        so oversize is deterministically True.
+        """
+        import json
+
+        body = "x" * 400  # 400 chars -> 100 est tokens; 100 > 50 => oversize=True
+        created, _ = self._patch_main(
+            tmp_path,
+            monkeypatch,
+            input_body=body,
+            extra_argv=["--warn-input-tokens", "50"],
+        )
+
+        report_path = os.path.join(created["dir"], "magi-report.json")
+        with open(report_path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+
+        block = saved["input_size"]
+        assert "oversize" in block, "input_size must carry an 'oversize' key"
+        assert "warn_threshold_tokens" in block, (
+            "input_size must carry a 'warn_threshold_tokens' key"
+        )
+        assert block["oversize"] is True, (
+            f"oversize must be True (100 est_tokens > 50 threshold); got {block['oversize']!r}"
+        )
+        assert block["warn_threshold_tokens"] == 50, (
+            f"warn_threshold_tokens must equal the --warn-input-tokens value (50); "
+            f"got {block['warn_threshold_tokens']!r}"
+        )
+
     def test_oversize_warning_emitted_when_threshold_exceeded(self, tmp_path, monkeypatch):
         """Detect-and-warn: when estimated tokens exceed --warn-input-tokens,
         a [!] WARNING line is printed to stderr."""
