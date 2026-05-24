@@ -3295,6 +3295,49 @@ class TestFindingGuardWiring:
             "kept finding title must NOT appear in the dropped-titles list"
         )
 
+    def test_guard_dropped_titles_excludes_annotated_findings(self, capsys):
+        """BUG 1: annotated (soft-annotated, KEPT) findings must NOT appear in the
+        [guard] dropped-titles list; only hard-dropped findings must be listed."""
+        import run_magi
+
+        agents = [
+            _guard_agent(
+                [
+                    {
+                        "severity": "critical",
+                        "title": "Fabricated ghost finding",
+                        "detail": "d",
+                        "file": "ghost.py",
+                        "line": 5,
+                        "category": "null-deref",
+                    },
+                    {
+                        "severity": "warning",
+                        "title": "Line outside range",
+                        "detail": "d2",
+                        "file": "x.py",
+                        "line": 999,
+                        "category": "other",
+                    },
+                ]
+            )
+        ]
+        # x.py is in the diff (ranges {2}), ghost.py is not.
+        # ghost.py -> hard-dropped (dropped=1); x.py line 999 -> soft-annotated (annotated=1).
+        run_magi._apply_finding_guard(agents, "code-review", {"x.py"}, {"x.py": {2}})
+        captured = capsys.readouterr()
+        # The hard-dropped finding's title must appear.
+        assert "Fabricated ghost finding" in captured.err, (
+            "hard-dropped finding title must appear in [guard] dropped_titles"
+        )
+        # The soft-annotated finding's title must NOT appear in dropped_titles.
+        assert "Line outside range" not in captured.err, (
+            "annotated (KEPT) finding title must NOT be listed as dropped"
+        )
+        # Counts must be: dropped 1, annotated 1.
+        assert "dropped 1" in captured.err, "stderr must report dropped 1"
+        assert "annotated 1" in captured.err, "stderr must report annotated 1"
+
     def test_guard_active_signal_with_diff(self, tmp_path, monkeypatch):
         """FIX 3b: code-review with a resolvable diff emits '[guard] active: N file(s)'."""
         import run_magi
