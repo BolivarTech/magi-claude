@@ -490,7 +490,9 @@ def _maybe_enrich(
     The *diff* is the run's single resolved diff source (A2): ``main`` resolves
     it once via :func:`review_context.resolve_diff` and threads the same value to
     BOTH this enrichment path and the finding guard, so the two can never diverge
-    and ``git diff`` runs only once per run. The value is forwarded to
+    and the ``git diff`` invocation runs only once per run (lighter read-only
+    probes such as ``_git_toplevel`` and ``_tree_is_clean`` may still run
+    independently). The value is forwarded to
     :func:`enrich_code_review_context`, which consumes it verbatim instead of
     re-resolving. ``None`` (the default, used by standalone callers and tests
     that do not pre-resolve) tells enrichment to resolve internally via the same
@@ -534,6 +536,10 @@ async def run_orchestrator(
 
     Launches agents in parallel, collects results, alerts on failures,
     and runs consensus synthesis on successful outputs.
+
+    Note: for ``code-review``, ``main()`` recomputes ``report['consensus']``
+    after applying the finding guard; a caller that uses ``run_orchestrator``
+    without ``main()`` receives the pre-guard (unguarded) consensus.
 
     Args:
         agents_dir: Directory containing agent prompt files.
