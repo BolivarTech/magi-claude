@@ -3464,3 +3464,185 @@ class TestFindingGuardWiring:
         assert seen["guard_diff"] == sentinel, (
             "the guard must receive the same diff resolved once by main()"
         )
+
+    def test_cost_aggregates_all_launched_agents_in_degraded_mode(self, tmp_path, monkeypatch):
+        """Finding #1 regression: cost must include all 3 launched agents even
+        when the orchestrator returns only 2 (degraded mode).
+
+        The failed/timed-out third agent may have already burned tokens and
+        written its raw envelope to output_dir. Aggregating only over
+        ``report["agents"]`` (the survivors) under-reports cost. This test
+        verifies that the saved magi-report.json sums all 3 canonical agents
+        (AGENTS constant) rather than just the 2 returned by the orchestrator.
+        """
+        import json as _json
+
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+
+        created: dict[str, str] = {}
+
+        def fake_create(output_dir: object, run_root: object = None) -> str:
+            d = tmp_path / "magi-run-degraded"
+            d.mkdir(exist_ok=True)
+            created["dir"] = str(d)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        # Orchestrator returns only melchior + balthasar (degraded: caspar failed).
+        def _survivor(name: str) -> dict[str, Any]:
+            return {
+                "agent": name,
+                "verdict": "approve",
+                "confidence": 0.8,
+                "summary": "s",
+                "reasoning": "r",
+                "recommendation": "rec",
+                "findings": [],
+            }
+
+        async def fake_orch(*a: object, **k: object) -> dict[str, Any]:
+            # Write raw envelopes for ALL 3 agents (caspar burned tokens too).
+            out = created["dir"]
+            for agent_name, cost in [
+                ("melchior", 0.30),
+                ("balthasar", 0.25),
+                ("caspar", 0.20),
+            ]:
+                raw = {"total_cost_usd": cost, "result": "{}"}
+                with open(os.path.join(out, f"{agent_name}.raw.json"), "w", encoding="utf-8") as fh:
+                    _json.dump(raw, fh)
+            # Only 2 survivors in the report (degraded).
+            return {
+                "agents": [_survivor("melchior"), _survivor("balthasar")],
+                "consensus": {},
+            }
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello"])
+
+        run_magi.main()
+
+        report_path = os.path.join(created["dir"], "magi-report.json")
+        with open(report_path, encoding="utf-8") as fh:
+            saved = _json.load(fh)
+
+        assert "cost" in saved
+        # Must include caspar's 0.20 even though it is not in report["agents"].
+        expected_total = round(0.30 + 0.25 + 0.20, 6)
+        assert saved["cost"]["total_usd"] == expected_total, (
+            f"Expected total_usd={expected_total} (all 3 agents), "
+            f"got {saved['cost']['total_usd']} (only survivors counted)"
+        )
+        assert "caspar" in saved["cost"]["per_agent"], (
+            "caspar must appear in per_agent cost even in degraded mode"
+        )
+
+    def test_a5_mode_strip_nulls_file_and_line_in_design_mode(self, tmp_path, monkeypatch):
+        """Finding #2 coverage pin: A5 mode-strip zeroes file/line on every
+        finding in non-code-review modes.
+
+        The existing design-mode tests use empty findings, so the strip loop
+        was never exercised on a populated finding. This test passes a finding
+        with file and line set through a design-mode main() and asserts that
+        the saved magi-report.json has both fields as None, confirming the
+        existing strip code works on real data.
+        """
+        import json as _json
+
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {}, "total_usd": 0.0},
+        )
+
+        created: dict[str, str] = {}
+
+        def fake_create(output_dir: object, run_root: object = None) -> str:
+            d = tmp_path / "magi-run-a5strip"
+            d.mkdir(exist_ok=True)
+            created["dir"] = str(d)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        # Return an agent whose finding has file and line set (non-null).
+        agent_with_fields = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "recommendation": "rec",
+            "findings": [
+                {
+                    "severity": "info",
+                    "title": "T",
+                    "detail": "d",
+                    "file": "src/foo.py",
+                    "line": 42,
+                    "category": "style",
+                }
+            ],
+        }
+        second_agent = {
+            "agent": "balthasar",
+            "verdict": "approve",
+            "confidence": 0.8,
+            "summary": "s2",
+            "reasoning": "r2",
+            "recommendation": "rec2",
+            "findings": [],
+        }
+
+        async def fake_orch(*a: object, **k: object) -> dict[str, Any]:
+            return {"agents": [agent_with_fields, second_agent], "consensus": {}}
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello"])
+
+        run_magi.main()
+
+        report_path = os.path.join(created["dir"], "magi-report.json")
+        with open(report_path, encoding="utf-8") as fh:
+            saved = _json.load(fh)
+
+        # The consensus findings come from determine_consensus; verify by
+        # checking that the consensus block exists and the finding's file/line
+        # were stripped to None before determine_consensus ran.
+        consensus_findings = saved.get("consensus", {}).get("findings", [])
+        assert len(consensus_findings) == 1, "Expected 1 finding in consensus (from melchior)"
+        fnd = consensus_findings[0]
+        assert fnd.get("file") is None, (
+            f"A5 strip must null file in design mode, got: {fnd.get('file')!r}"
+        )
+        assert fnd.get("line") is None, (
+            f"A5 strip must null line in design mode, got: {fnd.get('line')!r}"
+        )
