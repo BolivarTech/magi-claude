@@ -45,6 +45,8 @@ def parse_diff_ranges(diff: str) -> dict[str, set[int]]:
             continue
         if raw.startswith("+++") or raw.startswith("---"):
             continue
+        if raw.startswith("\\ "):
+            continue  # "\ No newline at end of file" marker — not a real line
         if raw.startswith("+"):
             ranges[current].add(new_line)
             new_line += 1
