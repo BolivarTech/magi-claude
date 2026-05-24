@@ -287,17 +287,28 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
                 filepath,
             )
         line_val = finding.get("line")
-        if line_val is not None and (not isinstance(line_val, int) or isinstance(line_val, bool)):
-            raise ValidationError(
-                f"Finding at index {idx} field 'line' must be an integer or null, "
-                f"got {type(line_val).__name__}.",
-                filepath,
-            )
+        if line_val is not None:
+            if isinstance(line_val, bool):
+                # bool is a subclass of int in Python; treat as invalid -> fail-soft
+                line_val = None
+            elif isinstance(line_val, int):
+                # Proper integer (already excludes bool above); keep for range check.
+                pass
+            elif isinstance(line_val, float) and line_val == int(line_val):
+                # Whole-valued float (e.g. 42.0 emitted by an LLM) -> coerce to int.
+                # Non-whole floats fall through to the None branch below.
+                line_val = int(line_val)
+            else:
+                # Non-whole float, str, or other non-numeric type -> fail-soft.
+                # A hard ValidationError here would drop the entire agent, which
+                # is disproportionate for a minor LLM slip on an optional field
+                # (A4 fail-soft rule, mirrors the non-positive int guard below).
+                line_val = None
         # A4 (fail-soft, iter-3): a non-positive line is a minor agent slip; drop
         # it to None (keep the finding) rather than raise — a hard ValidationError
         # here would reject the whole agent and risks an asymmetric Caspar drop
-        # (§2.2.5). A wrong-TYPE line (e.g. "ten") is still rejected above.
-        if isinstance(line_val, int) and not isinstance(line_val, bool) and line_val <= 0:
+        # (§2.2.5).
+        if isinstance(line_val, int) and line_val <= 0:
             line_val = None
         finding["file"] = file_val
         finding["line"] = line_val
