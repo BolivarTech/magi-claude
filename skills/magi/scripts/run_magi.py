@@ -814,10 +814,16 @@ def _apply_finding_guard(
             kept, dropped, annotated = validate_findings(original, files, ranges)
             a = {**a, "findings": kept}
             if dropped or annotated:
-                # Compute dropped titles by diffing original against kept (by identity).
-                kept_ids = {id(f) for f in kept}
+                # Compute dropped titles by title-set difference so annotated
+                # (soft-annotated, KEPT) findings — whose original dict object
+                # is replaced by a new dict — are not mistakenly listed as
+                # dropped. Annotated findings retain their original title, so
+                # any title still present in *kept* belongs to a kept finding.
+                kept_titles = {str(f.get("title", "")) for f in kept}
                 dropped_titles = [
-                    str(f.get("title", "")) for f in original if id(f) not in kept_ids
+                    str(f.get("title", ""))
+                    for f in original
+                    if str(f.get("title", "")) not in kept_titles
                 ]
                 print(
                     f"[guard] {a['agent']}: dropped {dropped} "
