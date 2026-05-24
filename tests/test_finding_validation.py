@@ -285,6 +285,29 @@ class TestF2NonGitDiffParity:
         diff = "diff --git a/empty.py b/empty.py\nnew file mode 100644\nindex 0000000..e69de29\n"
         assert valid_files(diff) == set()
 
+    def test_deleted_comment_added_line_before_next_hunk_not_phantom(self):
+        """W4 (Mel+Caspar): the deleted-'-- '/added-'++ ' adjacency, when it falls
+        immediately before the NEXT hunk header, must still not create a phantom
+        file. Hunk-body line counting (not a trailing-'@@' peek) immunizes the
+        walker: the content pair is inside an open hunk, so it is never a header.
+        The '++ new note' line is a legitimate addition and is counted."""
+        from finding_validation import parse_diff_ranges, valid_files
+
+        diff = (
+            "diff --git a/db.sql b/db.sql\n"
+            "--- a/db.sql\n"
+            "+++ b/db.sql\n"
+            "@@ -1,2 +1,2 @@\n"
+            " ctx1\n"
+            "--- old comment\n"  # deleted '-- old comment'
+            "+++ new note\n"  # added '++ new note' ...
+            "@@ -10,2 +10,2 @@\n"  # ... immediately before the next hunk header
+            " ctx2\n"
+            "+real\n"
+        )
+        assert valid_files(diff) == {"db.sql"}, "content adjacency before a hunk must not phantom"
+        assert set(parse_diff_ranges(diff).keys()) == {"db.sql"}
+
 
 class TestF3BasenameLineRangeCheck:
     """F3 (Caspar): a unique-basename match identifies the exact diff file, so
