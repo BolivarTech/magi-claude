@@ -68,6 +68,33 @@ def extract_touched_files(diff: str) -> list[str]:
     return files
 
 
+def added_lines_by_file(diff: str) -> dict[str, list[str]]:
+    """Map each post-image path to its added (``+``) line bodies.
+
+    Uses the same new-file recognition as :func:`extract_touched_files` (the
+    ``--- ``/``+++ `` pairing, optional ``b/``, tab-timestamp + ``/dev/null``
+    handling) so the enrichment coherence check keys added lines under the SAME
+    paths the touched-file set uses — the two can never disagree (F2). The
+    leading ``+`` is stripped from each returned body.
+    """
+    result: dict[str, list[str]] = {}
+    current: str | None = None
+    prev_minus = False
+    for raw in diff.splitlines():
+        if raw.startswith(_OLDFILE_PREFIX):
+            prev_minus = True
+            continue
+        if prev_minus:
+            prev_minus = False
+            m = _NEWFILE_RE.match(raw)
+            if m:
+                current = _clean_newfile_path(m.group(1))
+                continue
+        if current and raw.startswith("+") and not raw.startswith("+++"):
+            result.setdefault(current, []).append(raw[1:])
+    return result
+
+
 def parse_diff_ranges(diff: str) -> dict[str, set[int]]:
     """Map each touched file to the set of changed post-image line numbers.
 

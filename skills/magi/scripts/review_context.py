@@ -13,7 +13,7 @@ import os
 import re
 import subprocess
 
-from finding_validation import extract_touched_files
+from finding_validation import added_lines_by_file, extract_touched_files
 
 _ENRICH_MAX_CHARS = 512_000
 _DEF_WINDOW_LINES = 40
@@ -213,24 +213,21 @@ def enrich_code_review_context(
 def _added_lines_by_file(diff_text: str) -> dict[str, list[str]]:
     """Map each post-image path to its added (``+``) lines from the diff.
 
+    Thin wrapper over :func:`finding_validation.added_lines_by_file`, the single
+    source of truth for diff parsing. Sharing it guarantees the coherence check
+    in :func:`_collect_touched` keys added lines under the SAME paths
+    :func:`_extract_touched_files` reports, so the gate is never silently vacuous
+    for non-git diffs (F2). Handles git's optional ``b/`` prefix, ``diff -u`` tab
+    timestamps, and ``/dev/null`` targets.
+
     Args:
-        diff_text: A unified diff string (git format).
+        diff_text: A unified diff string (git or plain ``diff -u`` format).
 
     Returns:
         Dict mapping relative file path to list of added line bodies (the
         leading ``+`` character is stripped).
     """
-    result: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in diff_text.splitlines():
-        if line.startswith("+++ "):
-            path = line[4:].strip()
-            if path.startswith("b/"):
-                path = path[2:]
-            current = None if (not path or path == "/dev/null") else path
-        elif current and line.startswith("+") and not line.startswith("+++"):
-            result.setdefault(current, []).append(line[1:])
-    return result
+    return added_lines_by_file(diff_text)
 
 
 def _coheres(content: str, added: list[str]) -> bool:
