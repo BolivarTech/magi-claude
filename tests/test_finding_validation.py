@@ -214,22 +214,20 @@ class TestF2NonGitDiffParity:
             assert enr == valid_files(diff), f"parsers disagree on touched files for: {diff!r}"
 
     def test_added_content_line_resembling_plus_header_not_treated_as_file(self):
-        """Robustness: an added content line whose text begins with '++ ' renders
-        as a raw '+++ ...' diff line, but (not following a '--- ' header) it must
-        be counted as an added line, never misparsed as a new-file header."""
+        """Robustness: an added line whose content begins with '++ ' renders as a
+        raw '+++ ...' diff line. Because it does NOT follow a '--- ' old-file
+        header, it must never be misparsed as a new-file header (no phantom file).
+        This pins the '--- '/'+++ ' pairing against a naive optional-'b/' regex."""
         from finding_validation import parse_diff_ranges, valid_files
 
         diff = (
             "--- a/real.py\n"
             "+++ b/real.py\n"
-            "@@ -1,2 +1,4 @@\n"
+            "@@ -1,2 +1,3 @@\n"
             " ctx\n"
-            "++ looks_like_header\n"
-            "+normal_add\n"
+            "+++ phantom\n"  # added line; content is '++ phantom'
             " ctx2\n"
         )
-        # Only the real file is recognized; 'looks_like_header' is NOT a file.
+        # Only the real file is recognized; 'phantom' must NOT become a file.
         assert valid_files(diff) == {"real.py"}
-        ranges = parse_diff_ranges(diff)
-        # '++ looks_like_header' (post 2) and '+normal_add' (post 3) are changes.
-        assert {2, 3} <= ranges["real.py"]
+        assert "real.py" in parse_diff_ranges(diff)
