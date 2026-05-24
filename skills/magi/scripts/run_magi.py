@@ -805,7 +805,11 @@ def _diff_files_and_ranges(diff: str) -> tuple[set[str], dict[str, set[int]]]:
 
 
 def _apply_finding_guard(
-    agents: list[dict[str, Any]], mode: str, files: set[str], ranges: dict[str, set[int]]
+    agents: list[dict[str, Any]],
+    mode: str,
+    files: set[str],
+    ranges: dict[str, set[int]],
+    summary: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """In code-review, drop/annotate each agent's findings against the diff.
 
@@ -823,13 +827,33 @@ def _apply_finding_guard(
         mode: Analysis mode; the guard runs only for ``"code-review"``.
         files: Set of valid (diff-present) normalized file paths.
         ranges: Per-file set of changed post-image line numbers.
+        summary: Optional out-param (F4). When given, it is populated with the
+            guard's observable effect for the report: ``{"active": False}`` when
+            the guard is a no-op, else ``{"active": True, "files_in_diff": N,
+            "total_dropped": N, "total_annotated": N, "per_agent": {agent:
+            {"dropped", "annotated", "dropped_titles"}}}`` with only agents that
+            had a drop/annotation. Surfacing this lets the report explain why a
+            voting agent shows no Key Findings (the guard never alters the vote).
 
     Returns:
         A new list of agent dicts with guarded findings (same order). Agents
         for which the guard fails are passed through with original findings.
     """
     if mode != "code-review" or not files:
+        if summary is not None:
+            summary["active"] = False
         return agents
+
+    if summary is not None:
+        summary.update(
+            {
+                "active": True,
+                "files_in_diff": len(files),
+                "total_dropped": 0,
+                "total_annotated": 0,
+                "per_agent": {},
+            }
+        )
 
     out: list[dict[str, Any]] = []
     for a in agents:
@@ -854,6 +878,14 @@ def _apply_finding_guard(
                     f"titles={dropped_titles}, annotated {annotated}",
                     file=sys.stderr,
                 )
+                if summary is not None:
+                    summary["per_agent"][a["agent"]] = {
+                        "dropped": dropped,
+                        "annotated": annotated,
+                        "dropped_titles": dropped_titles,
+                    }
+                    summary["total_dropped"] += dropped
+                    summary["total_annotated"] += annotated
         except Exception as exc:  # noqa: BLE001 — boundary fail-safe
             print(f"WARNING: finding guard failed for {a['agent']}: {exc}", file=sys.stderr)
         out.append(a)
@@ -1007,7 +1039,13 @@ def main() -> None:
             print(f"[guard] active: {len(files)} file(s) in diff", file=sys.stderr)
         else:
             print("[guard] skipped: no resolvable diff", file=sys.stderr)
-    report["agents"] = _apply_finding_guard(report["agents"], args.mode, files, ranges)
+    # F4: collect the guard's observable effect into the report so an agent that
+    # votes but has all its findings dropped is explained in the audit artifact.
+    guard_summary: dict[str, Any] = {}
+    report["agents"] = _apply_finding_guard(
+        report["agents"], args.mode, files, ranges, summary=guard_summary
+    )
+    report["guard"] = guard_summary
 
     # A5: outside code-review there is no diff to ground file/line against, so
     # strip them to ``None`` — this forces title-based dedup for design/analysis

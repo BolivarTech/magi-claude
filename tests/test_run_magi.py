@@ -3635,7 +3635,7 @@ class TestFindingGuardWiring:
 
         captured = {"guard_agents": None}
 
-        def fake_guard(agents, mode, files, ranges):
+        def fake_guard(agents, mode, files, ranges, summary=None):
             captured["guard_agents"] = agents
             return agents
 
