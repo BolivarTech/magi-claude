@@ -1055,6 +1055,8 @@ def main() -> None:
     report["input_size"] = {
         "chars": raw_input_chars,
         "est_tokens": est_tokens,
+        "oversize": oversize,
+        "warn_threshold_tokens": args.warn_input_tokens,
     }
 
     report_path = os.path.join(output_dir, "magi-report.json")
