@@ -437,6 +437,16 @@ def _load_input_content(input_arg: str) -> tuple[str, str]:
     If *input_arg* is not a file path, it is returned as inline text
     unchanged — Python str values cannot have an encoding mismatch.
 
+    Known limitation (tracked, future fix): a value that *looks* like a
+    path but does not exist (e.g. a typo'd file path) is not distinguished
+    from genuine inline text — ``os.path.isfile`` is ``False``, so the
+    literal path string becomes the prompt body and is silently reviewed
+    as content instead of failing closed. Surfaced by the v3.0.0 Block B
+    over-suppression-probe gate run (a missing bundle path was reviewed as
+    path-only text). A future fix should detect path-shaped-but-missing
+    inputs (no whitespace/newline plus a path separator or known
+    extension) and raise instead of treating them as inline text.
+
     Args:
         input_arg: The raw value from ``argparse`` for the positional
             ``input`` argument. Either a path to a file or inline
