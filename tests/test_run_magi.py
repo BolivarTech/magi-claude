@@ -3259,7 +3259,7 @@ class TestFindingGuardWiring:
         out = run_magi._apply_finding_guard(agents, "code-review", set(), {})
         assert len(out[0]["findings"]) == 1
 
-    def test_guard_logs_dropped_finding_titles(self, capsys: Any) -> None:
+    def test_guard_logs_dropped_finding_titles(self, capsys):
         """FIX 3a: when a finding is dropped, its title must appear in the
         [guard] stderr line so operators can identify false-drops."""
         import run_magi
@@ -3295,7 +3295,7 @@ class TestFindingGuardWiring:
             "kept finding title must NOT appear in the dropped-titles list"
         )
 
-    def test_guard_active_signal_with_diff(self, tmp_path: Any, monkeypatch: Any) -> None:
+    def test_guard_active_signal_with_diff(self, tmp_path, monkeypatch):
         """FIX 3b: code-review with a resolvable diff emits '[guard] active: N file(s)'."""
         import run_magi
 
@@ -3346,7 +3346,7 @@ class TestFindingGuardWiring:
             "code-review with diff must emit '[guard] active: N file(s)' to stderr"
         )
 
-    def test_guard_skipped_signal_when_no_diff(self, tmp_path: Any, monkeypatch: Any) -> None:
+    def test_guard_skipped_signal_when_no_diff(self, tmp_path, monkeypatch):
         """FIX 3b: code-review without a resolvable diff emits '[guard] skipped: no resolvable diff'."""
         import run_magi
 
@@ -3785,9 +3785,7 @@ class TestFindingGuardWiring:
             f"A5 strip must null line in design mode, got: {fnd.get('line')!r}"
         )
 
-    def _patch_main_for_cost_warn(
-        self, tmp_path: Any, monkeypatch: Any, cost_total: float
-    ) -> "io.StringIO":
+    def _patch_main_for_cost_warn(self, tmp_path, monkeypatch, cost_total):
         """Shared setup for FIX 4 zero-cost warning tests.
 
         Returns a StringIO buffer capturing stderr from the main() call.
@@ -3849,9 +3847,7 @@ class TestFindingGuardWiring:
             run_magi.main()
         return buf
 
-    def test_zero_cost_warning_emitted_when_cost_is_zero(
-        self, tmp_path: Any, monkeypatch: Any
-    ) -> None:
+    def test_zero_cost_warning_emitted_when_cost_is_zero(self, tmp_path, monkeypatch):
         """FIX 4: when aggregate_cost returns 0.0 and there is >= 1 agent,
         main() must emit a [!] WARNING to stderr so silent $0.00 mis-reporting
         is visible (the CLI may have renamed total_cost_usd)."""
@@ -3861,9 +3857,7 @@ class TestFindingGuardWiring:
             f"Expected zero-cost [!] WARNING in stderr, got:\n{err!r}"
         )
 
-    def test_zero_cost_warning_not_emitted_when_cost_positive(
-        self, tmp_path: Any, monkeypatch: Any
-    ) -> None:
+    def test_zero_cost_warning_not_emitted_when_cost_positive(self, tmp_path, monkeypatch):
         """FIX 4: when aggregate_cost returns > 0, no zero-cost warning is emitted."""
         buf = self._patch_main_for_cost_warn(tmp_path, monkeypatch, cost_total=0.75)
         err = buf.getvalue()
@@ -3871,9 +3865,7 @@ class TestFindingGuardWiring:
             f"Zero-cost warning must NOT appear when cost > 0; got:\n{err!r}"
         )
 
-    def test_e2e_fabricated_finding_dropped_score_unchanged(
-        self, tmp_path: Any, monkeypatch: Any
-    ) -> None:
+    def test_e2e_fabricated_finding_dropped_score_unchanged(self, tmp_path, monkeypatch):
         """FIX 5 (coverage pin): end-to-end BDD-14 invariant through main().
 
         Drives main() in code-review mode with a real diff (touching x.py only)
@@ -3958,9 +3950,7 @@ class TestFindingGuardWiring:
             "category": "other",
         }
 
-        def _agent_dict(
-            name: str, findings: list[dict[str, Any]], verdict: str = "approve"
-        ) -> dict[str, Any]:
+        def _agent_dict(name, findings, verdict="approve"):
             return {
                 "agent": name,
                 "verdict": verdict,
@@ -3972,7 +3962,7 @@ class TestFindingGuardWiring:
             }
 
         # Orchestrator returns two agents (melchior has both findings; balthasar none).
-        async def fake_orch(*a: object, **k: object) -> dict[str, Any]:
+        async def fake_orch(*a, **k):
             return {
                 "agents": [
                     _agent_dict("melchior", [fabricated_finding, real_finding]),
