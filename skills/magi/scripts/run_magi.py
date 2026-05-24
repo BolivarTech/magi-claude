@@ -810,11 +810,18 @@ def _apply_finding_guard(
     out: list[dict[str, Any]] = []
     for a in agents:
         try:
-            kept, dropped, annotated = validate_findings(a.get("findings", []), files, ranges)
+            original = a.get("findings", [])
+            kept, dropped, annotated = validate_findings(original, files, ranges)
             a = {**a, "findings": kept}
             if dropped or annotated:
+                # Compute dropped titles by diffing original against kept (by identity).
+                kept_ids = {id(f) for f in kept}
+                dropped_titles = [
+                    str(f.get("title", "")) for f in original if id(f) not in kept_ids
+                ]
                 print(
-                    f"[guard] {a['agent']}: dropped {dropped}, annotated {annotated}",
+                    f"[guard] {a['agent']}: dropped {dropped} "
+                    f"titles={dropped_titles}, annotated {annotated}",
                     file=sys.stderr,
                 )
         except Exception as exc:  # noqa: BLE001 — boundary fail-safe
@@ -958,6 +965,12 @@ def main() -> None:
     # successful agents, using the single resolved ``review_diff`` shared with
     # enrichment. ``files`` empty (non-code-review or no diff) makes it a no-op.
     files, ranges = _diff_files_and_ranges(review_diff)
+    # FIX 3b: emit ONE stderr line in code-review so a no-diff no-op is visible.
+    if args.mode == "code-review":
+        if files:
+            print(f"[guard] active: {len(files)} file(s) in diff", file=sys.stderr)
+        else:
+            print("[guard] skipped: no resolvable diff", file=sys.stderr)
     report["agents"] = _apply_finding_guard(report["agents"], args.mode, files, ranges)
 
     # A5: outside code-review there is no diff to ground file/line against, so
