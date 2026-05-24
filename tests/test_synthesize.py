@@ -2158,6 +2158,73 @@ class TestOptionalFindingFields:
         fn = loaded["findings"][0]
         assert fn["line"] is None, f"line=nan must fail-soft to None, got {fn['line']!r}"
 
+    def test_file_non_str_fails_soft_to_none(self, tmp_path):
+        """BUG 3: file=42 (non-str, non-null) must fail-soft to None, NOT raise
+        ValidationError dropping the whole agent. Symmetry with line fail-soft."""
+        from unittest.mock import patch
+
+        from synthesize import load_agent_output
+
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [{"severity": "info", "title": "t", "detail": "d", "file": 42}],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior_nonstr_file.json"
+        p.write_text("{}", encoding="utf-8")
+        with patch("validate.json.load", return_value=data):
+            loaded = load_agent_output(str(p))
+        fn = loaded["findings"][0]
+        assert fn["file"] is None, f"file=42 must fail-soft to None, got {fn['file']!r}"
+
+    def test_file_valid_str_preserved(self, tmp_path):
+        """BUG 3 regression: valid string file must pass through unchanged."""
+        from unittest.mock import patch
+
+        from synthesize import load_agent_output
+
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [{"severity": "info", "title": "t", "detail": "d", "file": "src/x.py"}],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior_valid_file.json"
+        p.write_text("{}", encoding="utf-8")
+        with patch("validate.json.load", return_value=data):
+            loaded = load_agent_output(str(p))
+        fn = loaded["findings"][0]
+        assert fn["file"] == "src/x.py", f"valid file string must be preserved, got {fn['file']!r}"
+
+    def test_file_none_preserved(self, tmp_path):
+        """BUG 3 regression: file=None must remain None."""
+        from unittest.mock import patch
+
+        from synthesize import load_agent_output
+
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [{"severity": "info", "title": "t", "detail": "d", "file": None}],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior_none_file.json"
+        p.write_text("{}", encoding="utf-8")
+        with patch("validate.json.load", return_value=data):
+            loaded = load_agent_output(str(p))
+        fn = loaded["findings"][0]
+        assert fn["file"] is None, f"file=None must stay None, got {fn['file']!r}"
+
 
 # ---------------------------------------------------------------------------
 # TestDedupById
