@@ -4054,3 +4054,126 @@ class TestFindingGuardWiring:
         assert saved_consensus["confidence"] == baseline_consensus["confidence"], (
             "Guard must not change confidence"
         )
+
+
+class TestInputSizeWiring:
+    """Input-size telemetry + detect-and-warn wiring in run_magi.main()."""
+
+    def _patch_main(self, tmp_path, monkeypatch, *, input_body="BODY", extra_argv=None):
+        """Stub everything around main() except the input-size wiring under test.
+
+        Returns ``created`` dict (keyed ``"dir"``) so callers can inspect the
+        saved magi-report.json, and a StringIO capturing stderr.
+        """
+        import io
+
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(
+            run_magi, "_load_input_content", lambda arg: (input_body, "Inline input")
+        )
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: (input_body, None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {}, "total_usd": 0.75},
+        )
+
+        created: dict[str, str] = {}
+
+        def fake_create(output_dir: object, run_root: object = None) -> str:
+            d = tmp_path / "magi-run-inputsize"
+            d.mkdir(exist_ok=True)
+            created["dir"] = str(d)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def fake_orch(*a: object, **k: object) -> dict[str, Any]:
+            return {
+                "agents": [
+                    {
+                        "agent": "melchior",
+                        "verdict": "approve",
+                        "confidence": 0.9,
+                        "summary": "s",
+                        "reasoning": "r",
+                        "recommendation": "rec",
+                        "findings": [],
+                    },
+                    {
+                        "agent": "balthasar",
+                        "verdict": "approve",
+                        "confidence": 0.8,
+                        "summary": "s2",
+                        "reasoning": "r2",
+                        "recommendation": "rec2",
+                        "findings": [],
+                    },
+                ],
+                "consensus": {},
+            }
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        argv = ["run_magi.py", "design", "hello"] + (extra_argv or [])
+        monkeypatch.setattr(sys, "argv", argv)
+
+        buf: io.StringIO = io.StringIO()
+        with monkeypatch.context() as mp:
+            mp.setattr(sys, "stderr", buf)
+            run_magi.main()
+
+        return created, buf
+
+    def test_input_size_block_in_saved_report(self, tmp_path, monkeypatch):
+        """Telemetry: magi-report.json on disk carries an input_size block with
+        chars and est_tokens fields."""
+        import json
+
+        body = "x" * 400  # 400 chars -> 100 est tokens
+        created, _ = self._patch_main(tmp_path, monkeypatch, input_body=body)
+
+        report_path = os.path.join(created["dir"], "magi-report.json")
+        with open(report_path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+
+        assert "input_size" in saved, "magi-report.json must carry an input_size block"
+        assert saved["input_size"]["chars"] == 400
+        assert saved["input_size"]["est_tokens"] == 100
+
+    def test_oversize_warning_emitted_when_threshold_exceeded(self, tmp_path, monkeypatch):
+        """Detect-and-warn: when estimated tokens exceed --warn-input-tokens,
+        a [!] WARNING line is printed to stderr."""
+        body = "x" * 4000  # 4000 chars -> 1000 est tokens > 5 threshold
+        _, buf = self._patch_main(
+            tmp_path, monkeypatch, input_body=body, extra_argv=["--warn-input-tokens", "5"]
+        )
+        err = buf.getvalue()
+        assert "[!] WARNING" in err, (
+            f"Expected oversize [!] WARNING in stderr when threshold exceeded; got:\n{err!r}"
+        )
+
+    def test_no_warning_when_threshold_not_exceeded(self, tmp_path, monkeypatch):
+        """Detect-and-warn: when estimated tokens do NOT exceed --warn-input-tokens,
+        no [!] WARNING is emitted to stderr."""
+        body = "x" * 400  # 400 chars -> 100 est tokens, not > 200 threshold
+        _, buf = self._patch_main(
+            tmp_path,
+            monkeypatch,
+            input_body=body,
+            extra_argv=["--warn-input-tokens", "200"],
+        )
+        err = buf.getvalue()
+        assert "[!] WARNING" not in err, (
+            f"[!] WARNING must NOT appear when threshold is not exceeded; got:\n{err!r}"
+        )
