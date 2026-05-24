@@ -3784,3 +3784,89 @@ class TestFindingGuardWiring:
         assert fnd.get("line") is None, (
             f"A5 strip must null line in design mode, got: {fnd.get('line')!r}"
         )
+
+    def _patch_main_for_cost_warn(
+        self, tmp_path: Any, monkeypatch: Any, cost_total: float
+    ) -> "io.StringIO":
+        """Shared setup for FIX 4 zero-cost warning tests.
+
+        Returns a StringIO buffer capturing stderr from the main() call.
+        """
+        import io
+
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {
+                "per_agent": {"melchior": cost_total},
+                "total_usd": cost_total,
+            },
+        )
+
+        def fake_create(output_dir: object, run_root: object = None) -> str:
+            d = tmp_path / "magi-run-costwarn"
+            d.mkdir(exist_ok=True)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def fake_orch(*a: object, **k: object) -> dict[str, Any]:
+            return {
+                "agents": [
+                    {
+                        "agent": "melchior",
+                        "verdict": "approve",
+                        "confidence": 0.9,
+                        "summary": "s",
+                        "reasoning": "r",
+                        "recommendation": "rec",
+                        "findings": [],
+                    }
+                ],
+                "consensus": {},
+            }
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello"])
+
+        buf: io.StringIO = io.StringIO()
+        with monkeypatch.context() as mp:
+            mp.setattr(sys, "stderr", buf)
+            run_magi.main()
+        return buf
+
+    def test_zero_cost_warning_emitted_when_cost_is_zero(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """FIX 4: when aggregate_cost returns 0.0 and there is >= 1 agent,
+        main() must emit a [!] WARNING to stderr so silent $0.00 mis-reporting
+        is visible (the CLI may have renamed total_cost_usd)."""
+        buf = self._patch_main_for_cost_warn(tmp_path, monkeypatch, cost_total=0.0)
+        err = buf.getvalue()
+        assert "[!] WARNING" in err and "$0.00" in err, (
+            f"Expected zero-cost [!] WARNING in stderr, got:\n{err!r}"
+        )
+
+    def test_zero_cost_warning_not_emitted_when_cost_positive(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """FIX 4: when aggregate_cost returns > 0, no zero-cost warning is emitted."""
+        buf = self._patch_main_for_cost_warn(tmp_path, monkeypatch, cost_total=0.75)
+        err = buf.getvalue()
+        assert not ("$0.00" in err and "[!] WARNING" in err), (
+            f"Zero-cost warning must NOT appear when cost > 0; got:\n{err!r}"
+        )
