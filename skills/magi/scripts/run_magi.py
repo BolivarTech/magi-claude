@@ -60,7 +60,10 @@ from temp_dirs import (  # noqa: E402
     project_run_root,
     sweep_legacy_runs_once,
 )
-from review_context import enrich_code_review_context  # noqa: E402
+from review_context import enrich_code_review_context, resolve_diff  # noqa: E402
+from cost import aggregate_cost  # noqa: E402
+from input_size import WARN_INPUT_TOKENS, check_input_size  # noqa: E402
+from finding_validation import parse_diff_ranges, validate_findings  # noqa: E402
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
 
 # Public star-import contract. Underscore-prefixed symbols from
@@ -155,6 +158,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=512_000,
         help="Max chars of enriched code-review context (default: 512000)",
     )
+    parser.add_argument(
+        "--warn-input-tokens",
+        type=int,
+        default=WARN_INPUT_TOKENS,
+        help=(
+            f"Warn when estimated input tokens exceed this value "
+            f"(default: {WARN_INPUT_TOKENS}). Warning reflects the RAW input "
+            f"before enrichment; the estimate is approximate (English chars/4). "
+            f"MAGI reviews the input whole; detect-and-warn only, not a hard limit."
+        ),
+    )
     parser.set_defaults(show_status=True, enrich=True)
     args = parser.parse_args(argv)
     # ``--keep-runs 0`` is ambiguous: a naive reading is "keep nothing"
@@ -169,6 +183,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "runs (keeping only the one about to be created), or --keep-runs "
             "-1 to disable cleanup entirely."
         )
+    if args.warn_input_tokens <= 0:
+        parser.error("--warn-input-tokens must be a positive integer")
     # Per-mode default model resolution (2.2.3). ``argparse`` cannot express
     # "default depends on another arg" cleanly, so we resolve here. The mode
     # has already been validated by ``choices=VALID_MODES`` above, so the
@@ -435,6 +451,16 @@ def _load_input_content(input_arg: str) -> tuple[str, str]:
     If *input_arg* is not a file path, it is returned as inline text
     unchanged — Python str values cannot have an encoding mismatch.
 
+    Known limitation (tracked, future fix): a value that *looks* like a
+    path but does not exist (e.g. a typo'd file path) is not distinguished
+    from genuine inline text — ``os.path.isfile`` is ``False``, so the
+    literal path string becomes the prompt body and is silently reviewed
+    as content instead of failing closed. Surfaced by the v3.0.0 Block B
+    over-suppression-probe gate run (a missing bundle path was reviewed as
+    path-only text). A future fix should detect path-shaped-but-missing
+    inputs (no whitespace/newline plus a path separator or known
+    extension) and raise instead of treating them as inline text.
+
     Args:
         input_arg: The raw value from ``argparse`` for the positional
             ``input`` argument. Either a path to a file or inline
@@ -476,6 +502,7 @@ def _maybe_enrich(
     base_ref: str,
     enrich: bool,
     max_chars: int,
+    diff: str | None = None,
 ) -> tuple[str, str | None]:
     """Enrich code-review input; pass-through otherwise. Boundary fail-safe —
     never raises into the orchestrator.
@@ -484,6 +511,17 @@ def _maybe_enrich(
     ``True``. All other modes and ``--no-enrich`` receive the original
     content unchanged with ``None`` as the note.
 
+    The *diff* is the run's single resolved diff source (A2): ``main`` resolves
+    it once via :func:`review_context.resolve_diff` and threads the same value to
+    BOTH this enrichment path and the finding guard, so the two can never diverge
+    and the ``git diff`` invocation runs only once per run (lighter read-only
+    probes such as ``_git_toplevel`` and ``_tree_is_clean`` may still run
+    independently). The value is forwarded to
+    :func:`enrich_code_review_context`, which consumes it verbatim instead of
+    re-resolving. ``None`` (the default, used by standalone callers and tests
+    that do not pre-resolve) tells enrichment to resolve internally via the same
+    :func:`resolve_diff` seam.
+
     Args:
         mode: Analysis mode (e.g. "code-review", "design", "analysis").
         content: The loaded input content to potentially enrich.
@@ -491,6 +529,8 @@ def _maybe_enrich(
         enrich: Whether enrichment is enabled (``False`` when ``--no-enrich``
             was passed).
         max_chars: Maximum characters allowed for the enriched output.
+        diff: The run's resolved diff shared with the guard (``""`` when none),
+            or ``None`` to let enrichment resolve it internally.
 
     Returns:
         Tuple ``(content, note)`` where ``content`` is the (possibly
@@ -501,7 +541,7 @@ def _maybe_enrich(
         return content, None
     try:
         return enrich_code_review_context(
-            content, repo_root=os.getcwd(), base_ref=base_ref, max_chars=max_chars
+            content, repo_root=os.getcwd(), base_ref=base_ref, max_chars=max_chars, diff=diff
         )
     except Exception as exc:  # noqa: BLE001 — boundary fail-safe
         return content, f"enrichment skipped (boundary error: {exc!r})"
@@ -520,6 +560,10 @@ async def run_orchestrator(
 
     Launches agents in parallel, collects results, alerts on failures,
     and runs consensus synthesis on successful outputs.
+
+    Note: for ``code-review``, ``main()`` recomputes ``report['consensus']``
+    after applying the finding guard; a caller that uses ``run_orchestrator``
+    without ``main()`` receives the pre-guard (unguarded) consensus.
 
     Args:
         agents_dir: Directory containing agent prompt files.
@@ -739,6 +783,123 @@ def _enable_utf8_console_io() -> None:
         reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
+def _diff_files_and_ranges(diff: str) -> tuple[set[str], dict[str, set[int]]]:
+    """Return (valid_files, changed_ranges) for the guard. Fail-safe -> empty.
+
+    Parses *diff* into the set of touched files and their changed post-image
+    line numbers. Any failure degrades to ``(set(), {})`` so the guard becomes
+    a no-op rather than crashing the run (R10).
+
+    Args:
+        diff: The resolved unified diff text (``""`` when none).
+
+    Returns:
+        Tuple ``(files, ranges)`` where ``files`` is the set of normalized
+        touched paths and ``ranges`` maps each path to its changed lines.
+    """
+    try:
+        ranges = parse_diff_ranges(diff)
+        return set(ranges.keys()), ranges
+    except Exception:  # noqa: BLE001 — boundary fail-safe
+        return set(), {}
+
+
+def _apply_finding_guard(
+    agents: list[dict[str, Any]],
+    mode: str,
+    files: set[str],
+    ranges: dict[str, set[int]],
+    summary: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """In code-review, drop/annotate each agent's findings against the diff.
+
+    Hard-drops findings whose ``file`` is not in the diff (hallucination guard)
+    and soft-annotates findings whose ``line`` falls outside the changed range,
+    per :func:`finding_validation.validate_findings`. A no-op in non-code-review
+    modes or when there is no diff (empty *files*). The guard filters the
+    findings section only — it never touches an agent's verdict/confidence, so
+    the consensus score (computed downstream by ``determine_consensus`` from
+    verdict+confidence) is unaffected. Never raises (each agent is guarded
+    independently behind a boundary).
+
+    Args:
+        agents: The successful agents' validated output dicts.
+        mode: Analysis mode; the guard runs only for ``"code-review"``.
+        files: Set of valid (diff-present) normalized file paths.
+        ranges: Per-file set of changed post-image line numbers.
+        summary: Optional out-param (F4). When given, it is populated with the
+            guard's observable effect for the report: ``{"active": False}`` when
+            the guard is a no-op, else ``{"active": True, "files_in_diff": N,
+            "total_dropped": N, "total_annotated": N, "per_agent": {agent:
+            {"dropped", "annotated", "dropped_titles"}}}`` with only agents that
+            had a drop/annotation. Surfacing this lets the report explain why a
+            voting agent shows no Key Findings (the guard never alters the vote).
+
+    Returns:
+        A new list of agent dicts with guarded findings (same order). Agents
+        for which the guard fails are passed through with original findings.
+    """
+    if mode != "code-review" or not files:
+        if summary is not None:
+            summary["active"] = False
+        return agents
+
+    if summary is not None:
+        summary.update(
+            {
+                "active": True,
+                "files_in_diff": len(files),
+                "total_dropped": 0,
+                "total_annotated": 0,
+                "per_agent": {},
+            }
+        )
+
+    out: list[dict[str, Any]] = []
+    for a in agents:
+        try:
+            original = a.get("findings", [])
+            kept, dropped, annotated = validate_findings(original, files, ranges)
+            a = {**a, "findings": kept}
+            if dropped or annotated:
+                # Compute dropped titles by an order-preserving walk of
+                # *original* against *kept*. ``validate_findings`` keeps survivors
+                # in original order (annotated ones replaced by new dicts with the
+                # same title/file/line, only ``detail`` changed) and removes the
+                # dropped ones, so a two-pointer match by (title, file, line)
+                # identifies exactly which originals survived. A title-set diff
+                # would wrongly hide a dropped finding whose title is shared by a
+                # kept one (duplicate titles across different files).
+                kept_idx = 0
+                dropped_titles = []
+                for orig in original:
+                    if kept_idx < len(kept) and (
+                        kept[kept_idx].get("title") == orig.get("title")
+                        and kept[kept_idx].get("file") == orig.get("file")
+                        and kept[kept_idx].get("line") == orig.get("line")
+                    ):
+                        kept_idx += 1  # this original survived (possibly annotated)
+                    else:
+                        dropped_titles.append(str(orig.get("title", "")))
+                print(
+                    f"[guard] {a['agent']}: dropped {dropped} "
+                    f"titles={dropped_titles}, annotated {annotated}",
+                    file=sys.stderr,
+                )
+                if summary is not None:
+                    summary["per_agent"][a["agent"]] = {
+                        "dropped": dropped,
+                        "annotated": annotated,
+                        "dropped_titles": dropped_titles,
+                    }
+                    summary["total_dropped"] += dropped
+                    summary["total_annotated"] += annotated
+        except Exception as exc:  # noqa: BLE001 — boundary fail-safe
+            print(f"WARNING: finding guard failed for {a['agent']}: {exc}", file=sys.stderr)
+        out.append(a)
+    return out
+
+
 def _resolve_project_root() -> str:
     """Return the git toplevel of the cwd, or the realpath of cwd if not a repo.
 
@@ -777,12 +938,27 @@ def main() -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    # Input-size telemetry: estimate token footprint and flag oversized inputs.
+    # Pure/total — never raises. Runs after load so the enriched content is NOT
+    # measured here (enrichment happens below); we measure the raw user input.
+    est_tokens, oversize = check_input_size(input_content, args.warn_input_tokens)
+    raw_input_chars = len(input_content)  # capture BEFORE _maybe_enrich reassigns input_content
+
+    # A2: resolve the review diff ONCE (code-review only) and thread the same
+    # value to BOTH the enrichment path and the finding guard so they can never
+    # diverge. ``resolve_diff`` is TOTAL (returns "" on any failure); "" makes
+    # the guard a no-op.
+    review_diff = (
+        resolve_diff(input_content, os.getcwd(), args.base) if args.mode == "code-review" else ""
+    )
+
     input_content, enrich_note = _maybe_enrich(
         args.mode,
         input_content,
         base_ref=args.base,
         enrich=args.enrich,
         max_chars=args.enrich_max_chars,
+        diff=review_diff,
     )
 
     try:
@@ -859,12 +1035,89 @@ def main() -> None:
                 )
         raise
 
+    # A2 + R8: apply the diff-grounded finding guard to each agent BEFORE the
+    # consensus that ends up in the report. ``determine_consensus`` stays
+    # mode-agnostic (it never receives the diff); the guard runs here, on the
+    # successful agents, using the single resolved ``review_diff`` shared with
+    # enrichment. ``files`` empty (non-code-review or no diff) makes it a no-op.
+    files, ranges = _diff_files_and_ranges(review_diff)
+    # FIX 3b: emit ONE stderr line in code-review so a no-diff no-op is visible.
+    if args.mode == "code-review":
+        if files:
+            print(f"[guard] active: {len(files)} file(s) in diff", file=sys.stderr)
+        else:
+            print("[guard] skipped: no resolvable diff", file=sys.stderr)
+    # F4: collect the guard's observable effect into the report so an agent that
+    # votes but has all its findings dropped is explained in the audit artifact.
+    guard_summary: dict[str, Any] = {}
+    report["agents"] = _apply_finding_guard(
+        report["agents"], args.mode, files, ranges, summary=guard_summary
+    )
+    report["guard"] = guard_summary
+
+    # A5: outside code-review there is no diff to ground file/line against, so
+    # strip them to ``None`` — this forces title-based dedup for design/analysis
+    # regardless of what the agent emitted, keeping their behaviour identical to
+    # the pre-3.0.0 contract.
+    if args.mode != "code-review":
+        for a in report["agents"]:
+            for fnd in a.get("findings", []):
+                fnd["file"] = None
+                fnd["line"] = None
+
+    # Recompute the consensus on the guarded agents so the rendered report's
+    # findings section reflects the filtering. The score/verdict/label are
+    # invariant under the guard (it only touches the findings section, never an
+    # agent's verdict or confidence — pinned by the BDD-14 score-invariance
+    # test); only the deduplicated ``findings`` list changes. Guarded by the
+    # ``>= 2`` precondition of ``determine_consensus`` — real runs always reach
+    # here with >= 2 agents (the orchestrator raised otherwise), so this only
+    # skips the refresh under stubbed/degenerate agent lists.
+    if len(report["agents"]) >= 2:
+        report["consensus"] = determine_consensus(report["agents"])
+
     print(format_report(report["agents"], report["consensus"]))
+
+    # A1: aggregate per-run cost into the report BEFORE it is serialized so the
+    # saved magi-report.json carries the ``cost`` block. Aggregate over all
+    # canonical agent names (AGENTS), not just report["agents"], so a failed or
+    # timed-out agent that wrote its raw envelope still contributes to the total.
+    # Fail-safe: a missing or corrupt envelope contributes 0 for that agent.
+    report["cost"] = aggregate_cost(output_dir, list(AGENTS))
+    # FIX 4: if the aggregated cost is $0.00 despite having at least one agent,
+    # the CLI may have renamed or relocated ``total_cost_usd`` — emit a single
+    # warning so the silent mis-reporting is visible in operator logs.
+    if report["cost"]["total_usd"] == 0.0 and report["agents"]:
+        print(
+            "[!] WARNING: per-run cost resolved to $0.00; the CLI may have "
+            "renamed the total_cost_usd field — check raw envelopes.",
+            file=sys.stderr,
+        )
+
+    # Input-size telemetry: record the raw-input footprint in the report so the
+    # saved magi-report.json carries observable per-run size data (mirrors the
+    # ``cost`` block discipline: set BEFORE json.dump). ``est_tokens``,
+    # ``oversize``, and ``raw_input_chars`` were all computed right after
+    # _load_input_content, before _maybe_enrich could reassign input_content.
+    report["input_size"] = {
+        "chars": raw_input_chars,
+        "est_tokens": est_tokens,
+        "oversize": oversize,
+        "warn_threshold_tokens": args.warn_input_tokens,
+    }
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     print(f"\nFull report saved to: {report_path}")
+    print(f"Cost: ${report['cost']['total_usd']:.4f} ({len(report['agents'])} agents)")
+    print(f"Input size: ~{est_tokens} tokens ({raw_input_chars} chars)")
+    if oversize:
+        print(
+            f"[!] WARNING: input ~{est_tokens} tokens is very large; MAGI reviews it whole "
+            "(no map-reduce). Consider splitting into smaller PRs for sharper review.",
+            file=sys.stderr,
+        )
 
     if is_temp_dir:
         # Run completed: drop the liveness lock so this dir becomes

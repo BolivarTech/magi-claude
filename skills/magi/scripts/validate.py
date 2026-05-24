@@ -15,6 +15,8 @@ import os
 import re
 from typing import Any
 
+from finding_id import normalize_category
+
 
 class ValidationError(Exception):
     """Raised when agent output fails validation.
@@ -273,5 +275,45 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
                 f"of {_MAX_DETAIL_LENGTH} characters.",
                 filepath,
             )
+        # --- optional structured fields (v3.0.0 Block A) ---
+        # file/line are optional (null in design/analysis); type-checked only
+        # when present. category defaults to a normalized slug ("other" when
+        # absent/unknown) so downstream id/dedup always has a value.
+        file_val = finding.get("file")
+        if file_val is not None and not isinstance(file_val, str):
+            # Fail-soft to None for symmetry with the line field (A4 rationale):
+            # a non-str file value is a minor LLM slip on an optional field;
+            # raising ValidationError here would drop the entire agent, risking
+            # an asymmetric Caspar drop (§2.2.5). Keep the finding, null the field.
+            file_val = None
+        line_val = finding.get("line")
+        if line_val is not None:
+            if isinstance(line_val, bool):
+                # bool is a subclass of int in Python; treat as invalid -> fail-soft
+                line_val = None
+            elif isinstance(line_val, int):
+                # Proper integer (already excludes bool above); keep for range check.
+                pass
+            elif isinstance(line_val, float) and line_val.is_integer():
+                # Whole-valued finite float (e.g. 42.0 emitted by an LLM) -> coerce
+                # to int. float.is_integer() returns False for inf and nan without
+                # calling int(), avoiding the OverflowError/ValueError that
+                # int(float('inf')) / int(float('nan')) would raise.
+                line_val = int(line_val)
+            else:
+                # Non-whole float, str, or other non-numeric type -> fail-soft.
+                # A hard ValidationError here would drop the entire agent, which
+                # is disproportionate for a minor LLM slip on an optional field
+                # (A4 fail-soft rule, mirrors the non-positive int guard below).
+                line_val = None
+        # A4 (fail-soft, iter-3): a non-positive line is a minor agent slip; drop
+        # it to None (keep the finding) rather than raise — a hard ValidationError
+        # here would reject the whole agent and risks an asymmetric Caspar drop
+        # (§2.2.5).
+        if isinstance(line_val, int) and line_val <= 0:
+            line_val = None
+        finding["file"] = file_val
+        finding["line"] = line_val
+        finding["category"] = normalize_category(finding.get("category"))
 
     return dict(data)  # type-narrow from Any

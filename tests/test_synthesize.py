@@ -834,6 +834,76 @@ class TestDetermineConsensus:
 
 
 # ---------------------------------------------------------------------------
+# Block B pins — likelihood calibration + Caspar override
+# ---------------------------------------------------------------------------
+
+
+def test_agent_prompts_document_likelihood_calibration():
+    """v3.0.0 Block B: all three code-review prompts document the likelihood
+    calibration, the mode-gate, the downgrade rule, and the 5 shared few-shots."""
+    from pathlib import Path
+
+    agents = Path(__file__).parent.parent / "skills" / "magi" / "agents"
+    for name in ("melchior.md", "balthasar.md", "caspar.md"):
+        low = (agents / name).read_text(encoding="utf-8").lower()
+        assert "likelihood" in low, name
+        for level in ("`certain`", "`likely`", "`possible`", "`unlikely`"):
+            assert level in low, f"{name}: missing likelihood level {level}"
+        assert "code-review mode only" in low, f"{name}: missing mode-gate phrase"
+        assert "downgrade rule" in low, f"{name}: missing downgrade rule"
+        assert "unless the context shows otherwise" in low, f"{name}: missing escape clause"
+        for phrase in (
+            "surrounding code now violate",
+            "shared fixture",
+            "resource cleanup",
+            "framework's documented contract",
+            "cannot fail",
+        ):
+            assert phrase in low, f"{name}: missing few-shot phrase {phrase!r}"
+
+
+def test_caspar_prompt_documents_critic_override():
+    """v3.0.0 Block B: only Caspar's prompt grants the retain-unlikely override."""
+    from pathlib import Path
+
+    agents = Path(__file__).parent.parent / "skills" / "magi" / "agents"
+    caspar = (agents / "caspar.md").read_text(encoding="utf-8").lower()
+    assert "critic's override" in caspar
+    assert "retain" in caspar
+    for name in ("melchior.md", "balthasar.md"):
+        other = (agents / name).read_text(encoding="utf-8").lower()
+        assert "critic's override" not in other, f"{name} must not carry Caspar's override"
+
+
+def test_calibration_blocks_identical_except_caspar_override():
+    """Block B: the shared calibration section is byte-identical across the three
+    prompts; only caspar.md additionally carries the Critic's override. Guards
+    against silent per-agent prompt drift."""
+    from pathlib import Path
+
+    agents = Path(__file__).parent.parent / "skills" / "magi" / "agents"
+
+    def section(name: str) -> str:
+        text = (agents / name).read_text(encoding="utf-8")
+        start = text.index("## Finding calibration")
+        end = text.index("## Output format", start)
+        return text[start:end]
+
+    mel = section("melchior.md")
+    bal = section("balthasar.md")
+    cas = section("caspar.md")
+    assert mel == bal, "melchior and balthasar calibration sections must be byte-identical"
+    assert "Critic's override" in cas, "caspar must carry the Critic's override paragraph"
+    assert "Critic's override" not in mel, "melchior must not carry Caspar's override"
+    # The shared prefix of caspar's block (everything before the override) must
+    # equal melchior's block verbatim.
+    cas_shared = cas[: cas.index("**Critic's override")]
+    assert cas_shared.strip() == mel.strip(), (
+        "caspar's shared calibration block must match melchior's verbatim"
+    )
+
+
+# ---------------------------------------------------------------------------
 # TestFindingsDedup
 # ---------------------------------------------------------------------------
 
@@ -1978,3 +2048,397 @@ class TestDynamicConsensusLabels:
         ]
         result = determine_consensus(agents)
         assert result["consensus"] == "HOLD -- TIE"
+
+
+# ---------------------------------------------------------------------------
+# TestOptionalFindingFields
+# ---------------------------------------------------------------------------
+
+
+class TestOptionalFindingFields:
+    """v3.0.0 Block A: file/line/category are optional + normalized; absence
+    must not break validation (design/analysis emit none)."""
+
+    def _write(self, tmp_path, finding):
+        import json
+
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [finding],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        return str(p)
+
+    def test_finding_without_optional_fields_validates(self, tmp_path):
+        from synthesize import load_agent_output
+
+        out = self._write(tmp_path, {"severity": "info", "title": "t", "detail": "d"})
+        f = out  # path
+        loaded = load_agent_output(f)
+        fn = loaded["findings"][0]
+        assert fn["file"] is None and fn["line"] is None and fn["category"] == "other"
+
+    def test_finding_with_optional_fields_normalized(self, tmp_path):
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {
+                "severity": "warning",
+                "title": "t",
+                "detail": "d",
+                "file": "src\\a.py",
+                "line": 10,
+                "category": "memory-leak",
+            },
+        )
+        fn = load_agent_output(out)["findings"][0]
+        assert fn["file"] == "src\\a.py" and fn["line"] == 10
+        assert fn["category"] == "other"  # unknown -> other
+
+    def test_invalid_line_type_fails_soft_to_none(self, tmp_path):
+        """FIX 2: line="ten" (string) must fail-soft to None; NEVER raise
+        ValidationError for a bad line value (A4 fail-soft rule extended to
+        non-int types — dropping the whole agent is disproportionate)."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": "ten"},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, f"line='ten' must fail-soft to None, got {fn['line']!r}"
+
+    def test_line_zero_is_fail_soft_to_none(self, tmp_path):
+        """A4 fail-soft: line=0 must NOT raise ValidationError; finding kept, line -> None."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": 0},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, "line=0 must fail-soft to None, not raise"
+
+    def test_line_negative_is_fail_soft_to_none(self, tmp_path):
+        """A4 fail-soft: line=-5 must NOT raise ValidationError; finding kept, line -> None."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": -5},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, "line=-5 must fail-soft to None, not raise"
+
+    def test_line_whole_float_coerced_to_int(self, tmp_path):
+        """FIX 2: line=42.0 (whole-valued float) must be coerced to int(42),
+        NOT raise ValidationError dropping the whole agent."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": 42.0},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] == 42, f"line=42.0 must coerce to int 42, got {fn['line']!r}"
+        assert isinstance(fn["line"], int), f"coerced line must be int, got {type(fn['line'])}"
+
+    def test_line_non_whole_float_fails_soft_to_none(self, tmp_path):
+        """FIX 2: line=42.5 (non-whole float) must fail-soft to None, NOT
+        raise ValidationError and drop the entire agent."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": 42.5},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, f"line=42.5 must fail-soft to None, got {fn['line']!r}"
+
+    def test_line_bool_fails_soft_to_none(self, tmp_path):
+        """FIX 2: line=True (bool — isinstance(True, int) is True, so must be
+        explicitly treated as invalid) must fail-soft to None, NOT raise."""
+        from synthesize import load_agent_output
+
+        out = self._write(
+            tmp_path,
+            {"severity": "info", "title": "t", "detail": "d", "line": True},
+        )
+        loaded = load_agent_output(out)
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, f"line=True must fail-soft to None, got {fn['line']!r}"
+
+    def test_line_inf_fails_soft_to_none(self, tmp_path):
+        """BUG 2: line=float('inf') must fail-soft to None; must NOT raise
+        OverflowError (int(float('inf')) crashes), dropping the whole agent."""
+        from unittest.mock import patch
+
+        from synthesize import load_agent_output
+
+        # float('inf') is not valid JSON; inject it by patching json.load to return
+        # a dict with the non-finite float already parsed.
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [{"severity": "info", "title": "t", "detail": "d", "line": float("inf")}],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior_inf.json"
+        p.write_text("{}", encoding="utf-8")  # non-empty placeholder for os.path.getsize
+        with patch("validate.json.load", return_value=data):
+            loaded = load_agent_output(str(p))
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, f"line=inf must fail-soft to None, got {fn['line']!r}"
+
+    def test_line_nan_fails_soft_to_none(self, tmp_path):
+        """BUG 2: line=float('nan') must fail-soft to None; must NOT raise
+        ValueError (int(float('nan')) crashes), dropping the whole agent."""
+        from unittest.mock import patch
+
+        from synthesize import load_agent_output
+
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [{"severity": "info", "title": "t", "detail": "d", "line": float("nan")}],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior_nan.json"
+        p.write_text("{}", encoding="utf-8")
+        with patch("validate.json.load", return_value=data):
+            loaded = load_agent_output(str(p))
+        fn = loaded["findings"][0]
+        assert fn["line"] is None, f"line=nan must fail-soft to None, got {fn['line']!r}"
+
+    def test_file_non_str_fails_soft_to_none(self, tmp_path):
+        """BUG 3: file=42 (non-str, non-null) must fail-soft to None, NOT raise
+        ValidationError dropping the whole agent. Symmetry with line fail-soft."""
+        from unittest.mock import patch
+
+        from synthesize import load_agent_output
+
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [{"severity": "info", "title": "t", "detail": "d", "file": 42}],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior_nonstr_file.json"
+        p.write_text("{}", encoding="utf-8")
+        with patch("validate.json.load", return_value=data):
+            loaded = load_agent_output(str(p))
+        fn = loaded["findings"][0]
+        assert fn["file"] is None, f"file=42 must fail-soft to None, got {fn['file']!r}"
+
+    def test_file_valid_str_preserved(self, tmp_path):
+        """BUG 3 regression: valid string file must pass through unchanged."""
+        from unittest.mock import patch
+
+        from synthesize import load_agent_output
+
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [{"severity": "info", "title": "t", "detail": "d", "file": "src/x.py"}],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior_valid_file.json"
+        p.write_text("{}", encoding="utf-8")
+        with patch("validate.json.load", return_value=data):
+            loaded = load_agent_output(str(p))
+        fn = loaded["findings"][0]
+        assert fn["file"] == "src/x.py", f"valid file string must be preserved, got {fn['file']!r}"
+
+    def test_file_none_preserved(self, tmp_path):
+        """BUG 3 regression: file=None must remain None."""
+        from unittest.mock import patch
+
+        from synthesize import load_agent_output
+
+        data = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [{"severity": "info", "title": "t", "detail": "d", "file": None}],
+            "recommendation": "rec",
+        }
+        p = tmp_path / "melchior_none_file.json"
+        p.write_text("{}", encoding="utf-8")
+        with patch("validate.json.load", return_value=data):
+            loaded = load_agent_output(str(p))
+        fn = loaded["findings"][0]
+        assert fn["file"] is None, f"file=None must stay None, got {fn['file']!r}"
+
+
+# ---------------------------------------------------------------------------
+# TestDedupById
+# ---------------------------------------------------------------------------
+
+
+class TestDedupById:
+    """v3.0.0 Block A: dedup by file:line:category id when present; fallback
+    to title when not (design/analysis behavior unchanged)."""
+
+    def _agent(self, name, findings, verdict="conditional", conf=0.8):
+        return {
+            "agent": name,
+            "verdict": verdict,
+            "confidence": conf,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": findings,
+            "recommendation": "rec",
+        }
+
+    def test_same_location_different_title_merges_by_id(self):
+        from synthesize import determine_consensus
+
+        a = self._agent(
+            "melchior",
+            [
+                {
+                    "severity": "warning",
+                    "title": "Overflow in parse",
+                    "detail": "d1",
+                    "file": "src/a.py",
+                    "line": 10,
+                    "category": "logic-error",
+                }
+            ],
+        )
+        b = self._agent(
+            "caspar",
+            [
+                {
+                    "severity": "critical",
+                    "title": "Possible overrun",
+                    "detail": "d2",
+                    "file": "src/a.py",
+                    "line": 10,
+                    "category": "logic-error",
+                }
+            ],
+        )
+        out = determine_consensus([a, b])
+        assert len(out["findings"]) == 1
+        merged = out["findings"][0]
+        assert sorted(merged["sources"]) == ["caspar", "melchior"]
+        assert merged["severity"] == "critical"  # highest wins
+        assert "id" in merged and len(merged["id"]) == 16
+
+    def test_no_location_falls_back_to_title_dedup(self):
+        from synthesize import determine_consensus
+
+        a = self._agent(
+            "melchior",
+            [
+                {
+                    "severity": "info",
+                    "title": "Same Point",
+                    "detail": "d1",
+                    "file": None,
+                    "line": None,
+                    "category": "other",
+                }
+            ],
+        )
+        b = self._agent(
+            "balthasar",
+            [
+                {
+                    "severity": "info",
+                    "title": "same point",
+                    "detail": "d2",
+                    "file": None,
+                    "line": None,
+                    "category": "other",
+                }
+            ],
+        )
+        out = determine_consensus([a, b])
+        assert len(out["findings"]) == 1  # merged by normalized title (today's behavior)
+        assert sorted(out["findings"][0]["sources"]) == ["balthasar", "melchior"]
+
+
+# ---------------------------------------------------------------------------
+# TestAgentPromptsDocumentOptionalFindingFields
+# ---------------------------------------------------------------------------
+
+
+class TestAgentPromptsDocumentOptionalFindingFields:
+    """Schema pin: all three agent prompts must document the optional
+    file/line/category fields introduced in v3.0.0 Block A."""
+
+    def test_agent_prompts_document_optional_finding_fields(self):
+        from pathlib import Path
+
+        agents = Path(__file__).parent.parent / "skills" / "magi" / "agents"
+        for name in ("melchior.md", "balthasar.md", "caspar.md"):
+            text = (agents / name).read_text(encoding="utf-8")
+            assert "findings[].category" in text and "findings[].file" in text, (
+                f"{name} is missing findings[].file or findings[].category documentation"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Block B: dedup merge invariant pin (R5/BDD-4)
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_same_title_keeps_higher_severity_detail_and_sources():
+    """R5/BDD-4: on an exact-title collision, the higher-severity finding's
+    severity AND detail win, and every reporting agent is recorded in sources.
+    Pins that Caspar's retained warning + justification survive a merge with
+    Mel/Bal info (existing consensus behavior; consensus.py untouched)."""
+    from synthesize import determine_consensus
+
+    def agent(name, sev, detail):
+        return {
+            "agent": name,
+            "verdict": "conditional",
+            "confidence": 0.7,
+            "summary": "s",
+            "reasoning": "r",
+            "recommendation": "rec",
+            "findings": [{"severity": sev, "title": "Shared Title", "detail": detail}],
+        }
+
+    result = determine_consensus(
+        [
+            agent("melchior", "info", "mel softened view"),
+            agent("balthasar", "info", "bal softened view"),
+            agent("caspar", "warning", "caspar impact justification"),
+        ]
+    )
+    merged = [f for f in result["findings"] if f.get("title") == "Shared Title"]
+    assert len(merged) == 1, "same title must dedup to one finding"
+    f = merged[0]
+    assert f["severity"] == "warning", "higher severity must win"
+    assert f["detail"] == "caspar impact justification", "higher-severity detail must win"
+    assert set(f["sources"]) == {"melchior", "balthasar", "caspar"}

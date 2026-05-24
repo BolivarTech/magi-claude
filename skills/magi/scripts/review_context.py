@@ -13,6 +13,8 @@ import os
 import re
 import subprocess
 
+from finding_validation import added_lines_by_file, extract_touched_files
+
 _ENRICH_MAX_CHARS = 512_000
 _DEF_WINDOW_LINES = 40
 _MAX_CANDIDATES = 60
@@ -64,24 +66,20 @@ def _contains_diff(text: str) -> bool:
 def _extract_touched_files(diff_text: str) -> list[str]:
     """Return the list of paths modified by diff_text (new-file side only).
 
-    Skips /dev/null targets (deleted files) and strips the ``b/`` prefix
-    that git unified diffs add.
+    Thin wrapper over :func:`finding_validation.extract_touched_files`, the
+    single source of truth for new-file recognition. Sharing it guarantees the
+    enrichment layer and the finding guard agree on the touched-file set, so the
+    guard can never hard-drop a finding that cites a file enrichment grounded on
+    (F2). Skips /dev/null targets, honors git's optional ``b/`` prefix, and
+    strips ``diff -u`` tab timestamps.
 
     Args:
-        diff_text: A unified diff string (git format).
+        diff_text: A unified diff string (git or plain ``diff -u`` format).
 
     Returns:
         Ordered list of relative file paths that were added or modified.
     """
-    files: list[str] = []
-    for line in diff_text.splitlines():
-        if line.startswith("+++ "):
-            path = line[4:].strip()
-            if path.startswith("b/"):
-                path = path[2:]
-            if path and path != "/dev/null":
-                files.append(path)
-    return files
+    return extract_touched_files(diff_text)
 
 
 def _read_file_safe(repo_root: str, rel_path: str, cache: "dict[str, str | None]") -> "str | None":
@@ -176,8 +174,21 @@ def enrich_code_review_context(
     repo_root: str | None = None,
     base_ref: str = "main",
     max_chars: int = _ENRICH_MAX_CHARS,
+    diff: str | None = None,
 ) -> tuple[str, str]:
     """Return (content, note); content unchanged on no-op. Never raises (R7).
+
+    *diff* realizes the A2 single-source contract: when ``main`` has already
+    resolved the run's review diff (via :func:`resolve_diff`), it threads that
+    exact value in here so enrichment and the finding guard share ONE
+    resolution and can never diverge. The sentinel is ``None``:
+
+    * ``diff is None`` — not provided; :func:`_enrich` resolves internally via
+      :func:`resolve_diff` (preserves standalone callability for independent
+      callers and the test suite).
+    * ``diff`` is a ``str`` (including ``""``) — use it verbatim; ``resolve_diff``
+      is NOT called again. ``""`` means "no diff / dirty tree / non-git" and is
+      treated exactly as an internally-resolved empty diff (no-op).
 
     Args:
         input_content: The original review content to potentially enrich.
@@ -185,6 +196,8 @@ def enrich_code_review_context(
         base_ref: The base git ref to diff against. Defaults to "main".
         max_chars: Maximum characters for the enriched output. Defaults to
             _ENRICH_MAX_CHARS.
+        diff: Pre-resolved review diff shared with the finding guard, or
+            ``None`` to resolve internally. See sentinel semantics above.
 
     Returns:
         A tuple of (content, note) where content is either the enriched
@@ -192,7 +205,7 @@ def enrich_code_review_context(
         what happened.
     """
     try:
-        return _enrich(input_content, repo_root, base_ref, max_chars)
+        return _enrich(input_content, repo_root, base_ref, max_chars, diff)
     except Exception as exc:  # noqa: BLE001 — fail-safe contract
         return input_content, f"enrichment skipped (error: {exc!r})"
 
@@ -200,24 +213,21 @@ def enrich_code_review_context(
 def _added_lines_by_file(diff_text: str) -> dict[str, list[str]]:
     """Map each post-image path to its added (``+``) lines from the diff.
 
+    Thin wrapper over :func:`finding_validation.added_lines_by_file`, the single
+    source of truth for diff parsing. Sharing it guarantees the coherence check
+    in :func:`_collect_touched` keys added lines under the SAME paths
+    :func:`_extract_touched_files` reports, so the gate is never silently vacuous
+    for non-git diffs (F2). Handles git's optional ``b/`` prefix, ``diff -u`` tab
+    timestamps, and ``/dev/null`` targets.
+
     Args:
-        diff_text: A unified diff string (git format).
+        diff_text: A unified diff string (git or plain ``diff -u`` format).
 
     Returns:
         Dict mapping relative file path to list of added line bodies (the
         leading ``+`` character is stripped).
     """
-    result: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in diff_text.splitlines():
-        if line.startswith("+++ "):
-            path = line[4:].strip()
-            if path.startswith("b/"):
-                path = path[2:]
-            current = None if (not path or path == "/dev/null") else path
-        elif current and line.startswith("+") and not line.startswith("+++"):
-            result.setdefault(current, []).append(line[1:])
-    return result
+    return added_lines_by_file(diff_text)
 
 
 def _coheres(content: str, added: list[str]) -> bool:
@@ -434,6 +444,43 @@ def _git_diff(repo_root: str, base_ref: str) -> "str | None":
     return out or None
 
 
+def resolve_diff(input_content: str, repo_root: str, base_ref: str) -> str:
+    """Resolve the review diff: input-embedded diff, else ``git diff <base>...HEAD``.
+
+    This is the single diff-resolution seam for a code-review run (decision A2).
+    ``main`` calls it EXACTLY ONCE and threads the returned value to BOTH the
+    finding guard and :func:`enrich_code_review_context` (via its ``diff``
+    parameter), so the two consumers share one resolution and can never diverge
+    — there is no second ``git diff`` invocation per run. Resolution rules
+    mirror :func:`_enrich`:
+
+    * If *input_content* already contains a unified diff, it is returned verbatim.
+    * Otherwise, under a clean working tree (== HEAD, decision F),
+      ``git diff <base_ref>...HEAD`` is returned.
+    * Any no-op condition — not a git repo, dirty tree, empty diff — yields ``""``.
+
+    TOTAL — returns ``""`` on ANY failure. It now runs in ``main()`` outside the
+    ``_maybe_enrich`` boundary, so it must never raise into the orchestrator.
+
+    Args:
+        input_content: The raw review content (may itself embed a diff).
+        repo_root: Path to start git resolution from (e.g. ``os.getcwd()``).
+        base_ref: The base git ref to diff against HEAD.
+
+    Returns:
+        The resolved unified diff text, or ``""`` when no diff is available.
+    """
+    try:
+        if _contains_diff(input_content):
+            return input_content
+        root = _git_toplevel(repo_root or os.getcwd())
+        if root is None or not _tree_is_clean(root):
+            return ""
+        return _git_diff(root, base_ref) or ""
+    except Exception:  # noqa: BLE001 — TOTAL: runs in main() outside _maybe_enrich
+        return ""
+
+
 def _assemble(
     input_content: str,
     touched: list[tuple[str, str]],
@@ -502,7 +549,11 @@ def _assemble(
 
 
 def _enrich(
-    input_content: str, repo_root: str | None, base_ref: str, max_chars: int
+    input_content: str,
+    repo_root: str | None,
+    base_ref: str,
+    max_chars: int,
+    diff: str | None = None,
 ) -> tuple[str, str]:
     """Internal enrichment logic; may raise (caller wraps in try/except).
 
@@ -511,6 +562,10 @@ def _enrich(
         repo_root: Optional path to the git repository root.
         base_ref: The base git ref to diff against.
         max_chars: Maximum characters for the enriched output.
+        diff: Pre-resolved review diff (A2 single source) or ``None`` to resolve
+            internally. ``None`` is the sentinel for "not provided"; any ``str``
+            (including ``""``) is consumed verbatim without calling
+            :func:`resolve_diff` again.
 
     Returns:
         A tuple of (content, note).
@@ -520,7 +575,14 @@ def _enrich(
         return input_content, "enrichment skipped (not a git repo)"
     if not _tree_is_clean(root):
         return input_content, "enrichment skipped (working tree not clean: uncommitted changes)"
-    diff_text = input_content if _contains_diff(input_content) else _git_diff(root, base_ref)
+    # A2 single source: consume the diff ``main`` already resolved (shared with
+    # the finding guard) so the two can never diverge and ``git diff`` runs only
+    # once per run. ``None`` is the sentinel for "not provided" — only then do we
+    # resolve internally via the shared seam, preserving standalone callability.
+    # A pre-resolved ``str`` (including ``""``) is used verbatim; ``""`` means
+    # "no diff" and the ``not diff_text`` guard below treats it as a no-op,
+    # identical to an internally-resolved empty diff.
+    diff_text = resolve_diff(input_content, root, base_ref) if diff is None else diff
     if not diff_text:
         return input_content, "enrichment skipped (no diff context)"
     cache: dict[str, str | None] = {}

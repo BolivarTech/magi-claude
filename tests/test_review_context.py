@@ -191,6 +191,57 @@ class TestAutoCompute:
             assert _git_diff(repo, "no-such-ref") is None
 
 
+class TestEnrichConsumesProvidedDiff:
+    """A2: enrich_code_review_context consumes a pre-resolved diff verbatim
+    (the value main() already resolved and shared with the finding guard),
+    re-resolving only when diff is the None sentinel."""
+
+    def test_provided_diff_is_used_without_reresolving(self, monkeypatch):
+        """A str diff is consumed verbatim; resolve_diff is NOT called again."""
+        import review_context
+
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+
+            def boom(*a, **k):
+                raise AssertionError("resolve_diff must not be called when diff is provided")
+
+            monkeypatch.setattr(review_context, "resolve_diff", boom)
+            content, _note = enrich_code_review_context(
+                "Review the branch.", repo_root=repo, base_ref="main", diff=_SAMPLE_DIFF
+            )
+            # The provided diff touches pkg.py -> its content is injected.
+            assert "## Touched files (full content)" in content
+            assert "def added():" in content
+
+    def test_empty_string_diff_is_noop_not_resolved(self, monkeypatch):
+        """diff="" means "no diff" and is a no-op; resolve_diff is NOT called."""
+        import review_context
+
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+
+            def boom(*a, **k):
+                raise AssertionError('resolve_diff must not be called for diff=""')
+
+            monkeypatch.setattr(review_context, "resolve_diff", boom)
+            content, note = enrich_code_review_context(
+                "Review the branch.", repo_root=repo, base_ref="main", diff=""
+            )
+            assert content == "Review the branch."
+            assert "no diff context" in note
+
+    def test_none_sentinel_resolves_internally(self):
+        """diff=None (the default) preserves the prior auto-resolve behavior."""
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            content, _note = enrich_code_review_context(
+                "Review the branch.", repo_root=repo, base_ref="main", diff=None
+            )
+            assert "## Touched files (full content)" in content
+            assert "def added():" in content
+
+
 class TestSymbols:
     def test_candidates_strip_keywords_defined_noise_comments_strings(self):
         diff = (
@@ -313,3 +364,101 @@ class TestBudgetAndFailSafe:
             _init_repo(repo)
             content, note = enrich_code_review_context(_SAMPLE_DIFF, repo_root=repo)
         assert content == _SAMPLE_DIFF and "error" in note.lower()
+
+
+class TestResolveDiff:
+    """A2: resolve_diff is the shared diff-resolution seam used by BOTH
+    enrichment and the finding guard. TOTAL — returns "" on any failure."""
+
+    def test_input_embedded_diff_returned(self):
+        from review_context import resolve_diff
+
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            assert resolve_diff(_SAMPLE_DIFF, repo, "main") == _SAMPLE_DIFF
+
+    def test_clean_tree_no_embedded_diff_uses_git_diff(self, monkeypatch):
+        import review_context
+        from review_context import resolve_diff
+
+        sentinel = "diff --git a/auto.py b/auto.py\n+++ b/auto.py\n@@ -0,0 +1 @@\n+x = 1\n"
+        monkeypatch.setattr(review_context, "_git_toplevel", lambda start: "/repo")
+        monkeypatch.setattr(review_context, "_tree_is_clean", lambda root: True)
+        monkeypatch.setattr(review_context, "_git_diff", lambda root, base: sentinel)
+        assert resolve_diff("Review the branch.", "/repo", "main") == sentinel
+
+    def test_dirty_tree_returns_empty(self, monkeypatch):
+        import review_context
+        from review_context import resolve_diff
+
+        monkeypatch.setattr(review_context, "_git_toplevel", lambda start: "/repo")
+        monkeypatch.setattr(review_context, "_tree_is_clean", lambda root: False)
+        assert resolve_diff("Review.", "/repo", "main") == ""
+
+    def test_non_git_returns_empty(self, monkeypatch):
+        import review_context
+        from review_context import resolve_diff
+
+        monkeypatch.setattr(review_context, "_git_toplevel", lambda start: None)
+        assert resolve_diff("Review.", "/not-a-repo", "main") == ""
+
+    def test_git_failure_returns_empty(self, monkeypatch):
+        """TOTAL: any exception inside resolution degrades to ""."""
+        import review_context
+        from review_context import resolve_diff
+
+        monkeypatch.setattr(
+            review_context,
+            "_git_toplevel",
+            lambda start: (_ for _ in ()).throw(RuntimeError("git exploded")),
+        )
+        assert resolve_diff("Review.", "/repo", "main") == ""
+
+    def test_git_diff_empty_returns_empty(self, monkeypatch):
+        """No diff between base and HEAD -> "" (no-op for both consumers)."""
+        import review_context
+        from review_context import resolve_diff
+
+        monkeypatch.setattr(review_context, "_git_toplevel", lambda start: "/repo")
+        monkeypatch.setattr(review_context, "_tree_is_clean", lambda root: True)
+        monkeypatch.setattr(review_context, "_git_diff", lambda root, base: None)
+        assert resolve_diff("Review the branch.", "/repo", "main") == ""
+
+
+class TestF2CoherenceParserParity:
+    """F2 follow-up (Loop-1 review): the coherence parser ``_added_lines_by_file``
+    must key added lines under the SAME clean paths as ``_extract_touched_files``.
+    Otherwise, for a non-git diff (no ``b/``, tab-timestamp), the keys diverge
+    and ``_collect_touched`` looks up ``[]`` -> ``_coheres(content, [])`` is
+    vacuously True, silently bypassing the HEAD-coherence gate (decision F)."""
+
+    _NONGIT = (
+        "--- app.py\t2026-05-24 10:00:00\n"
+        "+++ app.py\t2026-05-24 10:05:00\n"
+        "@@ -1,2 +1,3 @@\n"
+        " real_line_one\n"
+        "+fabricated_added_line\n"
+        " real_line_two\n"
+    )
+
+    def test_added_lines_keyed_under_clean_path(self):
+        """The added line must be keyed under the clean path 'app.py', matching
+        the touched-file set (not 'app.py\\t<timestamp>')."""
+        from review_context import _added_lines_by_file, _extract_touched_files
+
+        files = set(_extract_touched_files(self._NONGIT))
+        added = _added_lines_by_file(self._NONGIT)
+        assert set(added.keys()) <= files, "added-line keys must be clean paths in the touched set"
+        assert added.get("app.py") == ["fabricated_added_line"]
+
+    def test_collect_touched_coherence_engages_for_non_git_diff(self):
+        """End-to-end: a non-git diff whose added line is ABSENT from the file
+        must be reported as mismatched, not silently treated as coherent."""
+        import review_context
+
+        with tempfile.TemporaryDirectory() as repo:
+            with open(os.path.join(repo, "app.py"), "w", encoding="utf-8") as f:
+                f.write("real_line_one\nreal_line_two\n")
+            touched, mismatched = review_context._collect_touched(repo, self._NONGIT, {})
+            assert "app.py" in mismatched, "non-git coherence check must engage (not vacuous)"
+            assert touched == []
