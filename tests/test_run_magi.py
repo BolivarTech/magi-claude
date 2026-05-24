@@ -4204,10 +4204,8 @@ class TestInputSizeWiring:
         # Use code-review mode so resolve_diff is called; stub it out.
         monkeypatch.setattr(run_magi, "resolve_diff", lambda content, cwd, base: "")
 
-        # Re-use the rest of the standard _patch_main harness but supply our own
-        # _maybe_enrich above (must be set BEFORE calling _patch_main so it wins).
-        # _patch_main also sets _maybe_enrich; override order matters: we set it
-        # AFTER calling _patch_main so our stub wins.
+        # All stubs are set inline (not via _patch_main) so _maybe_enrich can be
+        # set last to guarantee our enriched-body stub wins over any earlier setattr.
         monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
         monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
