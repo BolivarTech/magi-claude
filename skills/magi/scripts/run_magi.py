@@ -478,7 +478,7 @@ def _maybe_enrich(
     base_ref: str,
     enrich: bool,
     max_chars: int,
-    diff: str = "",
+    diff: str | None = None,
 ) -> tuple[str, str | None]:
     """Enrich code-review input; pass-through otherwise. Boundary fail-safe —
     never raises into the orchestrator.
@@ -488,13 +488,13 @@ def _maybe_enrich(
     content unchanged with ``None`` as the note.
 
     The *diff* is the run's single resolved diff source (A2): ``main`` resolves
-    it once via :func:`review_context.resolve_diff` and passes the same value to
-    both this enrichment path and the finding guard so the two can never diverge.
-    Enrichment is still driven from the original *content* (its prompt body is
-    preserved byte-for-byte — :func:`enrich_code_review_context` re-resolves the
-    same diff deterministically via the same :func:`resolve_diff` seam under the
-    clean-tree precondition). *diff* is threaded here only to make the shared
-    source explicit and testable.
+    it once via :func:`review_context.resolve_diff` and threads the same value to
+    BOTH this enrichment path and the finding guard, so the two can never diverge
+    and ``git diff`` runs only once per run. The value is forwarded to
+    :func:`enrich_code_review_context`, which consumes it verbatim instead of
+    re-resolving. ``None`` (the default, used by standalone callers and tests
+    that do not pre-resolve) tells enrichment to resolve internally via the same
+    :func:`resolve_diff` seam.
 
     Args:
         mode: Analysis mode (e.g. "code-review", "design", "analysis").
@@ -503,7 +503,8 @@ def _maybe_enrich(
         enrich: Whether enrichment is enabled (``False`` when ``--no-enrich``
             was passed).
         max_chars: Maximum characters allowed for the enriched output.
-        diff: The run's resolved diff (``""`` when none). Shared with the guard.
+        diff: The run's resolved diff shared with the guard (``""`` when none),
+            or ``None`` to let enrichment resolve it internally.
 
     Returns:
         Tuple ``(content, note)`` where ``content`` is the (possibly
@@ -514,7 +515,7 @@ def _maybe_enrich(
         return content, None
     try:
         return enrich_code_review_context(
-            content, repo_root=os.getcwd(), base_ref=base_ref, max_chars=max_chars
+            content, repo_root=os.getcwd(), base_ref=base_ref, max_chars=max_chars, diff=diff
         )
     except Exception as exc:  # noqa: BLE001 — boundary fail-safe
         return content, f"enrichment skipped (boundary error: {exc!r})"

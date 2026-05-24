@@ -191,6 +191,57 @@ class TestAutoCompute:
             assert _git_diff(repo, "no-such-ref") is None
 
 
+class TestEnrichConsumesProvidedDiff:
+    """A2: enrich_code_review_context consumes a pre-resolved diff verbatim
+    (the value main() already resolved and shared with the finding guard),
+    re-resolving only when diff is the None sentinel."""
+
+    def test_provided_diff_is_used_without_reresolving(self, monkeypatch):
+        """A str diff is consumed verbatim; resolve_diff is NOT called again."""
+        import review_context
+
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+
+            def boom(*a, **k):
+                raise AssertionError("resolve_diff must not be called when diff is provided")
+
+            monkeypatch.setattr(review_context, "resolve_diff", boom)
+            content, _note = enrich_code_review_context(
+                "Review the branch.", repo_root=repo, base_ref="main", diff=_SAMPLE_DIFF
+            )
+            # The provided diff touches pkg.py -> its content is injected.
+            assert "## Touched files (full content)" in content
+            assert "def added():" in content
+
+    def test_empty_string_diff_is_noop_not_resolved(self, monkeypatch):
+        """diff="" means "no diff" and is a no-op; resolve_diff is NOT called."""
+        import review_context
+
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+
+            def boom(*a, **k):
+                raise AssertionError('resolve_diff must not be called for diff=""')
+
+            monkeypatch.setattr(review_context, "resolve_diff", boom)
+            content, note = enrich_code_review_context(
+                "Review the branch.", repo_root=repo, base_ref="main", diff=""
+            )
+            assert content == "Review the branch."
+            assert "no diff context" in note
+
+    def test_none_sentinel_resolves_internally(self):
+        """diff=None (the default) preserves the prior auto-resolve behavior."""
+        with tempfile.TemporaryDirectory() as repo:
+            _init_repo(repo)
+            content, _note = enrich_code_review_context(
+                "Review the branch.", repo_root=repo, base_ref="main", diff=None
+            )
+            assert "## Touched files (full content)" in content
+            assert "def added():" in content
+
+
 class TestSymbols:
     def test_candidates_strip_keywords_defined_noise_comments_strings(self):
         diff = (

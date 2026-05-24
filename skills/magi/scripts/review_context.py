@@ -176,8 +176,21 @@ def enrich_code_review_context(
     repo_root: str | None = None,
     base_ref: str = "main",
     max_chars: int = _ENRICH_MAX_CHARS,
+    diff: str | None = None,
 ) -> tuple[str, str]:
     """Return (content, note); content unchanged on no-op. Never raises (R7).
+
+    *diff* realizes the A2 single-source contract: when ``main`` has already
+    resolved the run's review diff (via :func:`resolve_diff`), it threads that
+    exact value in here so enrichment and the finding guard share ONE
+    resolution and can never diverge. The sentinel is ``None``:
+
+    * ``diff is None`` — not provided; :func:`_enrich` resolves internally via
+      :func:`resolve_diff` (preserves standalone callability for independent
+      callers and the test suite).
+    * ``diff`` is a ``str`` (including ``""``) — use it verbatim; ``resolve_diff``
+      is NOT called again. ``""`` means "no diff / dirty tree / non-git" and is
+      treated exactly as an internally-resolved empty diff (no-op).
 
     Args:
         input_content: The original review content to potentially enrich.
@@ -185,6 +198,8 @@ def enrich_code_review_context(
         base_ref: The base git ref to diff against. Defaults to "main".
         max_chars: Maximum characters for the enriched output. Defaults to
             _ENRICH_MAX_CHARS.
+        diff: Pre-resolved review diff shared with the finding guard, or
+            ``None`` to resolve internally. See sentinel semantics above.
 
     Returns:
         A tuple of (content, note) where content is either the enriched
@@ -192,7 +207,7 @@ def enrich_code_review_context(
         what happened.
     """
     try:
-        return _enrich(input_content, repo_root, base_ref, max_chars)
+        return _enrich(input_content, repo_root, base_ref, max_chars, diff)
     except Exception as exc:  # noqa: BLE001 — fail-safe contract
         return input_content, f"enrichment skipped (error: {exc!r})"
 
@@ -437,8 +452,11 @@ def _git_diff(repo_root: str, base_ref: str) -> "str | None":
 def resolve_diff(input_content: str, repo_root: str, base_ref: str) -> str:
     """Resolve the review diff: input-embedded diff, else ``git diff <base>...HEAD``.
 
-    This is the single shared diff-resolution seam used by BOTH enrichment and
-    the finding guard, so the two never diverge (decision A2). Resolution rules
+    This is the single diff-resolution seam for a code-review run (decision A2).
+    ``main`` calls it EXACTLY ONCE and threads the returned value to BOTH the
+    finding guard and :func:`enrich_code_review_context` (via its ``diff``
+    parameter), so the two consumers share one resolution and can never diverge
+    — there is no second ``git diff`` invocation per run. Resolution rules
     mirror :func:`_enrich`:
 
     * If *input_content* already contains a unified diff, it is returned verbatim.
@@ -536,7 +554,11 @@ def _assemble(
 
 
 def _enrich(
-    input_content: str, repo_root: str | None, base_ref: str, max_chars: int
+    input_content: str,
+    repo_root: str | None,
+    base_ref: str,
+    max_chars: int,
+    diff: str | None = None,
 ) -> tuple[str, str]:
     """Internal enrichment logic; may raise (caller wraps in try/except).
 
@@ -545,6 +567,10 @@ def _enrich(
         repo_root: Optional path to the git repository root.
         base_ref: The base git ref to diff against.
         max_chars: Maximum characters for the enriched output.
+        diff: Pre-resolved review diff (A2 single source) or ``None`` to resolve
+            internally. ``None`` is the sentinel for "not provided"; any ``str``
+            (including ``""``) is consumed verbatim without calling
+            :func:`resolve_diff` again.
 
     Returns:
         A tuple of (content, note).
@@ -554,13 +580,14 @@ def _enrich(
         return input_content, "enrichment skipped (not a git repo)"
     if not _tree_is_clean(root):
         return input_content, "enrichment skipped (working tree not clean: uncommitted changes)"
-    # Resolve the diff via the shared seam so enrichment and the finding guard
-    # see the same diff (A2). The repo/clean gates above are kept for their
-    # distinct skip notes; past them, ``resolve_diff`` is byte-for-byte
-    # equivalent to the prior ``input_content if _contains_diff(...) else
-    # _git_diff(...)`` expression (it returns "" rather than None for an empty
-    # diff, which the ``not diff_text`` guard below treats identically).
-    diff_text = resolve_diff(input_content, root, base_ref)
+    # A2 single source: consume the diff ``main`` already resolved (shared with
+    # the finding guard) so the two can never diverge and ``git diff`` runs only
+    # once per run. ``None`` is the sentinel for "not provided" — only then do we
+    # resolve internally via the shared seam, preserving standalone callability.
+    # A pre-resolved ``str`` (including ``""``) is used verbatim; ``""`` means
+    # "no diff" and the ``not diff_text`` guard below treats it as a no-op,
+    # identical to an internally-resolved empty diff.
+    diff_text = resolve_diff(input_content, root, base_ref) if diff is None else diff
     if not diff_text:
         return input_content, "enrichment skipped (no diff context)"
     cache: dict[str, str | None] = {}
