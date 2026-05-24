@@ -293,3 +293,28 @@ class TestF3BasenameLineRangeCheck:
         detail = kept[0]["detail"]
         assert "[path unverified]" in detail
         assert "outside changed range" not in detail
+
+    def test_basename_match_when_finding_path_is_nested(self):
+        """A finding with a DIFFERENT directory prefix (file='tests/a.py') whose
+        basename uniquely matches the diff file (src/a.py) is still resolved via
+        basename on BOTH sides -> '[path unverified]', not hard-dropped."""
+        from finding_validation import validate_findings
+
+        vf, rg = self._ranges()
+        kept, dropped, annotated = validate_findings(
+            [
+                {
+                    "severity": "warning",
+                    "title": "x",
+                    "detail": "d",
+                    "file": "tests/a.py",
+                    "line": 11,
+                }
+            ],
+            vf,
+            rg,
+        )
+        assert dropped == 0 and annotated == 1 and len(kept) == 1
+        assert "[path unverified]" in kept[0]["detail"]
+        # line 11 is in src/a.py's changed range -> no outside-range marker.
+        assert "outside changed range" not in kept[0]["detail"]

@@ -4562,3 +4562,51 @@ class TestF4GuardObservability:
         assert "Same title" in pa["dropped_titles"], (
             "the dropped finding's title must appear even when a kept finding shares it"
         )
+
+    def test_guard_block_present_in_non_code_review_report(self, tmp_path, monkeypatch):
+        """F4 (loop-1): the 'guard' block is ALWAYS present in the saved report;
+        for design/analysis it is {'active': False}. Pins the always-present
+        contract so a future mode-guard cannot silently drop the field."""
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {}, "total_usd": 0.0},
+        )
+
+        created = {}
+
+        def fake_create(output_dir, run_root=None):
+            d = tmp_path / "magi-run-design-guard"
+            d.mkdir()
+            created["dir"] = str(d)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def fake_orch(*a, **k):
+            return {"agents": [_guard_agent([])], "consensus": {}}
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello"])
+
+        run_magi.main()
+
+        import json
+
+        with open(os.path.join(created["dir"], "magi-report.json"), encoding="utf-8") as fh:
+            saved = json.load(fh)
+        assert saved["guard"] == {"active": False}
