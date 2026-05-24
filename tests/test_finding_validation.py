@@ -231,3 +231,65 @@ class TestF2NonGitDiffParity:
         # Only the real file is recognized; 'phantom' must NOT become a file.
         assert valid_files(diff) == {"real.py"}
         assert "real.py" in parse_diff_ranges(diff)
+
+
+class TestF3BasenameLineRangeCheck:
+    """F3 (Caspar): a unique-basename match identifies the exact diff file, so
+    the line-range check must STILL run (instead of being skipped). A fabricated
+    line far outside the resolved file's changed range is then surfaced via the
+    ``[outside changed range]`` marker, narrowing the fabrication surface while
+    keeping the finding (recall preserved). _DIFF touches src/a.py at lines 11,12."""
+
+    def _ranges(self):
+        from finding_validation import parse_diff_ranges, valid_files
+
+        return valid_files(_DIFF), parse_diff_ranges(_DIFF)
+
+    def test_basename_match_with_line_outside_range_gets_both_markers(self):
+        """file='a.py' (unique basename for src/a.py), line=999 outside {11,12}
+        -> kept, annotated, BOTH '[path unverified]' and 'outside changed range'."""
+        from finding_validation import validate_findings
+
+        vf, rg = self._ranges()
+        kept, dropped, annotated = validate_findings(
+            [{"severity": "warning", "title": "x", "detail": "d", "file": "a.py", "line": 999}],
+            vf,
+            rg,
+        )
+        assert dropped == 0 and annotated == 1 and len(kept) == 1
+        detail = kept[0]["detail"]
+        assert "[path unverified]" in detail
+        assert "outside changed range" in detail, (
+            "unique-basename match must still run the line-range check (F3)"
+        )
+
+    def test_basename_match_with_line_inside_range_only_path_unverified(self):
+        """file='a.py', line=11 inside {11,12} -> '[path unverified]' only, no
+        outside-range marker (the line is valid for the resolved file)."""
+        from finding_validation import validate_findings
+
+        vf, rg = self._ranges()
+        kept, dropped, annotated = validate_findings(
+            [{"severity": "warning", "title": "x", "detail": "d", "file": "a.py", "line": 11}],
+            vf,
+            rg,
+        )
+        assert dropped == 0 and annotated == 1 and len(kept) == 1
+        detail = kept[0]["detail"]
+        assert "[path unverified]" in detail
+        assert "outside changed range" not in detail
+
+    def test_basename_match_without_line_only_path_unverified(self):
+        """file='a.py', no line -> '[path unverified]' only; nothing to range-check."""
+        from finding_validation import validate_findings
+
+        vf, rg = self._ranges()
+        kept, dropped, annotated = validate_findings(
+            [{"severity": "warning", "title": "x", "detail": "d", "file": "a.py"}],
+            vf,
+            rg,
+        )
+        assert dropped == 0 and annotated == 1 and len(kept) == 1
+        detail = kept[0]["detail"]
+        assert "[path unverified]" in detail
+        assert "outside changed range" not in detail
