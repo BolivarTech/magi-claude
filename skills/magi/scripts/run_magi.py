@@ -62,6 +62,7 @@ from temp_dirs import (  # noqa: E402
 )
 from review_context import enrich_code_review_context, resolve_diff  # noqa: E402
 from cost import aggregate_cost  # noqa: E402
+from input_size import WARN_INPUT_TOKENS, check_input_size  # noqa: E402
 from finding_validation import parse_diff_ranges, validate_findings  # noqa: E402
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
 
@@ -156,6 +157,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=512_000,
         help="Max chars of enriched code-review context (default: 512000)",
+    )
+    parser.add_argument(
+        "--warn-input-tokens",
+        type=int,
+        default=WARN_INPUT_TOKENS,
+        help=(
+            f"Warn when estimated input tokens exceed this value "
+            f"(default: {WARN_INPUT_TOKENS}). MAGI reviews the input whole; "
+            f"this is a detect-and-warn guard, not a hard limit."
+        ),
     )
     parser.set_defaults(show_status=True, enrich=True)
     args = parser.parse_args(argv)
@@ -884,6 +895,11 @@ def main() -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    # Input-size telemetry: estimate token footprint and flag oversized inputs.
+    # Pure/total — never raises. Runs after load so the enriched content is NOT
+    # measured here (enrichment happens below); we measure the raw user input.
+    est_tokens, oversize = check_input_size(input_content, args.warn_input_tokens)
+
     # A2: resolve the review diff ONCE (code-review only) and thread the same
     # value to BOTH the enrichment path and the finding guard so they can never
     # diverge. ``resolve_diff`` is TOTAL (returns "" on any failure); "" makes
@@ -1028,11 +1044,27 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    # Input-size telemetry: record the raw-input footprint in the report so the
+    # saved magi-report.json carries observable per-run size data (mirrors the
+    # ``cost`` block discipline: set BEFORE json.dump). ``est_tokens`` and
+    # ``oversize`` were computed right after _load_input_content above.
+    report["input_size"] = {
+        "chars": len(input_content),
+        "est_tokens": est_tokens,
+    }
+
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     print(f"\nFull report saved to: {report_path}")
     print(f"Cost: ${report['cost']['total_usd']:.4f} ({len(report['agents'])} agents)")
+    print(f"Input size: ~{est_tokens} tokens ({len(input_content)} chars)")
+    if oversize:
+        print(
+            f"[!] WARNING: input ~{est_tokens} tokens is very large; MAGI reviews it whole "
+            "(no map-reduce). Consider splitting into smaller PRs for sharper review.",
+            file=sys.stderr,
+        )
 
     if is_temp_dir:
         # Run completed: drop the liveness lock so this dir becomes
