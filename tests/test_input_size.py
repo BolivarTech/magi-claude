@@ -24,3 +24,20 @@ class TestInputSize:
 
         est, exceeds = check_input_size("x" * 400, threshold=100)  # ~100 tokens, not > 100
         assert est == 100 and exceeds is False
+
+    def test_estimate_tokens_counts_unicode_code_points_not_bytes(self):
+        """estimate_tokens uses len() which counts Unicode code points, not bytes.
+
+        A CJK character (e.g. U+4E2D, len() == 1) encodes as 3 bytes in UTF-8
+        but counts as a single code point for the heuristic.  400 CJK chars ->
+        400 // 4 == 100 estimated tokens (same as 400 ASCII chars).
+        """
+        from input_size import estimate_tokens
+
+        assert estimate_tokens("中" * 400) == 100
+
+    def test_warn_input_tokens_default_is_150000(self):
+        """Pin the WARN_INPUT_TOKENS constant so accidental changes are caught."""
+        from input_size import WARN_INPUT_TOKENS
+
+        assert WARN_INPUT_TOKENS == 150_000
