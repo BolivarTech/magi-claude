@@ -128,7 +128,13 @@ def _finding_key(f: dict[str, Any]) -> tuple[str, str]:
     """
     file = f.get("file")
     line = f.get("line")
-    if isinstance(file, str) and file and isinstance(line, int) and not isinstance(line, bool):
+    if (
+        isinstance(file, str)
+        and file
+        and isinstance(line, int)
+        and not isinstance(line, bool)
+        and line > 0
+    ):
         return ("id", generate_finding_id(file, line, f.get("category") or "other"))
     return ("title", _dedup_key(f["title"]))
 
