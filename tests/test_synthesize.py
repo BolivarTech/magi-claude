@@ -2385,6 +2385,76 @@ class TestDedupById:
         assert len(out["findings"]) == 1  # merged by normalized title (today's behavior)
         assert sorted(out["findings"][0]["sources"]) == ["balthasar", "melchior"]
 
+    @pytest.mark.parametrize("bad_line", [0, -1, -42])
+    def test_non_positive_line_falls_back_to_title_dedup(self, bad_line):
+        """A line <= 0 is not a valid 1-based location, so a finding carrying
+        one must NOT be treated as id-located: dedup falls back to the title
+        key. Aligns ``_finding_key`` with ``validate`` nulling ``line <= 0``.
+        Two same-file findings with line <= 0 and distinct titles must not
+        merge by id, and the kept findings must carry no location ``id``.
+        """
+        from synthesize import determine_consensus
+
+        a = self._agent(
+            "melchior",
+            [
+                {
+                    "severity": "warning",
+                    "title": "First Distinct Title",
+                    "detail": "d1",
+                    "file": "src/a.py",
+                    "line": bad_line,
+                    "category": "logic-error",
+                }
+            ],
+        )
+        b = self._agent(
+            "caspar",
+            [
+                {
+                    "severity": "warning",
+                    "title": "Second Distinct Title",
+                    "detail": "d2",
+                    "file": "src/a.py",
+                    "line": bad_line,
+                    "category": "logic-error",
+                }
+            ],
+        )
+        out = determine_consensus([a, b])
+        assert len(out["findings"]) == 2, (
+            "line <= 0 must not be treated as a location id; distinct titles must not merge"
+        )
+        assert all("id" not in f for f in out["findings"]), (
+            "non-positive-line findings must fall back to the title key (no location id)"
+        )
+
+    def test_same_title_with_non_positive_line_still_merges_by_title(self):
+        """Complement to the fallback pin: two agents reporting the SAME title
+        with line <= 0 (same file) still merge — via the title key, not a
+        location id. Confirms the line<=0 fallback routes to a working title
+        dedup, not to 'no dedup at all'.
+        """
+        from synthesize import determine_consensus
+
+        def fnd():
+            return {
+                "severity": "warning",
+                "title": "Shared Title",
+                "detail": "d",
+                "file": "src/a.py",
+                "line": 0,
+                "category": "logic-error",
+            }
+
+        a = self._agent("melchior", [fnd()])
+        b = self._agent("caspar", [fnd()])
+        out = determine_consensus([a, b])
+        assert len(out["findings"]) == 1, "same-title line<=0 findings must merge via the title key"
+        merged = out["findings"][0]
+        assert sorted(merged["sources"]) == ["caspar", "melchior"]
+        assert "id" not in merged, "a title-key merge must not attach a location id"
+
 
 # ---------------------------------------------------------------------------
 # TestAgentPromptsDocumentOptionalFindingFields
