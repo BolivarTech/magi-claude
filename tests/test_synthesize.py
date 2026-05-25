@@ -2429,6 +2429,32 @@ class TestDedupById:
             "non-positive-line findings must fall back to the title key (no location id)"
         )
 
+    def test_same_title_with_non_positive_line_still_merges_by_title(self):
+        """Complement to the fallback pin: two agents reporting the SAME title
+        with line <= 0 (same file) still merge — via the title key, not a
+        location id. Confirms the line<=0 fallback routes to a working title
+        dedup, not to 'no dedup at all'.
+        """
+        from synthesize import determine_consensus
+
+        def fnd():
+            return {
+                "severity": "warning",
+                "title": "Shared Title",
+                "detail": "d",
+                "file": "src/a.py",
+                "line": 0,
+                "category": "logic-error",
+            }
+
+        a = self._agent("melchior", [fnd()])
+        b = self._agent("caspar", [fnd()])
+        out = determine_consensus([a, b])
+        assert len(out["findings"]) == 1, "same-title line<=0 findings must merge via the title key"
+        merged = out["findings"][0]
+        assert sorted(merged["sources"]) == ["caspar", "melchior"]
+        assert "id" not in merged, "a title-key merge must not attach a location id"
+
 
 # ---------------------------------------------------------------------------
 # TestAgentPromptsDocumentOptionalFindingFields
