@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.1.1
-# Date: 2026-04-17
+# Version: 2.1.2
+# Date: 2026-05-24
 """MAGI consensus engine.
 
 Applies weight-based scoring to agent verdicts and produces a unified
@@ -119,12 +119,17 @@ def _format_consensus_label(
 def _finding_key(f: dict[str, Any]) -> tuple[str, str]:
     """Return the dedup key for *f*.
 
-    When the finding carries a concrete location (``file`` + integer
-    ``line``), the key is the title-independent finding id
+    When the finding carries a concrete location (``file`` + a *positive*
+    integer ``line``), the key is the title-independent finding id
     (``("id", <hash>)``) so two agents describing the same defect with
     different wording merge. Otherwise (design/analysis findings, or
     code-review findings the agent did not locate) it falls back to the
     normalized title key (``("title", <key>)``) — today's behavior.
+
+    The ``line > 0`` guard mirrors ``validate.load_agent_output`` nulling a
+    non-positive line: a line <= 0 is not a valid 1-based location, so it
+    must not produce a location id. This keeps the predicate correct on its
+    own terms rather than relying on the upstream validation contract.
     """
     file = f.get("file")
     line = f.get("line")
