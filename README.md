@@ -1,6 +1,6 @@
 # MAGI — Multi-Perspective Analysis Plugin for Claude Code
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-109%20passing-brightgreen.svg)](#running-tests)
 [![Ruff](https://img.shields.io/badge/linter-ruff-orange.svg)](https://docs.astral.sh/ruff/)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -284,7 +284,7 @@ tests/
   test_run_magi.py            -- 16 tests: arg parsing, model flag, orchestration, validation
 docs/
   MAGI-System-Documentation.md  -- Full technical reference (Spanish)
-pyproject.toml                -- Python >= 3.9, dual license, dev deps, tool config
+pyproject.toml                -- Python >= 3.12, dual license, dev deps, tool config
 conftest.py                   -- tdd-guard pytest plugin + sys.path setup
 Makefile                      -- verify, test, lint, format, typecheck targets
 ```
@@ -331,7 +331,7 @@ make typecheck   # mypy
 | Component | Required | Notes |
 |-----------|----------|-------|
 | Claude Code CLI (`claude -p`) | For parallel mode | Fallback available without it |
-| Python 3.9+ | Yes | Uses `asyncio`, `dict[str, Any]` syntax |
+| Python 3.12+ | Yes | Uses `asyncio`, `dict[str, Any]` syntax |
 
 ### Dev Dependencies
 
