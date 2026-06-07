@@ -10,7 +10,7 @@
 
 MAGI no es generación de código: es **juicio en ensemble** — tres perspectivas
 (Melchior/Balthasar/Caspar) que analizan lo mismo y votan por mayoría. Eso cambia
-el cálculo costo-vs-token frente al coding (ver `docs/ollama-magi-cost-analysis.md`):
+el cálculo costo-vs-token frente al coding:
 
 - **Costo:** un ciclo de MAGI ingiere spec+plan+diff ×3 agentes + razonamiento +
   síntesis (~150–250k tokens), y se itera como gate recurrente. Es el patrón donde
@@ -143,7 +143,6 @@ Máximo usa tags `:cloud` (sin descarga de pesos, requiere `ollama signin`).
 
 ## 5. Referencias
 
-- Rationale completo: `docs/ollama-magi-cost-analysis.md`
 - Implementación: `skills/magi/scripts/ollama_backend.py`, `ollama_config.py`,
   `ollama_preflight.py`, `ollama_init.py`, `backend.py`, `claude_backend.py`,
   `agent_schema.py`.
