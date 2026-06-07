@@ -55,6 +55,10 @@ def test_missing_model_aborts_with_name(monkeypatch):
 
 
 def test_cloud_tags_no_signin_emits_signin_hint(monkeypatch):  # BDD-27
+    """The signin-specific branch fires when ALL trio tags are cloud-tagged
+    (including -cloud variants like gpt-oss:120b-cloud) and NO cloud model
+    is available. Asserts text UNIQUE to that branch, not shared with the
+    generic message."""
     cfg = OllamaConfig(
         base_url="http://h:11434/v1",
         api_key=None,
@@ -67,7 +71,37 @@ def test_cloud_tags_no_signin_emits_signin_hint(monkeypatch):  # BDD-27
     _patch(monkeypatch, body=_models_body(["llama3:8b", "qwen3:8b"]))  # none :cloud
     with pytest.raises(OllamaPreflightError) as ei:
         preflight(cfg)
-    assert "signin" in str(ei.value).lower()
+    # "No :cloud models available" is ONLY in the signin branch, NOT in the
+    # generic "Missing models" message — this distinguishes the two branches.
+    assert "No :cloud models available" in str(ei.value)
+
+
+def test_generic_missing_model_fires_when_some_cloud_available(monkeypatch):
+    """Regression: the GENERIC message (not signin) fires when the daemon DOES
+    expose some cloud model but a specific trio tag is still absent.
+
+    Scenario: balthsar's tag 'new-model:cloud' is missing from the daemon, but
+    the daemon lists 'glm-5:cloud' and 'deepseek-v4-pro:cloud'. Since not ALL
+    cloud models are absent (none_cloud_available=False), the cloud-no-signin
+    diagnostic must NOT fire; the generic "Missing models" branch must fire.
+    """
+    cfg = OllamaConfig(
+        base_url="http://h:11434/v1",
+        api_key=None,
+        models={
+            "melchior": "glm-5:cloud",
+            "balthasar": "new-model:cloud",
+            "caspar": "deepseek-v4-pro:cloud",
+        },
+    )
+    # Daemon lists two of the three — new-model:cloud is missing, but cloud IS available.
+    _patch(monkeypatch, body=_models_body(["glm-5:cloud", "deepseek-v4-pro:cloud"]))
+    with pytest.raises(OllamaPreflightError) as ei:
+        preflight(cfg)
+    msg = str(ei.value)
+    # Generic branch fires: "Missing models" present, signin-specific branch text absent.
+    assert "Missing models" in msg
+    assert "No :cloud models available" not in msg
 
 
 def test_unreachable_aborts(monkeypatch):
