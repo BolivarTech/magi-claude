@@ -154,9 +154,9 @@ def resolve_config(
     # base_url (presence-based; R17 — MAGI-specific env present wins; empty host = skip)
     if env.get("MAGI_OLLAMA_HOST"):
         raw_host = env["MAGI_OLLAMA_HOST"]
-    elif r.get("base_url") is not None:
+    elif r.get("base_url"):
         raw_host = r["base_url"]
-    elif g.get("base_url") is not None:
+    elif g.get("base_url"):
         raw_host = g["base_url"]
     elif env.get("OLLAMA_HOST"):
         raw_host = env["OLLAMA_HOST"]
