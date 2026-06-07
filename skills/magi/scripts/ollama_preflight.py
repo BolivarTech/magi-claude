@@ -3,6 +3,7 @@
 # Version: 1.0.0
 # Date: 2026-06-06
 """Fail-fast preflight for the Ollama backend (reachability + model presence)."""
+
 from __future__ import annotations
 
 import json
@@ -44,8 +45,11 @@ def preflight(config: OllamaConfig) -> None:
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             raise OllamaPreflightError(
-                _redact(f"Auth failed ({exc.code}) for {config.base_url}; "
-                        "check api_key / `ollama signin`.", config.api_key)
+                _redact(
+                    f"Auth failed ({exc.code}) for {config.base_url}; "
+                    "check api_key / `ollama signin`.",
+                    config.api_key,
+                )
             ) from None
         if exc.code in (404, 501):
             print(

@@ -8,13 +8,19 @@ from ollama_preflight import preflight, OllamaPreflightError, PREFLIGHT_TIMEOUT
 
 
 class _Resp(io.BytesIO):
-    def __enter__(self): return self
-    def __exit__(self, *a): self.close()
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
 
 
 def _cfg(api_key=None):
-    return OllamaConfig(base_url="http://h:11434/v1", api_key=api_key,
-                        models={"melchior": "m", "balthasar": "b", "caspar": "c"})
+    return OllamaConfig(
+        base_url="http://h:11434/v1",
+        api_key=api_key,
+        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+    )
 
 
 def _models_body(ids):
@@ -23,11 +29,13 @@ def _models_body(ids):
 
 def _patch(monkeypatch, *, body=None, exc=None):
     cap = {}
+
     def fake_urlopen(req, timeout=None):
         cap["url"], cap["timeout"] = req.full_url, timeout
         if exc is not None:
             raise exc
         return _Resp(body)
+
     monkeypatch.setattr("ollama_preflight.urllib.request.urlopen", fake_urlopen)
     return cap
 
@@ -47,9 +55,15 @@ def test_missing_model_aborts_with_name(monkeypatch):
 
 
 def test_cloud_tags_no_signin_emits_signin_hint(monkeypatch):  # BDD-27
-    cfg = OllamaConfig(base_url="http://h:11434/v1", api_key=None,
-                       models={"melchior": "glm-5:cloud", "balthasar": "gpt-oss:120b-cloud",
-                               "caspar": "deepseek-v4-pro:cloud"})
+    cfg = OllamaConfig(
+        base_url="http://h:11434/v1",
+        api_key=None,
+        models={
+            "melchior": "glm-5:cloud",
+            "balthasar": "gpt-oss:120b-cloud",
+            "caspar": "deepseek-v4-pro:cloud",
+        },
+    )
     _patch(monkeypatch, body=_models_body(["llama3:8b", "qwen3:8b"]))  # none :cloud
     with pytest.raises(OllamaPreflightError) as ei:
         preflight(cfg)
