@@ -141,7 +141,12 @@ class OllamaBackend(AgentBackend):
             body = await asyncio.to_thread(self._call, req2, timeout)
         try:
             envelope = json.loads(body)
-            content = str(envelope["choices"][0]["message"]["content"])
+            content = envelope["choices"][0]["message"]["content"]
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
             raise ValueError(f"Unexpected OpenAI-compatible response shape: {exc}") from exc
-        return content.encode("utf-8")
+        # R-B: some OpenAI-compatible servers decode message.content into a
+        # dict before serializing the response.  str(dict) produces a Python
+        # repr (single-quoted), which is not valid JSON.  Serialize dicts with
+        # json.dumps; leave strings as-is.
+        text = json.dumps(content) if isinstance(content, dict) else str(content)
+        return text.encode("utf-8")
