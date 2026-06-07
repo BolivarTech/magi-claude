@@ -166,6 +166,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"MAGI reviews the input whole; detect-and-warn only, not a hard limit."
         ),
     )
+    parser.add_argument(
+        "--ollama",
+        action="store_true",
+        help="Use the OpenAI-compatible Ollama backend instead of `claude -p`.",
+    )
+    parser.add_argument(
+        "--ollama-init",
+        action="store_true",
+        help="Scaffold ./.claude/magi-ollama.toml from defaults and exit.",
+    )
     parser.set_defaults(show_status=True, enrich=True)
     args = parser.parse_args(argv)
     # ``--keep-runs 0`` is ambiguous: a naive reading is "keep nothing"
@@ -182,13 +192,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.warn_input_tokens <= 0:
         parser.error("--warn-input-tokens must be a positive integer")
-    # Per-mode default model resolution (2.2.3). ``argparse`` cannot express
-    # "default depends on another arg" cleanly, so we resolve here. The mode
-    # has already been validated by ``choices=VALID_MODES`` above, so the
-    # ``MODE_DEFAULT_MODELS`` lookup is total — no KeyError path is reachable
-    # while VALID_MODES and MODE_DEFAULT_MODELS stay in lockstep (a guarantee
-    # the test suite pins).
-    if args.model is None:
+    if args.ollama and args.model is not None:
+        parser.error(
+            "--model does not apply with --ollama; per-mage models are "
+            "configured in magi-ollama.toml / MAGI_OLLAMA_MODEL_*."
+        )
+    # INVARIANT: --model must stay None when --ollama is set. Do NOT collapse
+    # this into `args.model or MODE_DEFAULT_MODELS[...]` — that would silently
+    # re-enable `--ollama --model` and feed Ollama a Claude-shaped model name.
+    if not args.ollama and args.model is None:
         args.model = MODE_DEFAULT_MODELS[args.mode]
     return args
 
