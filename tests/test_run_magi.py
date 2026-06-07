@@ -4797,7 +4797,7 @@ def test_resolve_config_called_once_in_select_backend(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _make_ollama_cfg() -> "OllamaConfig":
+def _make_ollama_cfg():  # type: ignore[return]  # OllamaConfig imported lazily
     """Return a minimal OllamaConfig for T10 tests."""
     from ollama_config import OllamaConfig
 
@@ -4844,9 +4844,7 @@ def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
     """--ollama must not abort when 'claude' is absent from PATH."""
     import run_magi
 
-    monkeypatch.setattr(
-        sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"]
-    )
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
     monkeypatch.setattr(run_magi.shutil, "which", lambda _: None)  # claude absent
     monkeypatch.setattr(run_magi, "resolve_config", lambda **k: _make_ollama_cfg())
     monkeypatch.setattr(run_magi, "preflight", lambda c: None)
