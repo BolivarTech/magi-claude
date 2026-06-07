@@ -166,6 +166,27 @@ def test_bdd7_localhost_cloud_tag_no_key_no_auth(monkeypatch, tmp_path):  # BDD-
     assert cap["req"].full_url == "http://localhost:11434/v1/chat/completions"
 
 
+def test_dict_content_serialized_as_valid_json(monkeypatch, tmp_path):  # Finding B
+    """When message.content is already a decoded dict, the backend must return
+    valid UTF-8 JSON bytes — not a Python repr string."""
+    dict_content = {
+        "agent": "melchior",
+        "verdict": "approve",
+        "confidence": 0.8,
+        "summary": "s",
+        "reasoning": "r",
+        "findings": [],
+        "recommendation": "go",
+    }
+    body = json.dumps({"choices": [{"message": {"content": dict_content}}]}).encode()
+    _backend_with(monkeypatch, body=body)
+    raw = _run(_cfg(), tmp_path)
+    # Must round-trip to a dict identical to dict_content.
+    parsed = json.loads(raw)
+    assert parsed["agent"] == dict_content["agent"]
+    assert parsed["verdict"] == dict_content["verdict"]
+
+
 def test_roundtrip_bare_content_parses(monkeypatch, tmp_path):  # BDD-29
     _backend_with(monkeypatch)
     raw = _run(_cfg(), tmp_path)
