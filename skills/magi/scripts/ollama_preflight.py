@@ -22,6 +22,23 @@ class OllamaPreflightError(ValidationError):
     """Raised when the Ollama host is unreachable or a trio model is missing."""
 
 
+def _is_cloud_tag(tag: str) -> bool:
+    """True for Ollama cloud tags, whose suffix is exactly ':cloud' or '-cloud'.
+
+    Covers ``:cloud`` (e.g. ``glm-5:cloud``) and ``-cloud`` variants
+    (e.g. ``gpt-oss:120b-cloud``) that Ollama uses for subscription-gated
+    cloud models. Tags whose variant merely contains ``cloud`` as a substring
+    (e.g. ``foo:precloud``) are NOT matched.
+
+    Args:
+        tag: A full Ollama model tag string (e.g. ``"gpt-oss:120b-cloud"``).
+
+    Returns:
+        ``True`` if *tag* ends with ``":cloud"`` or ``"-cloud"``, ``False`` otherwise.
+    """
+    return tag.endswith((":cloud", "-cloud"))
+
+
 def _redact(text: str, api_key: str | None) -> str:
     return text.replace(api_key, "***") if api_key else text
 
@@ -73,8 +90,8 @@ def preflight(config: OllamaConfig) -> None:
         # Cloud-no-signin diagnostic (BDD-27 / F-B): when the whole trio is
         # :cloud-tagged but the daemon lists NO :cloud model, the likely cause
         # is a missing `ollama signin` — surface that as the primary hint.
-        all_cloud = all(tag.endswith(":cloud") for tag in config.models.values())
-        none_cloud_available = not any(str(m).endswith(":cloud") for m in available)
+        all_cloud = all(_is_cloud_tag(tag) for tag in config.models.values())
+        none_cloud_available = not any(_is_cloud_tag(str(m)) for m in available)
         if all_cloud and none_cloud_available:
             raise OllamaPreflightError(
                 f"No :cloud models available on {config.base_url} (the trio is all :cloud). "

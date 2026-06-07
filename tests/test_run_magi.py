@@ -3968,6 +3968,81 @@ class TestFindingGuardWiring:
             f"Zero-cost warning must NOT appear when cost > 0; got:\n{err!r}"
         )
 
+    def test_ollama_zero_cost_warning_not_emitted(self, tmp_path, monkeypatch):
+        """BUG 2: on --ollama runs aggregate_cost always returns $0.00 (no
+        total_cost_usd in Ollama responses). The spurious WARNING must be
+        suppressed — $0 is correct for Ollama and the message is misleading."""
+        import io
+
+        import run_magi
+        from ollama_backend import OllamaBackend
+        from ollama_config import OllamaConfig
+
+        monkeypatch.setattr(run_magi, "_enable_utf8_console_io", lambda: None)
+        monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
+        monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
+        monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+        monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+        monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
+        monkeypatch.setattr(run_magi, "cleanup_old_runs", lambda keep, run_root=None: None)
+        monkeypatch.setattr(run_magi, "write_lock", lambda d, max_age_seconds=None: None)
+        monkeypatch.setattr(run_magi, "remove_lock", lambda d: None)
+        # Ollama runs always aggregate to $0.00 (no total_cost_usd field).
+        monkeypatch.setattr(
+            run_magi,
+            "aggregate_cost",
+            lambda output_dir, agents: {"per_agent": {}, "total_usd": 0.0},
+        )
+
+        cfg = OllamaConfig(
+            base_url="http://h:11434/v1",
+            api_key=None,
+            models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+        )
+        ollama_backend = OllamaBackend(cfg)
+        monkeypatch.setattr(
+            run_magi,
+            "select_backend",
+            lambda args: (ollama_backend, {"melchior": "m", "balthasar": "b", "caspar": "c"}),
+        )
+
+        def fake_create(output_dir: object, run_root: object = None) -> str:
+            d = tmp_path / "magi-run-ollama-cost"
+            d.mkdir(exist_ok=True)
+            return str(d)
+
+        monkeypatch.setattr(run_magi, "create_output_dir", fake_create)
+
+        async def fake_orch(*a: object, **k: object) -> dict[str, Any]:
+            return {
+                "agents": [
+                    {
+                        "agent": "melchior",
+                        "verdict": "approve",
+                        "confidence": 0.9,
+                        "summary": "s",
+                        "reasoning": "r",
+                        "recommendation": "rec",
+                        "findings": [],
+                    }
+                ],
+                "consensus": {},
+            }
+
+        monkeypatch.setattr(run_magi, "run_orchestrator", fake_orch)
+        monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama"])
+
+        buf: io.StringIO = io.StringIO()
+        with monkeypatch.context() as mp:
+            mp.setattr(sys, "stderr", buf)
+            run_magi.main()
+        err = buf.getvalue()
+        assert "$0.00" not in err, (
+            f"Spurious zero-cost WARNING must not appear on --ollama runs; got:\n{err!r}"
+        )
+
     def test_e2e_fabricated_finding_dropped_score_unchanged(self, tmp_path, monkeypatch):
         """FIX 5 (coverage pin): end-to-end BDD-14 invariant through main().
 
