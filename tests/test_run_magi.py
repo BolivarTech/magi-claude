@@ -4648,3 +4648,103 @@ def test_non_ollama_still_resolves_default_model():
 
     args = parse_args(["code-review", "x"])
     assert args.model == "opus"  # unchanged behavior
+
+
+# ---------------------------------------------------------------------------
+# Task 9: select_backend factory + back-compat run_orchestrator (BDD-1,2,3)
+# ---------------------------------------------------------------------------
+
+
+def test_select_backend_claude_default():
+    from run_magi import parse_args, select_backend
+    from claude_backend import ClaudeBackend
+
+    args = parse_args(["design", "x"])
+    backend, agent_models = select_backend(args)
+    assert isinstance(backend, ClaudeBackend)
+    assert set(agent_models.values()) == {"opus"}
+
+
+def test_select_backend_ollama_uses_trio(monkeypatch):
+    from run_magi import parse_args, select_backend
+    import run_magi
+    from ollama_backend import OllamaBackend
+    from ollama_config import OllamaConfig
+
+    cfg = OllamaConfig(
+        base_url="http://h/v1",
+        api_key=None,
+        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+    )
+    monkeypatch.setattr(run_magi, "resolve_config", lambda **k: cfg)
+    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+    args = parse_args(["design", "x", "--ollama"])
+    backend, agent_models = select_backend(args)
+    assert isinstance(backend, OllamaBackend)
+    assert agent_models == {"melchior": "m", "balthasar": "b", "caspar": "c"}
+
+
+def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
+    """run_orchestrator threads per-agent models to launch_agent via backend."""
+    import asyncio
+    from run_magi import run_orchestrator
+
+    seen: dict[str, str] = {}
+
+    class FakeBackend:
+        async def run(
+            self,
+            name: str,
+            sp: str,
+            prompt: str,
+            model: str,
+            timeout: int,
+            out: str,
+        ) -> bytes:
+            seen[name] = model
+            return (
+                b'{"agent":"' + name.encode() + b'",'
+                b'"verdict":"approve","confidence":0.5,'
+                b'"summary":"s","reasoning":"r","findings":[],'
+                b'"recommendation":"ok"}'
+            )
+
+    for a in ("melchior", "balthasar", "caspar"):
+        (tmp_path / f"{a}.md").write_text("S", encoding="utf-8")
+
+    asyncio.run(
+        run_orchestrator(
+            str(tmp_path),
+            "P",
+            str(tmp_path),
+            900,
+            agent_models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+            backend=FakeBackend(),
+            show_status=False,
+        )
+    )
+    assert seen == {"melchior": "m", "balthasar": "b", "caspar": "c"}
+
+
+def test_resolve_config_called_once_in_select_backend(monkeypatch):
+    """F-M invariant: resolve_config is called exactly once in select_backend."""
+    from run_magi import parse_args, select_backend
+    import run_magi
+    from ollama_config import OllamaConfig
+
+    call_count = 0
+
+    def counting_resolve(**k: object) -> OllamaConfig:
+        nonlocal call_count
+        call_count += 1
+        return OllamaConfig(
+            base_url="http://h/v1",
+            api_key=None,
+            models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+        )
+
+    monkeypatch.setattr(run_magi, "resolve_config", counting_resolve)
+    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+    args = parse_args(["design", "x", "--ollama"])
+    select_backend(args)
+    assert call_count == 1
