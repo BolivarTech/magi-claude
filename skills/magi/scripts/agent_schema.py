@@ -7,6 +7,7 @@
 Consumed by ``ollama_backend`` for ``response_format`` (structured output).
 MUST stay in lockstep with ``validate.py`` — ``test_agent_schema.py`` pins it.
 """
+
 from __future__ import annotations
 
 from typing import Any

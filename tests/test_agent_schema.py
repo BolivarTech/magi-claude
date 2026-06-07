@@ -1,4 +1,5 @@
 """Pin AGENT_OUTPUT_JSON_SCHEMA in lockstep with validate.py's contract."""
+
 from agent_schema import AGENT_OUTPUT_JSON_SCHEMA
 import validate
 
