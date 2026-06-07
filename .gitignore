@@ -15,6 +15,7 @@ CLAUDE.md
 CLAUDE.local.md
 CLAUDE.techdebt.md
 CLAUDE.changelog.md
+graphify-out
 
 # Local audit / handoff workspaces — produced during development, not part
 # of the shipped plugin. Each release leaves bundles under magi-audit-*/
