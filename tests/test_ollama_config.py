@@ -125,3 +125,14 @@ def test_ollama_config_structured_default_is_schema():
         models=dict(DEFAULT_MODELS),
     )
     assert cfg.structured == "schema"
+
+
+def test_empty_base_url_in_toml_falls_through_to_default(tmp_path):
+    """An empty base_url in a TOML file must be treated as unset (fall through).
+
+    BDD: Given a repo TOML with base_url="", When resolve_config is called,
+    Then cfg.base_url equals DEFAULT_BASE_URL, NOT the malformed "http:///v1".
+    """
+    r = _write(tmp_path / "r.toml", 'base_url=""\n')
+    cfg = resolve_config(global_path="/nope.toml", repo_path=r, env={})
+    assert cfg.base_url == DEFAULT_BASE_URL
