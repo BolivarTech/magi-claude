@@ -73,6 +73,27 @@ outputs, and runs synthesis automatically:
 
 Pass `--model sonnet` or `--model haiku` to override the default.
 
+**Ollama backend (opt-in, parallel mode only):** If the user requests Ollama
+(e.g. `/magi --ollama`, "use ollama", "con ollama"), pass `--ollama` to run the
+three magi against an **OpenAI-compatible Ollama server** (local, LAN, or cloud)
+instead of `claude -p`, with a **distinct model per mage** for genuine
+cross-lineage diversity:
+
+    python skills/magi/scripts/run_magi.py <mode> <input_file_or_text> --ollama [--timeout 900]
+
+- `--ollama` is **mutually exclusive** with `--model` (per-mage models come from
+  config, not the CLI — passing both errors out).
+- Host, API key, and the per-mage model trio resolve in layers: env
+  (`MAGI_OLLAMA_HOST` / `MAGI_OLLAMA_API_KEY` / `MAGI_OLLAMA_MODEL_<MAGE>` /
+  `MAGI_OLLAMA_STRUCTURED`) > repo `./.claude/magi-ollama.toml` > global
+  `~/.claude/magi-ollama.toml` > built-in defaults (cloud trio). `OLLAMA_HOST` /
+  `OLLAMA_API_KEY` act as generic fallbacks below the files.
+- Run `python skills/magi/scripts/run_magi.py --ollama-init` to scaffold a
+  starter `./.claude/magi-ollama.toml` (refuses to overwrite an existing one).
+- A fail-fast **preflight** checks the host is reachable and the trio is
+  available before launching; cloud models (`:cloud` tags) require `ollama signin`
+  on the local daemon (no weight download) or an `api_key` for the direct cloud API.
+
 The orchestrator handles everything: agent launching, output parsing, schema validation,
 failure alerting, consensus synthesis, and report generation. No additional steps needed.
 
