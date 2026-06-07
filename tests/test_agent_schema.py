@@ -31,5 +31,8 @@ def test_schema_confidence_is_bounded_number():
 
 
 def test_schema_finding_core_keys_required():
+    # Must be exactly the 3 core keys — file/line/category are optional/nullable
+    # and must NOT appear in required (aligns schema with strict:false backend
+    # and validate.py's _REQUIRED_FINDING_KEYS).
     items = AGENT_OUTPUT_JSON_SCHEMA["properties"]["findings"]["items"]
-    assert set(validate._REQUIRED_FINDING_KEYS).issubset(set(items["required"]))
+    assert set(items["required"]) == set(validate._REQUIRED_FINDING_KEYS)
