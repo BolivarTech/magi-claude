@@ -46,6 +46,13 @@ For trivial questions with one clear answer, the complexity gate skips the full 
 
 For the full technical reference, see [`docs/MAGI-System-Documentation.md`](docs/MAGI-System-Documentation.md).
 
+**New in v4.0.0 — Ollama backend (opt-in):** run the MAGI *gate* on local/LAN/cloud
+open-weight models with genuine cross-lineage diversity (a distinct model per mage),
+without changing the default Claude path. Quick start: `/magi --ollama` (or
+`run_magi.py ... --ollama`); `--ollama-init` scaffolds the config. Full guide —
+rationale, configuration, default models, and recommended hardware tiers — in
+[`docs/ollama-backend.md`](docs/ollama-backend.md).
+
 ---
 
 ## Agents
@@ -121,7 +128,9 @@ python skills/magi/scripts/run_magi.py <mode> <file_or_text> [--model opus] [--t
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model` | `opus` | LLM model for all agents (`opus`, `sonnet`, `haiku`) |
+| `--model` | `opus` | LLM model for all agents (`opus`, `sonnet`, `haiku`) — Claude backend |
+| `--ollama` | off | Use the OpenAI-compatible **Ollama** backend (distinct model per mage) instead of `claude -p`. Mutually exclusive with `--model`. See [`docs/ollama-backend.md`](docs/ollama-backend.md) |
+| `--ollama-init` | — | Scaffold `./.claude/magi-ollama.toml` from defaults and exit |
 | `--timeout` | `300` | Per-agent timeout in seconds |
 | `--output-dir` | auto | Directory for agent outputs (default: temp dir) |
 
