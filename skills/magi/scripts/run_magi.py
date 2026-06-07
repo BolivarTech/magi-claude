@@ -256,9 +256,7 @@ async def launch_agent(
     with open(prompt_file, "w", encoding="utf-8") as f:
         f.write(prompt)
 
-    stdout = await backend.run(
-        agent_name, system_prompt_file, prompt, model, timeout, output_dir
-    )
+    stdout = await backend.run(agent_name, system_prompt_file, prompt, model, timeout, output_dir)
 
     with open(raw_file, "wb") as f:
         f.write(stdout)

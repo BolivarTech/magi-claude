@@ -3,6 +3,7 @@
 # Version: 1.0.0
 # Date: 2026-06-06
 """Claude CLI backend: shells out to `claude -p` (default MAGI behavior)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -71,7 +72,9 @@ class ClaudeBackend(AgentBackend):
             )
 
         if proc.returncode != 0:
-            stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else "no stderr"
+            stderr_text = (
+                stderr.decode("utf-8", errors="replace").strip() if stderr else "no stderr"
+            )
             raise RuntimeError(
                 f"Agent '{agent_name}' exited with code {proc.returncode}: {stderr_text}"
             )
