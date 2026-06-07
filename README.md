@@ -1,6 +1,6 @@
 # MAGI — Multi-Perspective Analysis Plugin for Claude Code
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-109%20passing-brightgreen.svg)](#running-tests)
 [![Ruff](https://img.shields.io/badge/linter-ruff-orange.svg)](https://docs.astral.sh/ruff/)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -45,6 +45,13 @@ For trivial questions with one clear answer, the complexity gate skips the full 
 ## Documentation
 
 For the full technical reference, see [`docs/MAGI-System-Documentation.md`](docs/MAGI-System-Documentation.md).
+
+**New in v4.0.0 — Ollama backend (opt-in):** run the MAGI *gate* on local/LAN/cloud
+open-weight models with genuine cross-lineage diversity (a distinct model per mage),
+without changing the default Claude path. Quick start: `/magi --ollama` (or
+`run_magi.py ... --ollama`); `--ollama-init` scaffolds the config. Full guide —
+rationale, configuration, default models, and recommended hardware tiers — in
+[`docs/ollama-backend.md`](docs/ollama-backend.md).
 
 ---
 
@@ -121,7 +128,9 @@ python skills/magi/scripts/run_magi.py <mode> <file_or_text> [--model opus] [--t
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model` | `opus` | LLM model for all agents (`opus`, `sonnet`, `haiku`) |
+| `--model` | `opus` | LLM model for all agents (`opus`, `sonnet`, `haiku`) — Claude backend |
+| `--ollama` | off | Use the OpenAI-compatible **Ollama** backend (distinct model per mage) instead of `claude -p`. Mutually exclusive with `--model`. See [`docs/ollama-backend.md`](docs/ollama-backend.md) |
+| `--ollama-init` | — | Scaffold `./.claude/magi-ollama.toml` from defaults and exit |
 | `--timeout` | `300` | Per-agent timeout in seconds |
 | `--output-dir` | auto | Directory for agent outputs (default: temp dir) |
 
@@ -284,7 +293,7 @@ tests/
   test_run_magi.py            -- 16 tests: arg parsing, model flag, orchestration, validation
 docs/
   MAGI-System-Documentation.md  -- Full technical reference (Spanish)
-pyproject.toml                -- Python >= 3.9, dual license, dev deps, tool config
+pyproject.toml                -- Python >= 3.12, dual license, dev deps, tool config
 conftest.py                   -- tdd-guard pytest plugin + sys.path setup
 Makefile                      -- verify, test, lint, format, typecheck targets
 ```
@@ -331,7 +340,7 @@ make typecheck   # mypy
 | Component | Required | Notes |
 |-----------|----------|-------|
 | Claude Code CLI (`claude -p`) | For parallel mode | Fallback available without it |
-| Python 3.9+ | Yes | Uses `asyncio`, `dict[str, Any]` syntax |
+| Python 3.12+ | Yes | Uses `asyncio`, `dict[str, Any]` syntax |
 
 ### Dev Dependencies
 

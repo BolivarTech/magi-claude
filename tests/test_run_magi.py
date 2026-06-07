@@ -276,7 +276,9 @@ class TestRunOrchestrator:
                 "recommendation": "Merge",
             }
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             return agent_results[agent_name]
 
         with patch("run_magi.launch_agent", side_effect=mock_launch):
@@ -294,7 +296,9 @@ class TestRunOrchestrator:
     async def test_one_agent_fails_degraded_mode(self, tmp_path):
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name == "caspar":
                 raise TimeoutError(f"Agent {agent_name} timed out")
             return {
@@ -322,7 +326,9 @@ class TestRunOrchestrator:
     async def test_all_agents_fail_raises(self, tmp_path):
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             raise TimeoutError(f"Agent {agent_name} timed out")
 
         with patch("run_magi.launch_agent", side_effect=mock_launch):
@@ -341,7 +347,9 @@ class TestRunOrchestrator:
 
         captured_models: list[str] = []
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             captured_models.append(model)
             return {
                 "agent": agent_name,
@@ -368,7 +376,9 @@ class TestRunOrchestrator:
     async def test_two_fail_one_succeeds_raises(self, tmp_path):
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name != "melchior":
                 raise TimeoutError(f"Agent {agent_name} timed out")
             return {
@@ -1252,7 +1262,9 @@ class TestLaunchAgentTimeoutReaping:
         def failing_write(output_dir, agent_name, data):
             raise OSError(28, "No space left on device")
 
-        monkeypatch.setattr(run_magi, "_write_stderr_log", failing_write)
+        import claude_backend as _claude_backend
+
+        monkeypatch.setattr(_claude_backend, "_write_stderr_log", failing_write)
 
         with pytest.raises(TimeoutError, match="timed out after"):
             await run_magi.launch_agent(
@@ -1359,8 +1371,10 @@ class TestLaunchAgentSuccessStderrLog:
         def failing_write(output_dir, agent_name, data):
             raise OSError(13, "Permission denied")
 
+        import claude_backend as _claude_backend
+
         monkeypatch.setattr(run_magi.asyncio, "create_subprocess_exec", fake_create)
-        monkeypatch.setattr(run_magi, "_write_stderr_log", failing_write)
+        monkeypatch.setattr(_claude_backend, "_write_stderr_log", failing_write)
         (tmp_path / "melchior.md").write_text("sys prompt", encoding="utf-8")
 
         result = await run_magi.launch_agent(
@@ -1972,7 +1986,9 @@ class TestSingleShotRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar" and call_counts[agent_name] == 1:
                 raise ValidationError("missing keys: ['recommendation']")
@@ -2001,7 +2017,9 @@ class TestSingleShotRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar":
                 raise ValidationError("missing keys: ['recommendation']")
@@ -2033,7 +2051,9 @@ class TestSingleShotRetry:
         from run_magi import run_orchestrator
         from validate import ValidationError
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name in ("caspar", "melchior"):
                 raise ValidationError(f"missing keys for {agent_name}")
             return TestSingleShotRetry._valid(agent_name)
@@ -2054,7 +2074,9 @@ class TestSingleShotRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar":
                 raise TimeoutError(f"agent {agent_name} timed out")
@@ -2080,7 +2102,9 @@ class TestSingleShotRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar":
                 raise RuntimeError(f"agent {agent_name} exited non-zero")
@@ -2115,7 +2139,9 @@ class TestSingleShotRetry:
         }
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             captured_timeouts[agent_name].append(timeout)
             call_counts[agent_name] += 1
             if agent_name == "caspar" and call_counts[agent_name] == 1:
@@ -2154,7 +2180,9 @@ class TestSingleShotRetry:
         }
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             captured_prompts[agent_name].append(prompt)
             call_counts[agent_name] += 1
             if agent_name == "caspar" and call_counts[agent_name] == 1:
@@ -2195,7 +2223,9 @@ class TestSingleShotRetry:
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
         display_events: list[tuple[str, str]] = []
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar" and call_counts[agent_name] == 1:
                 raise ValidationError("schema fail")
@@ -2285,7 +2315,9 @@ class TestJsonDecodeRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "melchior" and call_counts[agent_name] == 1:
                 # Simulate the exact failure mode reported in production:
@@ -2327,7 +2359,9 @@ class TestJsonDecodeRetry:
 
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name == "balthasar":
                 raise _json.JSONDecodeError("Unterminated string", "broken", 50)
             return TestJsonDecodeRetry._valid(agent_name)
@@ -2365,7 +2399,9 @@ class TestJsonDecodeRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar":
                 raise ValueError("Unexpected Claude CLI output type: int")
@@ -2433,7 +2469,9 @@ class TestRetryTelemetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar" and call_counts[agent_name] == 1:
                 raise ValidationError("missing keys: ['recommendation']")
@@ -2460,7 +2498,9 @@ class TestRetryTelemetry:
         from run_magi import run_orchestrator
         from validate import ValidationError
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name == "caspar":
                 raise ValidationError("missing keys: ['recommendation']")
             return TestRetryTelemetry._valid(agent_name)
@@ -2491,7 +2531,9 @@ class TestRetryTelemetry:
         """
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             return TestRetryTelemetry._valid(agent_name)
 
         with patch("run_magi.launch_agent", side_effect=mock_launch):
@@ -2514,7 +2556,9 @@ class TestRetryTelemetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             # melchior recovers on retry; caspar fails twice.
             if agent_name == "melchior" and call_counts[agent_name] == 1:
@@ -2584,7 +2628,9 @@ class TestCp1252Resilience:
 
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name == "caspar":
                 # Use a non-retryable error class so retry does not fire
                 # and we go straight to the WARNING-then-degraded path.
@@ -4610,3 +4656,213 @@ class TestF4GuardObservability:
         with open(os.path.join(created["dir"], "magi-report.json"), encoding="utf-8") as fh:
             saved = json.load(fh)
         assert saved["guard"] == {"active": False}
+
+
+# ---------------------------------------------------------------------------
+# Task 8: --ollama / --ollama-init flags + --model mutual exclusion (BDD-21)
+# ---------------------------------------------------------------------------
+
+
+def test_ollama_flag_defaults_false():
+    from run_magi import parse_args
+
+    args = parse_args(["code-review", "x"])
+    assert args.ollama is False and args.ollama_init is False
+
+
+def test_ollama_skips_claude_model_default():
+    from run_magi import parse_args
+
+    args = parse_args(["code-review", "x", "--ollama"])
+    assert args.ollama is True
+    assert args.model is None  # NOT filled with MODE_DEFAULT_MODELS
+
+
+def test_ollama_with_explicit_model_errors():
+    from run_magi import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["code-review", "x", "--ollama", "--model", "opus"])
+
+
+def test_non_ollama_still_resolves_default_model():
+    from run_magi import parse_args
+
+    args = parse_args(["code-review", "x"])
+    assert args.model == "opus"  # unchanged behavior
+
+
+# ---------------------------------------------------------------------------
+# Task 9: select_backend factory + back-compat run_orchestrator (BDD-1,2,3)
+# ---------------------------------------------------------------------------
+
+
+def test_select_backend_claude_default():
+    from run_magi import parse_args, select_backend
+    from claude_backend import ClaudeBackend
+
+    args = parse_args(["design", "x"])
+    backend, agent_models = select_backend(args)
+    assert isinstance(backend, ClaudeBackend)
+    assert set(agent_models.values()) == {"opus"}
+
+
+def test_select_backend_ollama_uses_trio(monkeypatch):
+    from run_magi import parse_args, select_backend
+    import run_magi
+    from ollama_backend import OllamaBackend
+    from ollama_config import OllamaConfig
+
+    cfg = OllamaConfig(
+        base_url="http://h/v1",
+        api_key=None,
+        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+    )
+    monkeypatch.setattr(run_magi, "resolve_config", lambda **k: cfg)
+    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+    args = parse_args(["design", "x", "--ollama"])
+    backend, agent_models = select_backend(args)
+    assert isinstance(backend, OllamaBackend)
+    assert agent_models == {"melchior": "m", "balthasar": "b", "caspar": "c"}
+
+
+def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
+    """run_orchestrator threads per-agent models to launch_agent via backend."""
+    import asyncio
+    from run_magi import run_orchestrator
+
+    seen: dict[str, str] = {}
+
+    class FakeBackend:
+        async def run(
+            self,
+            name: str,
+            sp: str,
+            prompt: str,
+            model: str,
+            timeout: int,
+            out: str,
+        ) -> bytes:
+            seen[name] = model
+            return (
+                b'{"agent":"' + name.encode() + b'",'
+                b'"verdict":"approve","confidence":0.5,'
+                b'"summary":"s","reasoning":"r","findings":[],'
+                b'"recommendation":"ok"}'
+            )
+
+    for a in ("melchior", "balthasar", "caspar"):
+        (tmp_path / f"{a}.md").write_text("S", encoding="utf-8")
+
+    asyncio.run(
+        run_orchestrator(
+            str(tmp_path),
+            "P",
+            str(tmp_path),
+            900,
+            agent_models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+            backend=FakeBackend(),
+            show_status=False,
+        )
+    )
+    assert seen == {"melchior": "m", "balthasar": "b", "caspar": "c"}
+
+
+def test_resolve_config_called_once_in_select_backend(monkeypatch):
+    """F-M invariant: resolve_config is called exactly once in select_backend."""
+    from run_magi import parse_args, select_backend
+    import run_magi
+    from ollama_config import OllamaConfig
+
+    call_count = 0
+
+    def counting_resolve(**k: object) -> OllamaConfig:
+        nonlocal call_count
+        call_count += 1
+        return OllamaConfig(
+            base_url="http://h/v1",
+            api_key=None,
+            models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+        )
+
+    monkeypatch.setattr(run_magi, "resolve_config", counting_resolve)
+    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+    args = parse_args(["design", "x", "--ollama"])
+    select_backend(args)
+    assert call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 10: main() wiring — --ollama-init short-circuit + skip claude gate
+# ---------------------------------------------------------------------------
+
+
+def _make_ollama_cfg():  # type: ignore[return]  # OllamaConfig imported lazily
+    """Return a minimal OllamaConfig for T10 tests."""
+    from ollama_config import OllamaConfig
+
+    return OllamaConfig(
+        base_url="http://h/v1",
+        api_key=None,
+        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+    )
+
+
+def test_ollama_init_short_circuits(monkeypatch, tmp_path, capsys):
+    """--ollama-init calls write_template() and exits 0 before mode/input checks."""
+    import run_magi
+
+    written: dict[str, str] = {}
+
+    def _fake_write_template(**k: object) -> str:
+        written["p"] = "X"
+        return "X"
+
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    monkeypatch.setattr(run_magi, "write_template", _fake_write_template)
+    with pytest.raises(SystemExit) as ei:
+        run_magi.main()
+    assert ei.value.code == 0
+    assert written.get("p") == "X"
+
+
+def test_ollama_init_file_exists_exits_0(monkeypatch, capsys):
+    """--ollama-init exits 0 (not 1) when config already exists (FileExistsError)."""
+    import run_magi
+
+    def _fake_write_template(**k: object) -> str:
+        raise FileExistsError(".claude/magi-ollama.toml")
+
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    monkeypatch.setattr(run_magi, "write_template", _fake_write_template)
+    with pytest.raises(SystemExit) as ei:
+        run_magi.main()
+    assert ei.value.code == 0
+
+
+def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
+    """--ollama must not abort when 'claude' is absent from PATH."""
+    import run_magi
+
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
+    monkeypatch.setattr(run_magi.shutil, "which", lambda _: None)  # claude absent
+    monkeypatch.setattr(run_magi, "resolve_config", lambda **k: _make_ollama_cfg())
+    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_orch(*a: object, **k: object) -> dict[str, object]:
+        captured["backend"] = k.get("backend")
+        # Return a minimal-but-valid report shape so main() can run to completion
+        # without crashing in format_report / consensus / cost paths.
+        raise SystemExit(0)
+
+    monkeypatch.setattr(run_magi, "run_orchestrator", _fake_orch)
+    # main must NOT sys.exit(1) on missing claude when --ollama is set
+    try:
+        run_magi.main()
+    except SystemExit as e:
+        assert e.code != 1, f"Expected not exit(1), got exit({e.code})"
+    from ollama_backend import OllamaBackend
+
+    assert isinstance(captured["backend"], OllamaBackend)

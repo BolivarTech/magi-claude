@@ -109,7 +109,7 @@ tests/
   test_run_magi.py            -- 16 tests: arg parsing, model flag, orchestration, validation
 docs/
   MAGI-System-Documentation.md  -- This document
-pyproject.toml                -- Python >= 3.9, dual license, dev deps, tool config
+pyproject.toml                -- Python >= 3.12, dual license, dev deps, tool config
 conftest.py                   -- tdd-guard pytest plugin + sys.path setup for test imports
 Makefile                      -- verify, test, lint, format, typecheck targets
 ```
@@ -447,7 +447,7 @@ When using the native sub-agent mode (Agent tool), the model is passed via the A
 | Component | Required | Notes |
 |-----------|----------|-------|
 | Claude Code CLI (`claude -p`) | For parallel mode | Fallback available without it |
-| Python 3.9+ | Yes | Uses `asyncio`, `dict[str, Any]` syntax |
+| Python 3.12+ | Yes | Uses `asyncio`, `dict[str, Any]` syntax |
 | pytest + pytest-asyncio | Dev only | Test suite requires async test support |
 | ruff | Dev only | Linting and formatting |
 | mypy | Dev only | Type checking (strict mode) |

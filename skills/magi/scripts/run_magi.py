@@ -47,11 +47,12 @@ from synthesize import (  # noqa: E402
     format_report,
     load_agent_output,
 )
-from subprocess_utils import (  # noqa: E402
-    format_stderr_excerpt as _format_stderr_excerpt,
-    reap_and_drain_stderr as _reap_and_drain_stderr,
-    write_stderr_log as _write_stderr_log,
-)
+from backend import AgentBackend  # noqa: E402
+from claude_backend import ClaudeBackend  # noqa: E402
+from ollama_backend import OllamaBackend  # noqa: E402
+from ollama_config import OllamaConfigError, resolve_config  # noqa: E402
+from ollama_init import write_template  # noqa: E402
+from ollama_preflight import OllamaPreflightError, preflight  # noqa: E402
 from run_lock import remove_lock, staleness_bound_for_timeout, write_lock  # noqa: E402
 from temp_dirs import (  # noqa: E402
     MAGI_DIR_PREFIX,
@@ -169,6 +170,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"MAGI reviews the input whole; detect-and-warn only, not a hard limit."
         ),
     )
+    parser.add_argument(
+        "--ollama",
+        action="store_true",
+        help="Use the OpenAI-compatible Ollama backend instead of `claude -p`.",
+    )
+    parser.add_argument(
+        "--ollama-init",
+        action="store_true",
+        help="Scaffold ./.claude/magi-ollama.toml from defaults and exit.",
+    )
     parser.set_defaults(show_status=True, enrich=True)
     args = parser.parse_args(argv)
     # ``--keep-runs 0`` is ambiguous: a naive reading is "keep nothing"
@@ -185,13 +196,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.warn_input_tokens <= 0:
         parser.error("--warn-input-tokens must be a positive integer")
-    # Per-mode default model resolution (2.2.3). ``argparse`` cannot express
-    # "default depends on another arg" cleanly, so we resolve here. The mode
-    # has already been validated by ``choices=VALID_MODES`` above, so the
-    # ``MODE_DEFAULT_MODELS`` lookup is total — no KeyError path is reachable
-    # while VALID_MODES and MODE_DEFAULT_MODELS stay in lockstep (a guarantee
-    # the test suite pins).
-    if args.model is None:
+    if args.ollama and args.model is not None:
+        parser.error(
+            "--model does not apply with --ollama; per-mage models are "
+            "configured in magi-ollama.toml / MAGI_OLLAMA_MODEL_*."
+        )
+    # INVARIANT: --model must stay None when --ollama is set. Do NOT collapse
+    # this into `args.model or MODE_DEFAULT_MODELS[...]` — that would silently
+    # re-enable `--ollama --model` and feed Ollama a Claude-shaped model name.
+    if not args.ollama and args.model is None:
         args.model = MODE_DEFAULT_MODELS[args.mode]
     return args
 
@@ -203,14 +216,13 @@ async def launch_agent(
     output_dir: str,
     timeout: int,
     model: str = "opus",
+    backend: AgentBackend | None = None,
 ) -> dict[str, Any]:
-    """Launch a single agent subprocess and return validated output.
+    """Launch one agent via *backend* and return validated output.
 
-    Runs ``claude -p`` with the agent's system prompt, applies timeout,
-    parses the raw output, and validates against the agent JSON schema.
-    The user prompt is sent via stdin to avoid OS CLI argument length
-    limits.  A copy is also saved to ``{agent_name}.prompt.txt`` in
-    *output_dir* as a debug artifact.
+    Writes the prompt + raw artifacts, then parses and validates. The
+    transport (claude -p, Ollama HTTP, ...) lives in the backend. Defaults
+    to ClaudeBackend so existing callers keep 3.x behavior.
 
     Args:
         agent_name: One of 'melchior', 'balthasar', 'caspar'.
@@ -219,6 +231,7 @@ async def launch_agent(
         output_dir: Directory for raw and parsed output files.
         timeout: Timeout in seconds per agent.
         model: Model short name ('opus', 'sonnet', 'haiku').
+        backend: Transport backend to use. Defaults to ClaudeBackend.
 
     Returns:
         Validated agent output dictionary.
@@ -248,74 +261,21 @@ async def launch_agent(
             treats this as a non-retryable failure (the run as a whole is
             shutting down).
     """
-    model_id = resolve_model(model)
+    if backend is None:
+        backend = ClaudeBackend()
 
     system_prompt_file = os.path.join(agents_dir, f"{agent_name}.md")
     raw_file = os.path.join(output_dir, f"{agent_name}.raw.json")
     parsed_file = os.path.join(output_dir, f"{agent_name}.json")
 
-    # Write user prompt to a temp file and pass via stdin to avoid
-    # OS CLI argument length limits (~32K on Windows).
     prompt_file = os.path.join(output_dir, f"{agent_name}.prompt.txt")
     with open(prompt_file, "w", encoding="utf-8") as f:
         f.write(prompt)
 
-    proc = await asyncio.create_subprocess_exec(
-        "claude",
-        "-p",
-        "--output-format",
-        "json",
-        "--model",
-        model_id,
-        "--system-prompt-file",
-        system_prompt_file,
-        "-",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=prompt.encode("utf-8")), timeout=timeout
-        )
-    except asyncio.TimeoutError:
-        stderr_buffered = await _reap_and_drain_stderr(proc)
-        # Persisting the log is best-effort. If it fails (disk full,
-        # permission denied), surface a warning but do not let the
-        # OSError shadow the TimeoutError the caller actually needs.
-        try:
-            _write_stderr_log(output_dir, agent_name, stderr_buffered)
-        except OSError as log_exc:
-            print(
-                f"WARNING: Failed to persist {agent_name}.stderr.log on timeout: {log_exc}",
-                file=sys.stderr,
-            )
-        raise TimeoutError(
-            f"Agent '{agent_name}' timed out after {timeout}s"
-            f"{_format_stderr_excerpt(stderr_buffered)}"
-        ) from None
+    stdout = await backend.run(agent_name, system_prompt_file, prompt, model, timeout, output_dir)
 
     with open(raw_file, "wb") as f:
         f.write(stdout)
-
-    # The stderr log is a diagnostic artefact, not load-bearing. A disk
-    # error here (disk full, permission drop, antivirus lock on Windows)
-    # must not turn an otherwise-successful agent into a reported
-    # failure. Mirror the timeout-path pattern: warn and continue.
-    try:
-        _write_stderr_log(output_dir, agent_name, stderr)
-    except OSError as log_exc:
-        print(
-            f"WARNING: Failed to persist {agent_name}.stderr.log: {log_exc}",
-            file=sys.stderr,
-        )
-
-    if proc.returncode != 0:
-        stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else "no stderr"
-        raise RuntimeError(
-            f"Agent '{agent_name}' exited with code {proc.returncode}: {stderr_text}"
-        )
 
     parse_raw_output(raw_file, parsed_file)
     return load_agent_output(parsed_file)
@@ -547,6 +507,32 @@ def _maybe_enrich(
         return content, f"enrichment skipped (boundary error: {exc!r})"
 
 
+def select_backend(
+    args: argparse.Namespace,
+) -> tuple[AgentBackend, dict[str, str]]:
+    """Return (backend, per-agent model map) for the chosen mode.
+
+    Ollama path: resolve config once + preflight, return OllamaBackend with
+    the trio from config. Claude path: ClaudeBackend with the single --model
+    for all three agents.
+
+    F-M invariant: resolve_config is called exactly once here (setup time),
+    never inside tracked_launch/retry — OllamaConfigError must not be swallowed
+    by the (ValidationError, json.JSONDecodeError) retry guard.
+
+    Args:
+        args: Parsed CLI namespace (requires .ollama and .model attributes).
+
+    Returns:
+        Tuple of (backend instance, dict mapping agent name to model string).
+    """
+    if args.ollama:
+        config = resolve_config()
+        preflight(config)
+        return OllamaBackend(config), dict(config.models)
+    return ClaudeBackend(), {name: args.model for name in AGENTS}
+
+
 async def run_orchestrator(
     agents_dir: str,
     prompt: str,
@@ -554,6 +540,8 @@ async def run_orchestrator(
     timeout: int,
     model: str = "opus",
     *,
+    agent_models: dict[str, str] | None = None,
+    backend: AgentBackend | None = None,
     show_status: bool = True,
 ) -> dict[str, Any]:
     """Run all three agents concurrently and synthesize results.
@@ -570,7 +558,14 @@ async def run_orchestrator(
         prompt: The prompt payload.
         output_dir: Directory for output files.
         timeout: Per-agent timeout in seconds.
-        model: Model short name ('opus', 'sonnet', 'haiku').
+        model: Model short name for all agents ('opus', 'sonnet', 'haiku').
+            Back-compat: kept so the ~40 existing call sites in tests that
+            pass ``model=`` keep working untouched. New callers should pass
+            ``agent_models`` + ``backend`` from ``select_backend()``.
+        agent_models: Per-agent model map. When None, derived from ``model``
+            so every agent uses the same model (BDD-30 back-compat).
+        backend: Transport backend. When None, defaults to ClaudeBackend()
+            to preserve 3.x behavior for existing callers.
         show_status: Render a live status tree while agents run. When the
             stream is not a TTY, plain one-line-per-event output is emitted
             instead.
@@ -582,6 +577,13 @@ async def run_orchestrator(
     Raises:
         RuntimeError: If fewer than 2 agents succeed.
     """
+    # Back-compat (BDD-30): KEEP `model` so the ~40 existing call sites in
+    # tests keep working untouched; derive agent_models from it when not
+    # supplied. New callers (select_backend) pass agent_models + backend.
+    if agent_models is None:
+        agent_models = {name: model for name in AGENTS}
+    if backend is None:
+        backend = ClaudeBackend()
     successful: list[dict[str, Any]] = []
     failed: list[str] = []
     # Telemetry (2.2.1): names of agents whose first attempt raised
@@ -633,7 +635,15 @@ async def run_orchestrator(
         _safe_display_update(display, name, "running", log_gate)
         try:
             try:
-                result = await launch_agent(name, agents_dir, prompt, output_dir, timeout, model)
+                result = await launch_agent(
+                    name,
+                    agents_dir,
+                    prompt,
+                    output_dir,
+                    timeout,
+                    agent_models[name],
+                    backend=backend,
+                )
             except (ValidationError, json.JSONDecodeError) as err:
                 # Single-shot retry (2.2.0 + 2.2.4): fires on schema
                 # drift (ValidationError, 2.2.0 scope) AND on JSON parse
@@ -652,7 +662,8 @@ async def run_orchestrator(
                     _build_retry_prompt(prompt, err),
                     output_dir,
                     timeout,
-                    model,
+                    agent_models[name],
+                    backend=backend,
                 )
         except (asyncio.TimeoutError, TimeoutError):
             _safe_display_update(display, name, "timeout", log_gate)
@@ -930,6 +941,22 @@ def main() -> None:
     # Windows. A later call site cannot fix a crash that already
     # happened on an earlier print.
     _enable_utf8_console_io()
+
+    # Short-circuit: --ollama-init scaffolds the repo TOML and exits before
+    # parse_args() so that mode/input positional arguments are not required.
+    # We screen sys.argv directly; the flag is unambiguous (no value follows it).
+    if "--ollama-init" in sys.argv[1:]:
+        try:
+            path = write_template()
+        except FileExistsError as exc:
+            print(
+                f"Config already exists at {exc}; not overwriting.",
+                file=sys.stderr,
+            )
+            sys.exit(0)
+        print(f"Wrote Ollama config template to {path}")
+        sys.exit(0)
+
     args = parse_args()
 
     try:
@@ -971,10 +998,17 @@ def main() -> None:
     skill_dir = os.path.dirname(script_dir)
     agents_dir = os.path.join(skill_dir, "agents")
 
-    # Hard prerequisite check runs **before** any filesystem setup so a
-    # missing CLI cannot leak a half-initialised temp directory on disk.
-    if not shutil.which("claude"):
+    # Hard prerequisite check: only required for the Claude path. When --ollama
+    # is set the claude CLI is not used, so skip the gate entirely to allow the
+    # Ollama backend to run even when claude is absent from PATH.
+    if not args.ollama and not shutil.which("claude"):
         print("ERROR: 'claude' CLI not found in PATH", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        backend, agent_models = select_backend(args)
+    except (OllamaConfigError, OllamaPreflightError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
     is_temp_dir = args.output_dir is None
@@ -1002,7 +1036,11 @@ def main() -> None:
     print(f"|  Input: {input_label}")
     if enrich_note is not None:
         print(f"|  Context: {enrich_note}")
-    print(f"|  Model: {args.model} ({MODEL_IDS[args.model]})")
+    if args.ollama:
+        model_label = "ollama/" + "/".join(sorted(set(agent_models.values())))
+        print(f"|  Model: {model_label}")
+    else:
+        print(f"|  Model: {args.model} ({MODEL_IDS[args.model]})")
     print(f"|  Timeout: {args.timeout}s")
     print(f"|  Output: {output_dir}")
     print("+==================================================+")
@@ -1020,7 +1058,8 @@ def main() -> None:
                 prompt,
                 output_dir,
                 args.timeout,
-                args.model,
+                agent_models=agent_models,
+                backend=backend,
                 show_status=args.show_status,
             )
         )
