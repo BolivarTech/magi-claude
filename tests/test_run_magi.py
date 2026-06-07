@@ -4614,3 +4614,37 @@ class TestF4GuardObservability:
         with open(os.path.join(created["dir"], "magi-report.json"), encoding="utf-8") as fh:
             saved = json.load(fh)
         assert saved["guard"] == {"active": False}
+
+
+# ---------------------------------------------------------------------------
+# Task 8: --ollama / --ollama-init flags + --model mutual exclusion (BDD-21)
+# ---------------------------------------------------------------------------
+
+
+def test_ollama_flag_defaults_false():
+    from run_magi import parse_args
+
+    args = parse_args(["code-review", "x"])
+    assert args.ollama is False and args.ollama_init is False
+
+
+def test_ollama_skips_claude_model_default():
+    from run_magi import parse_args
+
+    args = parse_args(["code-review", "x", "--ollama"])
+    assert args.ollama is True
+    assert args.model is None  # NOT filled with MODE_DEFAULT_MODELS
+
+
+def test_ollama_with_explicit_model_errors():
+    from run_magi import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["code-review", "x", "--ollama", "--model", "opus"])
+
+
+def test_non_ollama_still_resolves_default_model():
+    from run_magi import parse_args
+
+    args = parse_args(["code-review", "x"])
+    assert args.model == "opus"  # unchanged behavior
