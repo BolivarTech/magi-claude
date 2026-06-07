@@ -641,7 +641,7 @@ async def run_orchestrator(
                     output_dir,
                     timeout,
                     agent_models[name],
-                    **({"backend": backend} if not isinstance(backend, ClaudeBackend) else {}),
+                    backend=backend,
                 )
             except (ValidationError, json.JSONDecodeError) as err:
                 # Single-shot retry (2.2.0 + 2.2.4): fires on schema
@@ -662,7 +662,7 @@ async def run_orchestrator(
                     output_dir,
                     timeout,
                     agent_models[name],
-                    **({"backend": backend} if not isinstance(backend, ClaudeBackend) else {}),
+                    backend=backend,
                 )
         except (asyncio.TimeoutError, TimeoutError):
             _safe_display_update(display, name, "timeout", log_gate)

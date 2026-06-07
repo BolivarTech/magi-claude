@@ -276,7 +276,9 @@ class TestRunOrchestrator:
                 "recommendation": "Merge",
             }
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             return agent_results[agent_name]
 
         with patch("run_magi.launch_agent", side_effect=mock_launch):
@@ -294,7 +296,9 @@ class TestRunOrchestrator:
     async def test_one_agent_fails_degraded_mode(self, tmp_path):
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name == "caspar":
                 raise TimeoutError(f"Agent {agent_name} timed out")
             return {
@@ -322,7 +326,9 @@ class TestRunOrchestrator:
     async def test_all_agents_fail_raises(self, tmp_path):
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             raise TimeoutError(f"Agent {agent_name} timed out")
 
         with patch("run_magi.launch_agent", side_effect=mock_launch):
@@ -341,7 +347,9 @@ class TestRunOrchestrator:
 
         captured_models: list[str] = []
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             captured_models.append(model)
             return {
                 "agent": agent_name,
@@ -368,7 +376,9 @@ class TestRunOrchestrator:
     async def test_two_fail_one_succeeds_raises(self, tmp_path):
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name != "melchior":
                 raise TimeoutError(f"Agent {agent_name} timed out")
             return {
@@ -1976,7 +1986,9 @@ class TestSingleShotRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar" and call_counts[agent_name] == 1:
                 raise ValidationError("missing keys: ['recommendation']")
@@ -2005,7 +2017,9 @@ class TestSingleShotRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar":
                 raise ValidationError("missing keys: ['recommendation']")
@@ -2037,7 +2051,9 @@ class TestSingleShotRetry:
         from run_magi import run_orchestrator
         from validate import ValidationError
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name in ("caspar", "melchior"):
                 raise ValidationError(f"missing keys for {agent_name}")
             return TestSingleShotRetry._valid(agent_name)
@@ -2058,7 +2074,9 @@ class TestSingleShotRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar":
                 raise TimeoutError(f"agent {agent_name} timed out")
@@ -2084,7 +2102,9 @@ class TestSingleShotRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar":
                 raise RuntimeError(f"agent {agent_name} exited non-zero")
@@ -2119,7 +2139,9 @@ class TestSingleShotRetry:
         }
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             captured_timeouts[agent_name].append(timeout)
             call_counts[agent_name] += 1
             if agent_name == "caspar" and call_counts[agent_name] == 1:
@@ -2158,7 +2180,9 @@ class TestSingleShotRetry:
         }
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             captured_prompts[agent_name].append(prompt)
             call_counts[agent_name] += 1
             if agent_name == "caspar" and call_counts[agent_name] == 1:
@@ -2199,7 +2223,9 @@ class TestSingleShotRetry:
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
         display_events: list[tuple[str, str]] = []
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar" and call_counts[agent_name] == 1:
                 raise ValidationError("schema fail")
@@ -2289,7 +2315,9 @@ class TestJsonDecodeRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "melchior" and call_counts[agent_name] == 1:
                 # Simulate the exact failure mode reported in production:
@@ -2331,7 +2359,9 @@ class TestJsonDecodeRetry:
 
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name == "balthasar":
                 raise _json.JSONDecodeError("Unterminated string", "broken", 50)
             return TestJsonDecodeRetry._valid(agent_name)
@@ -2369,7 +2399,9 @@ class TestJsonDecodeRetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar":
                 raise ValueError("Unexpected Claude CLI output type: int")
@@ -2437,7 +2469,9 @@ class TestRetryTelemetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             if agent_name == "caspar" and call_counts[agent_name] == 1:
                 raise ValidationError("missing keys: ['recommendation']")
@@ -2464,7 +2498,9 @@ class TestRetryTelemetry:
         from run_magi import run_orchestrator
         from validate import ValidationError
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name == "caspar":
                 raise ValidationError("missing keys: ['recommendation']")
             return TestRetryTelemetry._valid(agent_name)
@@ -2495,7 +2531,9 @@ class TestRetryTelemetry:
         """
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             return TestRetryTelemetry._valid(agent_name)
 
         with patch("run_magi.launch_agent", side_effect=mock_launch):
@@ -2518,7 +2556,9 @@ class TestRetryTelemetry:
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             call_counts[agent_name] += 1
             # melchior recovers on retry; caspar fails twice.
             if agent_name == "melchior" and call_counts[agent_name] == 1:
@@ -2588,7 +2628,9 @@ class TestCp1252Resilience:
 
         from run_magi import run_orchestrator
 
-        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
             if agent_name == "caspar":
                 # Use a non-retryable error class so retry does not fire
                 # and we go straight to the WARNING-then-degraded path.
