@@ -1,0 +1,1 @@
+{"choices": [{"message": {"role": "assistant", "content": "{\"agent\":\"melchior\",\"verdict\":\"approve\",\"confidence\":0.8,\"summary\":\"s\",\"reasoning\":\"r\",\"findings\":[],\"recommendation\":\"go\"}"}}], "usage": {"prompt_tokens": 10, "completion_tokens": 20}}
