@@ -7,6 +7,7 @@
 Precedence (per key): env > repo TOML > global TOML > built-in defaults,
 with OLLAMA_HOST / OLLAMA_API_KEY as generic env fallbacks BELOW files.
 """
+
 from __future__ import annotations
 
 import os
@@ -14,7 +15,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping
 
 from validate import ValidationError
 
@@ -52,7 +53,7 @@ class OllamaConfig:
     structured: str = "schema"  # "schema" | "object" | "off" (R16)
 
 
-def _load_toml(path: str) -> dict:
+def _load_toml(path: str) -> dict[str, Any]:
     """Load a TOML config file, returning empty dict if not found.
 
     Args:
@@ -177,10 +178,7 @@ def resolve_config(
 
     # structured mode (R16)
     structured = (
-        env.get("MAGI_OLLAMA_STRUCTURED")
-        or r.get("structured")
-        or g.get("structured")
-        or "schema"
+        env.get("MAGI_OLLAMA_STRUCTURED") or r.get("structured") or g.get("structured") or "schema"
     )
 
     # models per mage (presence-based; empty string is not a valid model -> skip)
@@ -198,6 +196,4 @@ def resolve_config(
         else:
             models[mage] = DEFAULT_MODELS[mage]
 
-    return OllamaConfig(
-        base_url=base_url, api_key=api_key, models=models, structured=structured
-    )
+    return OllamaConfig(base_url=base_url, api_key=api_key, models=models, structured=structured)
