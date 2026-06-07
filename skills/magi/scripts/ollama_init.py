@@ -3,6 +3,7 @@
 # Version: 1.0.0
 # Date: 2026-06-06
 """Scaffold ./.claude/magi-ollama.toml from canonical defaults (refuse-if-exists)."""
+
 from __future__ import annotations
 
 import os

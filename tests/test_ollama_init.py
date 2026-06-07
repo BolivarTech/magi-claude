@@ -8,9 +8,9 @@ def test_creates_template_with_active_base_url_and_trio(tmp_path):
     path = write_template(repo_root=str(tmp_path))
     assert os.path.isfile(path)
     text = open(path, encoding="utf-8").read()
-    assert f'base_url = "{DEFAULT_BASE_URL}"' in text     # active, not commented
-    assert "# api_key" in text                             # commented
-    assert "signin" in text.lower()                        # 2-mode header (F-B)
+    assert f'base_url = "{DEFAULT_BASE_URL}"' in text  # active, not commented
+    assert "# api_key" in text  # commented
+    assert "signin" in text.lower()  # 2-mode header (F-B)
     for tag in DEFAULT_MODELS.values():
         assert tag in text
 
