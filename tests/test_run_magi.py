@@ -4790,3 +4790,79 @@ def test_resolve_config_called_once_in_select_backend(monkeypatch):
     args = parse_args(["design", "x", "--ollama"])
     select_backend(args)
     assert call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 10: main() wiring — --ollama-init short-circuit + skip claude gate
+# ---------------------------------------------------------------------------
+
+
+def _make_ollama_cfg() -> "OllamaConfig":
+    """Return a minimal OllamaConfig for T10 tests."""
+    from ollama_config import OllamaConfig
+
+    return OllamaConfig(
+        base_url="http://h/v1",
+        api_key=None,
+        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+    )
+
+
+def test_ollama_init_short_circuits(monkeypatch, tmp_path, capsys):
+    """--ollama-init calls write_template() and exits 0 before mode/input checks."""
+    import run_magi
+
+    written: dict[str, str] = {}
+
+    def _fake_write_template(**k: object) -> str:
+        written["p"] = "X"
+        return "X"
+
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    monkeypatch.setattr(run_magi, "write_template", _fake_write_template)
+    with pytest.raises(SystemExit) as ei:
+        run_magi.main()
+    assert ei.value.code == 0
+    assert written.get("p") == "X"
+
+
+def test_ollama_init_file_exists_exits_0(monkeypatch, capsys):
+    """--ollama-init exits 0 (not 1) when config already exists (FileExistsError)."""
+    import run_magi
+
+    def _fake_write_template(**k: object) -> str:
+        raise FileExistsError(".claude/magi-ollama.toml")
+
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    monkeypatch.setattr(run_magi, "write_template", _fake_write_template)
+    with pytest.raises(SystemExit) as ei:
+        run_magi.main()
+    assert ei.value.code == 0
+
+
+def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
+    """--ollama must not abort when 'claude' is absent from PATH."""
+    import run_magi
+
+    monkeypatch.setattr(
+        sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"]
+    )
+    monkeypatch.setattr(run_magi.shutil, "which", lambda _: None)  # claude absent
+    monkeypatch.setattr(run_magi, "resolve_config", lambda **k: _make_ollama_cfg())
+    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_orch(*a: object, **k: object) -> dict[str, object]:
+        captured["backend"] = k.get("backend")
+        return {"agents": [], "consensus": {}}
+
+    monkeypatch.setattr(run_magi, "run_orchestrator", _fake_orch)
+    # main must NOT sys.exit(1) on missing claude when --ollama is set
+    try:
+        run_magi.main()
+    except SystemExit as e:
+        assert e.code != 1, f"Expected not exit(1), got exit({e.code})"
+    from ollama_backend import OllamaBackend
+
+    assert isinstance(captured["backend"], OllamaBackend)
