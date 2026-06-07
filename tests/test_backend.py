@@ -1,4 +1,5 @@
 """AgentBackend is an abstract contract; concretes must implement run()."""
+
 import inspect
 import pytest
 from backend import AgentBackend

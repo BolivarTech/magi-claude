@@ -8,6 +8,7 @@ Implementations return the agent's RAW verdict bytes (the JSON text, already
 unwrapped from any transport envelope). All downstream processing
 (parse -> validate -> consensus) is backend-agnostic and lives in run_magi.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
