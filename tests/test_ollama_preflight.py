@@ -4,7 +4,7 @@ import json
 import urllib.error
 import pytest
 from ollama_config import OllamaConfig
-from ollama_preflight import preflight, OllamaPreflightError, PREFLIGHT_TIMEOUT
+from ollama_preflight import preflight, OllamaPreflightError, PREFLIGHT_TIMEOUT, _is_cloud_tag
 
 
 class _Resp(io.BytesIO):
@@ -121,3 +121,20 @@ def test_models_endpoint_404_warns_and_proceeds(monkeypatch, capsys):
     _patch(monkeypatch, exc=urllib.error.HTTPError("u", 404, "NF", {}, None))
     preflight(_cfg())  # no raise
     assert "models" in capsys.readouterr().err.lower()
+
+
+def test_is_cloud_tag_rejects_non_suffix_cloud():
+    """_is_cloud_tag must match ONLY exact ':cloud' or '-cloud' suffix.
+
+    True cases: tags whose variant is exactly 'cloud' or ends in '-cloud'.
+    False cases: 'precloud' (substring, not exact suffix), untagged names,
+    and bare strings without a ':' separator.
+    """
+    # Must return True — exact :cloud or -cloud suffix
+    assert _is_cloud_tag("glm-5:cloud") is True
+    assert _is_cloud_tag("gpt-oss:120b-cloud") is True
+    assert _is_cloud_tag("deepseek-v4-pro:cloud") is True
+    # Must return False — 'cloud' only as substring, not exact suffix
+    assert _is_cloud_tag("foo:precloud") is False
+    assert _is_cloud_tag("llama3.1:8b") is False
+    assert _is_cloud_tag("mycloud") is False
