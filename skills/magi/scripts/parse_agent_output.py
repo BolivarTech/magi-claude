@@ -96,6 +96,12 @@ def _extract_text(data: object) -> str:
     if isinstance(data, str):
         return data
 
+    # Bare-verdict dict: Ollama backend returns ``choices[0].message.content``
+    # already decoded as the 7-key agent JSON object.  Serialize it back so the
+    # rest of the pipeline (fence-strip → lenient parse → validate) is unchanged.
+    if isinstance(data, dict) and "agent" in data and "verdict" in data:
+        return json.dumps(data)
+
     raise ValueError(
         f"Unexpected Claude CLI output type: {type(data).__name__}. "
         f"Expected dict with 'result' or 'content' key, or plain string."
