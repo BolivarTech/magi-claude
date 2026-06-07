@@ -23,19 +23,20 @@ class OllamaPreflightError(ValidationError):
 
 
 def _is_cloud_tag(tag: str) -> bool:
-    """Return True when *tag*'s variant (after the last ``:``) ends in ``cloud``.
+    """True for Ollama cloud tags, whose suffix is exactly ':cloud' or '-cloud'.
 
-    Covers both ``:cloud`` (e.g. ``glm-5:cloud``) and ``-cloud`` variants
+    Covers ``:cloud`` (e.g. ``glm-5:cloud``) and ``-cloud`` variants
     (e.g. ``gpt-oss:120b-cloud``) that Ollama uses for subscription-gated
-    cloud models.
+    cloud models. Tags whose variant merely contains ``cloud`` as a substring
+    (e.g. ``foo:precloud``) are NOT matched.
 
     Args:
         tag: A full Ollama model tag string (e.g. ``"gpt-oss:120b-cloud"``).
 
     Returns:
-        ``True`` if the variant portion ends with ``"cloud"``, ``False`` otherwise.
+        ``True`` if *tag* ends with ``":cloud"`` or ``"-cloud"``, ``False`` otherwise.
     """
-    return tag.rsplit(":", 1)[-1].endswith("cloud")
+    return tag.endswith((":cloud", "-cloud"))
 
 
 def _redact(text: str, api_key: str | None) -> str:
