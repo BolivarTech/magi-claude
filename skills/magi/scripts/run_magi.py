@@ -50,8 +50,9 @@ from synthesize import (  # noqa: E402
 from backend import AgentBackend  # noqa: E402
 from claude_backend import ClaudeBackend  # noqa: E402
 from ollama_backend import OllamaBackend  # noqa: E402
-from ollama_config import resolve_config  # noqa: E402
-from ollama_preflight import preflight  # noqa: E402
+from ollama_config import OllamaConfigError, resolve_config  # noqa: E402
+from ollama_init import write_template  # noqa: E402
+from ollama_preflight import OllamaPreflightError, preflight  # noqa: E402
 from run_lock import remove_lock, staleness_bound_for_timeout, write_lock  # noqa: E402
 from temp_dirs import (  # noqa: E402
     MAGI_DIR_PREFIX,
@@ -940,6 +941,22 @@ def main() -> None:
     # Windows. A later call site cannot fix a crash that already
     # happened on an earlier print.
     _enable_utf8_console_io()
+
+    # Short-circuit: --ollama-init scaffolds the repo TOML and exits before
+    # parse_args() so that mode/input positional arguments are not required.
+    # We screen sys.argv directly; the flag is unambiguous (no value follows it).
+    if "--ollama-init" in sys.argv[1:]:
+        try:
+            path = write_template()
+        except FileExistsError as exc:
+            print(
+                f"Config already exists at {exc}; not overwriting.",
+                file=sys.stderr,
+            )
+            sys.exit(0)
+        print(f"Wrote Ollama config template to {path}")
+        sys.exit(0)
+
     args = parse_args()
 
     try:
@@ -981,10 +998,17 @@ def main() -> None:
     skill_dir = os.path.dirname(script_dir)
     agents_dir = os.path.join(skill_dir, "agents")
 
-    # Hard prerequisite check runs **before** any filesystem setup so a
-    # missing CLI cannot leak a half-initialised temp directory on disk.
-    if not shutil.which("claude"):
+    # Hard prerequisite check: only required for the Claude path. When --ollama
+    # is set the claude CLI is not used, so skip the gate entirely to allow the
+    # Ollama backend to run even when claude is absent from PATH.
+    if not args.ollama and not shutil.which("claude"):
         print("ERROR: 'claude' CLI not found in PATH", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        backend, agent_models = select_backend(args)
+    except (OllamaConfigError, OllamaPreflightError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
     is_temp_dir = args.output_dir is None
@@ -1012,7 +1036,11 @@ def main() -> None:
     print(f"|  Input: {input_label}")
     if enrich_note is not None:
         print(f"|  Context: {enrich_note}")
-    print(f"|  Model: {args.model} ({MODEL_IDS[args.model]})")
+    if args.ollama:
+        model_label = "ollama/" + "/".join(sorted(set(agent_models.values())))
+        print(f"|  Model: {model_label}")
+    else:
+        print(f"|  Model: {args.model} ({MODEL_IDS[args.model]})")
     print(f"|  Timeout: {args.timeout}s")
     print(f"|  Output: {output_dir}")
     print("+==================================================+")
@@ -1030,7 +1058,8 @@ def main() -> None:
                 prompt,
                 output_dir,
                 args.timeout,
-                args.model,
+                agent_models=agent_models,
+                backend=backend,
                 show_status=args.show_status,
             )
         )
