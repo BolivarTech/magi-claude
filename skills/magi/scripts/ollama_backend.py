@@ -3,6 +3,7 @@
 # Version: 1.0.0
 # Date: 2026-06-06
 """OpenAI-compatible (Ollama) backend over stdlib urllib."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +11,7 @@ import json
 import socket
 import urllib.error
 import urllib.request
-from typing import Any  # mypy strict: used by dict[str, Any] annotations below
+from typing import Any, cast  # mypy strict: used by dict[str, Any] annotations below
 
 from agent_schema import AGENT_OUTPUT_JSON_SCHEMA
 from backend import AgentBackend
@@ -73,7 +74,7 @@ class OllamaBackend(AgentBackend):
     def _call(self, req: urllib.request.Request, timeout: int) -> bytes:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read()
+                return cast(bytes, resp.read())
         except urllib.error.HTTPError as exc:
             # exc.fp is single-consumption (Caspar): read the body ONCE up front.
             detail = exc.read().decode("utf-8", "replace") if exc.fp else ""
@@ -84,10 +85,12 @@ class OllamaBackend(AgentBackend):
             if exc.code == 400 and ("response_format" in low or "json_schema" in low):
                 raise _ResponseFormatRejected() from None
             if exc.code == 404:
-                raise RuntimeError(self._redact(
-                    f"Ollama 404 at chat-time: model unavailable ({exc.reason}). "
-                    f"Preflight passed — possible ollama rm / auth expiry / TOCTOU. {detail}".strip()
-                )) from None
+                raise RuntimeError(
+                    self._redact(
+                        f"Ollama 404 at chat-time: model unavailable ({exc.reason}). "
+                        f"Preflight passed — possible ollama rm / auth expiry / TOCTOU. {detail}".strip()
+                    )
+                ) from None
             raise RuntimeError(
                 self._redact(f"Ollama HTTP {exc.code}: {exc.reason} {detail}".strip())
             ) from None
@@ -138,7 +141,7 @@ class OllamaBackend(AgentBackend):
             body = await asyncio.to_thread(self._call, req2, timeout)
         try:
             envelope = json.loads(body)
-            content = envelope["choices"][0]["message"]["content"]
+            content = str(envelope["choices"][0]["message"]["content"])
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
             raise ValueError(f"Unexpected OpenAI-compatible response shape: {exc}") from exc
         return content.encode("utf-8")
