@@ -1126,7 +1126,9 @@ def main() -> None:
     # FIX 4: if the aggregated cost is $0.00 despite having at least one agent,
     # the CLI may have renamed or relocated ``total_cost_usd`` — emit a single
     # warning so the silent mis-reporting is visible in operator logs.
-    if report["cost"]["total_usd"] == 0.0 and report["agents"]:
+    # Skipped on --ollama: Ollama responses carry no total_cost_usd field so
+    # $0.00 is always the correct aggregated value, not a mis-reporting signal.
+    if not args.ollama and report["cost"]["total_usd"] == 0.0 and report["agents"]:
         print(
             "[!] WARNING: per-run cost resolved to $0.00; the CLI may have "
             "renamed the total_cost_usd field — check raw envelopes.",
