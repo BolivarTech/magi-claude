@@ -83,6 +83,22 @@ class TestExtractText:
     def test_plain_string(self):
         assert _extract_text("hello world") == "hello world"
 
+    def test_bare_verdict_dict_serialized_to_json(self):
+        """_extract_text must serialize a bare verdict dict to a valid JSON string."""
+        verdict = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.8,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [],
+            "recommendation": "go",
+        }
+        result = _extract_text(verdict)
+        parsed = json.loads(result)
+        assert parsed["agent"] == "melchior"
+        assert parsed["verdict"] == "approve"
+
     def test_fallback_dict_raises_value_error(self):
         data = {"unknown_key": "some_value"}
         with pytest.raises(ValueError, match="Unexpected Claude CLI output type"):
