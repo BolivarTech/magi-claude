@@ -49,6 +49,9 @@ from synthesize import (  # noqa: E402
 )
 from backend import AgentBackend  # noqa: E402
 from claude_backend import ClaudeBackend  # noqa: E402
+from ollama_backend import OllamaBackend  # noqa: E402
+from ollama_config import resolve_config  # noqa: E402
+from ollama_preflight import preflight  # noqa: E402
 from run_lock import remove_lock, staleness_bound_for_timeout, write_lock  # noqa: E402
 from temp_dirs import (  # noqa: E402
     MAGI_DIR_PREFIX,
@@ -503,6 +506,32 @@ def _maybe_enrich(
         return content, f"enrichment skipped (boundary error: {exc!r})"
 
 
+def select_backend(
+    args: argparse.Namespace,
+) -> tuple[AgentBackend, dict[str, str]]:
+    """Return (backend, per-agent model map) for the chosen mode.
+
+    Ollama path: resolve config once + preflight, return OllamaBackend with
+    the trio from config. Claude path: ClaudeBackend with the single --model
+    for all three agents.
+
+    F-M invariant: resolve_config is called exactly once here (setup time),
+    never inside tracked_launch/retry — OllamaConfigError must not be swallowed
+    by the (ValidationError, json.JSONDecodeError) retry guard.
+
+    Args:
+        args: Parsed CLI namespace (requires .ollama and .model attributes).
+
+    Returns:
+        Tuple of (backend instance, dict mapping agent name to model string).
+    """
+    if args.ollama:
+        config = resolve_config()
+        preflight(config)
+        return OllamaBackend(config), dict(config.models)
+    return ClaudeBackend(), {name: args.model for name in AGENTS}
+
+
 async def run_orchestrator(
     agents_dir: str,
     prompt: str,
@@ -510,6 +539,8 @@ async def run_orchestrator(
     timeout: int,
     model: str = "opus",
     *,
+    agent_models: dict[str, str] | None = None,
+    backend: AgentBackend | None = None,
     show_status: bool = True,
 ) -> dict[str, Any]:
     """Run all three agents concurrently and synthesize results.
@@ -526,7 +557,14 @@ async def run_orchestrator(
         prompt: The prompt payload.
         output_dir: Directory for output files.
         timeout: Per-agent timeout in seconds.
-        model: Model short name ('opus', 'sonnet', 'haiku').
+        model: Model short name for all agents ('opus', 'sonnet', 'haiku').
+            Back-compat: kept so the ~40 existing call sites in tests that
+            pass ``model=`` keep working untouched. New callers should pass
+            ``agent_models`` + ``backend`` from ``select_backend()``.
+        agent_models: Per-agent model map. When None, derived from ``model``
+            so every agent uses the same model (BDD-30 back-compat).
+        backend: Transport backend. When None, defaults to ClaudeBackend()
+            to preserve 3.x behavior for existing callers.
         show_status: Render a live status tree while agents run. When the
             stream is not a TTY, plain one-line-per-event output is emitted
             instead.
@@ -538,6 +576,13 @@ async def run_orchestrator(
     Raises:
         RuntimeError: If fewer than 2 agents succeed.
     """
+    # Back-compat (BDD-30): KEEP `model` so the ~40 existing call sites in
+    # tests keep working untouched; derive agent_models from it when not
+    # supplied. New callers (select_backend) pass agent_models + backend.
+    if agent_models is None:
+        agent_models = {name: model for name in AGENTS}
+    if backend is None:
+        backend = ClaudeBackend()
     successful: list[dict[str, Any]] = []
     failed: list[str] = []
     # Telemetry (2.2.1): names of agents whose first attempt raised
@@ -589,7 +634,15 @@ async def run_orchestrator(
         _safe_display_update(display, name, "running", log_gate)
         try:
             try:
-                result = await launch_agent(name, agents_dir, prompt, output_dir, timeout, model)
+                result = await launch_agent(
+                    name,
+                    agents_dir,
+                    prompt,
+                    output_dir,
+                    timeout,
+                    agent_models[name],
+                    **({"backend": backend} if not isinstance(backend, ClaudeBackend) else {}),
+                )
             except (ValidationError, json.JSONDecodeError) as err:
                 # Single-shot retry (2.2.0 + 2.2.4): fires on schema
                 # drift (ValidationError, 2.2.0 scope) AND on JSON parse
@@ -608,7 +661,8 @@ async def run_orchestrator(
                     _build_retry_prompt(prompt, err),
                     output_dir,
                     timeout,
-                    model,
+                    agent_models[name],
+                    **({"backend": backend} if not isinstance(backend, ClaudeBackend) else {}),
                 )
         except (asyncio.TimeoutError, TimeoutError):
             _safe_display_update(display, name, "timeout", log_gate)
