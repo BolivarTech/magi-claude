@@ -47,11 +47,8 @@ from synthesize import (  # noqa: E402
     format_report,
     load_agent_output,
 )
-from subprocess_utils import (  # noqa: E402
-    format_stderr_excerpt as _format_stderr_excerpt,
-    reap_and_drain_stderr as _reap_and_drain_stderr,
-    write_stderr_log as _write_stderr_log,
-)
+from backend import AgentBackend  # noqa: E402
+from claude_backend import ClaudeBackend  # noqa: E402
 from run_lock import remove_lock, staleness_bound_for_timeout, write_lock  # noqa: E402
 from temp_dirs import (  # noqa: E402
     MAGI_DIR_PREFIX,
@@ -203,14 +200,13 @@ async def launch_agent(
     output_dir: str,
     timeout: int,
     model: str = "opus",
+    backend: AgentBackend | None = None,
 ) -> dict[str, Any]:
-    """Launch a single agent subprocess and return validated output.
+    """Launch one agent via *backend* and return validated output.
 
-    Runs ``claude -p`` with the agent's system prompt, applies timeout,
-    parses the raw output, and validates against the agent JSON schema.
-    The user prompt is sent via stdin to avoid OS CLI argument length
-    limits.  A copy is also saved to ``{agent_name}.prompt.txt`` in
-    *output_dir* as a debug artifact.
+    Writes the prompt + raw artifacts, then parses and validates. The
+    transport (claude -p, Ollama HTTP, ...) lives in the backend. Defaults
+    to ClaudeBackend so existing callers keep 3.x behavior.
 
     Args:
         agent_name: One of 'melchior', 'balthasar', 'caspar'.
@@ -219,6 +215,7 @@ async def launch_agent(
         output_dir: Directory for raw and parsed output files.
         timeout: Timeout in seconds per agent.
         model: Model short name ('opus', 'sonnet', 'haiku').
+        backend: Transport backend to use. Defaults to ClaudeBackend.
 
     Returns:
         Validated agent output dictionary.
@@ -248,74 +245,23 @@ async def launch_agent(
             treats this as a non-retryable failure (the run as a whole is
             shutting down).
     """
-    model_id = resolve_model(model)
+    if backend is None:
+        backend = ClaudeBackend()
 
     system_prompt_file = os.path.join(agents_dir, f"{agent_name}.md")
     raw_file = os.path.join(output_dir, f"{agent_name}.raw.json")
     parsed_file = os.path.join(output_dir, f"{agent_name}.json")
 
-    # Write user prompt to a temp file and pass via stdin to avoid
-    # OS CLI argument length limits (~32K on Windows).
     prompt_file = os.path.join(output_dir, f"{agent_name}.prompt.txt")
     with open(prompt_file, "w", encoding="utf-8") as f:
         f.write(prompt)
 
-    proc = await asyncio.create_subprocess_exec(
-        "claude",
-        "-p",
-        "--output-format",
-        "json",
-        "--model",
-        model_id,
-        "--system-prompt-file",
-        system_prompt_file,
-        "-",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    stdout = await backend.run(
+        agent_name, system_prompt_file, prompt, model, timeout, output_dir
     )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=prompt.encode("utf-8")), timeout=timeout
-        )
-    except asyncio.TimeoutError:
-        stderr_buffered = await _reap_and_drain_stderr(proc)
-        # Persisting the log is best-effort. If it fails (disk full,
-        # permission denied), surface a warning but do not let the
-        # OSError shadow the TimeoutError the caller actually needs.
-        try:
-            _write_stderr_log(output_dir, agent_name, stderr_buffered)
-        except OSError as log_exc:
-            print(
-                f"WARNING: Failed to persist {agent_name}.stderr.log on timeout: {log_exc}",
-                file=sys.stderr,
-            )
-        raise TimeoutError(
-            f"Agent '{agent_name}' timed out after {timeout}s"
-            f"{_format_stderr_excerpt(stderr_buffered)}"
-        ) from None
 
     with open(raw_file, "wb") as f:
         f.write(stdout)
-
-    # The stderr log is a diagnostic artefact, not load-bearing. A disk
-    # error here (disk full, permission drop, antivirus lock on Windows)
-    # must not turn an otherwise-successful agent into a reported
-    # failure. Mirror the timeout-path pattern: warn and continue.
-    try:
-        _write_stderr_log(output_dir, agent_name, stderr)
-    except OSError as log_exc:
-        print(
-            f"WARNING: Failed to persist {agent_name}.stderr.log: {log_exc}",
-            file=sys.stderr,
-        )
-
-    if proc.returncode != 0:
-        stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else "no stderr"
-        raise RuntimeError(
-            f"Agent '{agent_name}' exited with code {proc.returncode}: {stderr_text}"
-        )
 
     parse_raw_output(raw_file, parsed_file)
     return load_agent_output(parsed_file)

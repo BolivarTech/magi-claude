@@ -1252,7 +1252,8 @@ class TestLaunchAgentTimeoutReaping:
         def failing_write(output_dir, agent_name, data):
             raise OSError(28, "No space left on device")
 
-        monkeypatch.setattr(run_magi, "_write_stderr_log", failing_write)
+        import claude_backend as _claude_backend
+        monkeypatch.setattr(_claude_backend, "_write_stderr_log", failing_write)
 
         with pytest.raises(TimeoutError, match="timed out after"):
             await run_magi.launch_agent(
@@ -1359,8 +1360,9 @@ class TestLaunchAgentSuccessStderrLog:
         def failing_write(output_dir, agent_name, data):
             raise OSError(13, "Permission denied")
 
+        import claude_backend as _claude_backend
         monkeypatch.setattr(run_magi.asyncio, "create_subprocess_exec", fake_create)
-        monkeypatch.setattr(run_magi, "_write_stderr_log", failing_write)
+        monkeypatch.setattr(_claude_backend, "_write_stderr_log", failing_write)
         (tmp_path / "melchior.md").write_text("sys prompt", encoding="utf-8")
 
         result = await run_magi.launch_agent(
