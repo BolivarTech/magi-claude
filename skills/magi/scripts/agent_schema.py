@@ -36,7 +36,7 @@ AGENT_OUTPUT_JSON_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["severity", "title", "detail", "file", "line", "category"],
+                "required": ["severity", "title", "detail"],
                 "properties": {
                     "severity": {"type": "string", "enum": ["critical", "warning", "info"]},
                     "title": {"type": "string"},
