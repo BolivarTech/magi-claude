@@ -53,6 +53,12 @@ without changing the default Claude path. Quick start: `/magi --ollama` (or
 rationale, configuration, default models, and recommended hardware tiers — in
 [`docs/ollama-backend.md`](docs/ollama-backend.md).
 
+> **`--ollama` runs the gate Claude-free, end-to-end.** The consensus verdict and the
+> output banner are produced by **deterministic local Python** (`consensus.determine_consensus`
+> + `reporting.format_report`), not by any LLM — so with `--ollama` the *entire* cycle
+> (three mages, synthesis, and report) runs without any Claude/Anthropic API call. It is
+> runnable standalone as a CI gate: `python skills/magi/scripts/run_magi.py <mode> <file_or_text> --ollama`.
+
 ---
 
 ## Agents
