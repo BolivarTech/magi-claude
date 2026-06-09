@@ -64,7 +64,7 @@ Ejemplo de `magi-ollama.toml`:
 base_url = "http://localhost:11434/v1"   # OpenAI-compatible base (cualquier path se respeta verbatim; host:port pelado recibe /v1)
 # api_key = "sk-..."                       # solo para nube/auth; local no la necesita
 [models]
-melchior  = "glm-5:cloud"
+melchior  = "qwen3.5:397b-cloud"
 balthasar = "gpt-oss:120b-cloud"
 caspar    = "deepseek-v4-pro:cloud"
 # structured = "schema"                    # "schema" | "object" | "off"
@@ -101,7 +101,7 @@ modelo más capaz va a **Caspar** (el crítico es el asiento de mayor apalancami
 
 | Mago | Rol | Modelo default | Linaje |
 |------|-----|----------------|--------|
-| **Melchior** | Científico | `glm-5:cloud` | Zhipu |
+| **Melchior** | Científico | `qwen3.5:397b-cloud` | Alibaba |
 | **Balthasar** | Pragmático | `gpt-oss:120b-cloud` | OpenAI |
 | **Caspar** | Crítico | `deepseek-v4-pro:cloud` | DeepSeek |
 
@@ -116,10 +116,10 @@ modelo más capaz va a **Caspar** (el crítico es el asiento de mayor apalancami
 |------|----------|-----------|--------|----------|
 | **Ligero** | `qwen3:8b` | `gpt-oss:20b` | `deepseek-r1:8b` | 1 GPU ~16-24 GB (puede serializar) |
 | **Balanceado** | `qwen3:32b` | `gpt-oss:20b` | `deepseek-r1:32b` | ~48-64 GB |
-| **Máximo (default)** | `glm-5:cloud` | `gpt-oss:120b-cloud` | `deepseek-v4-pro:cloud` | Ollama Cloud (`ollama signin`) o 80 GB+ |
+| **Máximo (default)** | `qwen3.5:397b-cloud` | `gpt-oss:120b-cloud` | `deepseek-v4-pro:cloud` | Ollama Cloud (`ollama signin`) o 80 GB+ |
 
 Linaje consistente por rol entre tiers: **Caspar = DeepSeek** (el reasoner más fuerte),
-**Balthasar = OpenAI** (gpt-oss, esfuerzo ajustable), **Melchior = Qwen/Zhipu**. El tier
+**Balthasar = OpenAI** (gpt-oss, esfuerzo ajustable), **Melchior = Qwen** (Alibaba). El tier
 Máximo usa tags `:cloud` (sin descarga de pesos, requiere `ollama signin`).
 
 > Nota de VRAM/concurrencia: MAGI lanza los 3 agentes en paralelo; si los modelos no

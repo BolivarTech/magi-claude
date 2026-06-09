@@ -23,9 +23,9 @@ DEFAULT_BASE_URL = "http://localhost:11434/v1"
 #: Default trio (tier "Máximo", cloud) — single source for resolver + --ollama-init.
 DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(
     {
-        "melchior": "glm-5:cloud",
-        "balthasar": "gpt-oss:120b-cloud",
-        "caspar": "deepseek-v4-pro:cloud",
+        "melchior": "qwen3.5:397b-cloud",  # Scientist  (Alibaba)  -- theoretical analysis
+        "balthasar": "gpt-oss:120b-cloud",  # Pragmatist (OpenAI)   -- practical trade-offs
+        "caspar": "deepseek-v4-pro:cloud",  # Critic     (DeepSeek) -- adversarial review
     }
 )
 _MAGES = ("melchior", "balthasar", "caspar")
