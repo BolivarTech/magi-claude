@@ -25,7 +25,7 @@ DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(
     {
         "melchior": "qwen3.5:397b-cloud",  # Scientist  (Alibaba)  -- theoretical analysis
         "balthasar": "gpt-oss:120b-cloud",  # Pragmatist (OpenAI)   -- practical trade-offs
-        "caspar": "deepseek-v4-pro:cloud",  # Critic     (DeepSeek) -- adversarial review
+        "caspar": "glm-5.2:cloud",  # Critic     (Zhipu)    -- adversarial review
     }
 )
 _MAGES = ("melchior", "balthasar", "caspar")
