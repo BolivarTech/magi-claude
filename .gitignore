@@ -34,3 +34,10 @@ magi-audit-postfix/
 # The directory persists on disk after branch checkout to main until the
 # operator deletes both the branch and the directory on 2026-05-29.
 experiments/
+
+# Local developer tooling (SBTDD/graphify/usage-gate helpers from
+# BolivarTech/AI_Tools). Referenced by CLAUDE.local.md but not part of the
+# shipped plugin — each developer instantiates their own copy.
+/scripts/claude_usage.py
+/scripts/sleep_signal.py
+/scripts/graphify_ollama.py
