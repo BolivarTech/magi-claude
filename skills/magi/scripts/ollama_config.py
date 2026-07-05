@@ -24,7 +24,7 @@ DEFAULT_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(
     {
         "melchior": "qwen3.5:397b-cloud",  # Scientist  (Alibaba)  -- theoretical analysis
-        "balthasar": "gpt-oss:120b-cloud",  # Pragmatist (OpenAI)   -- practical trade-offs
+        "balthasar": "kimi-k2.6:cloud",  # Pragmatist (Moonshot) -- practical trade-offs
         "caspar": "glm-5.2:cloud",  # Critic     (Zhipu)    -- adversarial review
     }
 )

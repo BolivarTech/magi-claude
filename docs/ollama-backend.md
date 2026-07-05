@@ -66,7 +66,7 @@ base_url = "http://localhost:11434/v1"   # OpenAI-compatible base (any path is h
 # api_key = "sk-..."                       # cloud/auth only; local does not need it
 [models]
 melchior  = "qwen3.5:397b-cloud"
-balthasar = "gpt-oss:120b-cloud"
+balthasar = "kimi-k2.6:cloud"
 caspar    = "glm-5.2:cloud"
 # structured = "schema"                    # "schema" | "object" | "off"
 ```
@@ -104,7 +104,7 @@ most capable model goes to **Caspar** (the critic is the highest-leverage seat â
 | Mage | Role | Default model | Lineage |
 |------|-----|----------------|--------|
 | **Melchior** | Scientist | `qwen3.5:397b-cloud` | Alibaba |
-| **Balthasar** | Pragmatist | `gpt-oss:120b-cloud` | OpenAI |
+| **Balthasar** | Pragmatist | `kimi-k2.6:cloud` | Moonshot |
 | **Caspar** | Critic | `glm-5.2:cloud` | Zhipu |
 
 > âš ï¸ **Model recommendations current as of 2026-07-03.** The Ollama catalog
@@ -118,14 +118,15 @@ most capable model goes to **Caspar** (the critic is the highest-leverage seat â
 |------|----------|-----------|--------|----------|
 | **Light** | `qwen3:8b` | `gpt-oss:20b` | `deepseek-r1:8b` | 1 GPU ~16-24 GB (may serialize) |
 | **Balanced** | `qwen3:32b` | `gpt-oss:20b` | `deepseek-r1:32b` | ~48-64 GB |
-| **Maximum (default)** | `qwen3.5:397b-cloud` | `gpt-oss:120b-cloud` | `glm-5.2:cloud` | Ollama Cloud (`ollama signin`) or 80 GB+ |
+| **Maximum (default)** | `qwen3.5:397b-cloud` | `kimi-k2.6:cloud` | `glm-5.2:cloud` | Ollama Cloud (`ollama signin`) or 80 GB+ |
 
-Lineage per role: **Balthasar = OpenAI** (gpt-oss, adjustable effort),
-**Melchior = Qwen** (Alibaba). **Caspar** uses **DeepSeek-R1** in the Light/Balanced
-tiers (a strong local reasoner), but the **default Maximum tier moved Caspar to
-`glm-5.2:cloud` (Zhipu)** after `deepseek-v4-pro:cloud` proved unreliable at
-chat-time (timeouts/5xx); GLM keeps a distinct lineage in the critic's
-highest-leverage seat. The Maximum tier uses `:cloud` tags (no weight download,
+Lineage per role: **Melchior = Qwen** (Alibaba). In the Light/Balanced tiers
+**Balthasar = OpenAI** (`gpt-oss`, adjustable effort) and **Caspar = DeepSeek-R1**
+(a strong local reasoner); the **default Maximum tier** instead runs
+**Balthasar = `kimi-k2.6:cloud` (Moonshot)** and **Caspar = `glm-5.2:cloud`
+(Zhipu)** â€” the latter after `deepseek-v4-pro:cloud` proved unreliable at
+chat-time (timeouts/5xx). The three defaults keep distinct lineages
+(Qwen / Moonshot / Zhipu). The Maximum tier uses `:cloud` tags (no weight download,
 requires `ollama signin`).
 
 > VRAM/concurrency note: MAGI launches the 3 agents in parallel; if the models do
