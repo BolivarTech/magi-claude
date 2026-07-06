@@ -293,6 +293,46 @@ class TestRunOrchestrator:
             assert len(result["agents"]) == 3
 
     @pytest.mark.asyncio
+    async def test_agents_dispatched_and_reported_caspar_first(self, tmp_path):
+        """Caspar leads the dispatch and the report (order Caspar→Melchior→Balthasar).
+
+        The AGENTS order is deliberately Caspar-first so the adversarial critic
+        leads the live status display and the report, mirroring the fallback's
+        anti-anchoring 'Caspar first' ordering. Parallel execution is unchanged
+        (all three still run concurrently via asyncio.gather); only the kickoff
+        and stable output order change.
+        """
+        from run_magi import run_orchestrator
+
+        launch_order: list[str] = []
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+        ):
+            launch_order.append(agent_name)
+            return {
+                "agent": agent_name,
+                "verdict": "approve",
+                "confidence": 0.9,
+                "summary": f"{agent_name} OK",
+                "reasoning": "Fine",
+                "findings": [],
+                "recommendation": "Merge",
+            }
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+
+        expected = ["caspar", "melchior", "balthasar"]
+        assert launch_order == expected, f"dispatch order {launch_order} != {expected}"
+        assert [a["agent"] for a in result["agents"]] == expected
+
+    @pytest.mark.asyncio
     async def test_one_agent_fails_degraded_mode(self, tmp_path):
         from run_magi import run_orchestrator
 

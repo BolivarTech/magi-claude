@@ -88,7 +88,11 @@ __all__ = [
     "resolve_model",
 ]
 
-AGENTS = ("melchior", "balthasar", "caspar")
+# Dispatch/display/report order — deliberately Caspar-first so the adversarial
+# critic leads (mirrors the fallback's anti-anchoring ordering). Agents still run
+# concurrently (asyncio.gather); this tuple only sets kickoff and stable output
+# order. Keep Caspar first.
+AGENTS = ("caspar", "melchior", "balthasar")
 MAX_HISTORY_RUNS = 5
 VALID_MODES = ("code-review", "design", "analysis")
 
