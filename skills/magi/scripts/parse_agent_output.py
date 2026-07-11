@@ -34,7 +34,7 @@ _SCRIPT_DIR = str(Path(__file__).parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from validate import MAX_INPUT_FILE_SIZE, VALID_VERDICTS  # noqa: E402
+from validate import MAX_INPUT_FILE_SIZE  # noqa: E402
 
 
 # Regex to strip leading ```json (case-insensitive, optional whitespace) or bare ```
@@ -134,95 +134,63 @@ _LENIENT_RECOVERY_MAX_CHARS = 1_000_000
 _MAX_BRACE_PROBES = 2_000
 
 
-def _is_enum_definition(value: str) -> bool:
-    """Whether *value* is the verdict enum's own DEFINITION, member for member.
-
-    ``"approve | reject | conditional"`` — in any order, any case, with or without
-    spaces — is the schema *being quoted*, not a verdict. Nothing else qualifies: a
-    strict subset (``"approve | conditional"``) is a **drifted verdict**, and a
-    drifted verdict must stay a rival candidate (see :func:`_is_verdict_shaped`).
-
-    Derived from ``VALID_VERDICTS`` on purpose. The first implementation used a regex
-    for "any word-token pipe-union", which re-encoded the enum's *shape* instead of
-    its *content* — so the code said "the enum's definition" while the regex said
-    "any pipe-union", and only one of those was true. The gap was fail-open: a real
-    verdict drifted to ``"approve | conditional"`` stopped being a rival, the echoed
-    system-prompt example became the sole match, and consensus received a fabricated
-    ``approve``. One source of truth, or the two drift apart and the drift is silent.
-
-    Args:
-        value: The raw ``verdict`` field of a decoded candidate object.
-
-    Returns:
-        True if *value* enumerates exactly the valid verdicts, False otherwise.
-    """
-    parts = [part.strip().lower() for part in value.split("|")]
-    return len(parts) > 1 and set(parts) == VALID_VERDICTS
-
-
 def _is_verdict_shaped(candidate: object) -> bool:
-    """Whether *candidate* could be a real verdict — excluding SCHEMA RESTATEMENTS.
+    """Whether *candidate* has the shape of an agent verdict: the two keys, nothing else.
 
-    Requires the two discriminating keys, and disqualifies **exactly one** extra thing
-    — a claim the code keeps honest by writing the rule as a single expression:
-    a ``verdict`` whose value is the **enum's definition** rather than a verdict —
-    ``"approve | reject | conditional"``. A thinking model restating its own schema
-    (``glm-5.2`` and ``qwen3.5`` — two thirds of the default trio — do this inside
-    ``<think>``) emits a decodable object carrying both keys, and that restatement
-    used to count as a rival candidate: the ambiguity guard fired, the mage was
-    retried, the retry reproduced the same output, and the mage was **dropped** — a
-    degraded run, which by the Integrity rule approves nothing.
+    Deliberately **key-only**. Every attempt to make it smarter has been a fail-open,
+    and 4.0.6 made three of them in three consecutive review rounds before the
+    evidence settled it. This docstring is the record, because the next person to
+    "harden" this function will feel exactly as certain as I did.
 
-    **Why this is NOT simply "verdict must be a valid enum member" (4.0.6 review).**
-    That was the first attempt and it was a fail-closed → fail-open regression. This
-    predicate does not only *select* the verdict — it feeds the **ambiguity guard**,
-    which is the fail-closed mechanism. Narrowing the predicate narrows the guard:
-    fewer candidates ⇒ fewer ambiguity trips ⇒ **more single-match fabrications**.
-    Requiring an enum member also excluded a *real* verdict whose value merely
-    drifted in case (``"Reject"``) — and enum drift is common; it is why
-    ``_build_retry_prompt`` exists. Verified consequence: the model's true ``Reject``
-    (carrying a ``critical`` finding) stopped counting, the echoed system-prompt
-    example became the sole match, and consensus received a schema-perfect fabricated
-    ``approve`` from the adversarial seat. Pinned by
-    ``test_echoed_example_beside_a_case_drifted_verdict_still_fails_closed``.
+    **The trap.** This predicate does not only *select* the verdict — it also feeds the
+    **ambiguity guard** (``_embedded_verdict_object``: two candidates ⇒ fail closed).
+    So every exclusion added here narrows the guard: fewer candidates ⇒ fewer ambiguity
+    trips ⇒ **more single-match fabrications**. *Widening the exclusion looks like
+    tightening the check*, because the guard you are disarming is invisible in the line
+    you are editing.
 
-    So the rule is: **a drifted verdict is still a rival** (it keeps the guard armed,
-    and alone it is recovered so ``load_agent_output`` can raise its precise
-    ``Invalid verdict 'Reject'`` — the feedback the retry needs). The *only*
-    disqualified value is the enum's own definition, decided by
-    :func:`_is_enum_definition` against ``VALID_VERDICTS`` itself.
+    **The three attempts, all rejected:**
 
-    **The same error was made THREE times, in three consecutive review rounds. Every
-    one of them was an extra condition added to this function.**
+    ================  ===============================  ==============================
+    Attempt           Exclusion added                  What stopped being a rival
+    ================  ===============================  ==============================
+    enum member       ``verdict in VALID_VERDICTS``    ``"Reject"`` (case drift)
+    pipe-union regex  any ``a | b`` union              ``"approve | conditional"``
+    type guard        ``isinstance(verdict, str)``     ``null``, ``["reject"]``, ``0``
+    ================  ===============================  ==============================
 
-    ===================  ==================================  =========================
-    Attempt              Exclusion added                     What stopped being a rival
-    ===================  ==================================  =========================
-    enum member          ``verdict in VALID_VERDICTS``       ``"Reject"`` (case drift)
-    pipe-union regex     any ``a | b`` union                 ``"approve | conditional"``
-    type guard           ``isinstance(verdict, str)``        ``null``, ``["reject"]``, ``0``
-    ===================  ==================================  =========================
+    In each one the excluded object was **the mage's real verdict**; the echoed
+    system-prompt example (which literally carries ``"verdict": "approve"``) became the
+    sole match; and consensus received a schema-perfect fabricated ``approve`` **from
+    the adversarial seat** — where the previous behaviour was a clean fail-closed drop
+    and a retry.
 
-    In all three, the excluded object was **the mage's real verdict**, the echoed
-    system-prompt example became the sole match, and consensus received a fabricated
-    ``approve`` from the adversarial seat — where the previous behaviour was a clean
-    fail-closed drop and a retry.
+    **Why no exclusion at all, not even a "correct" one.** The three attempts were all
+    trying to disqualify a *schema restatement* — the object a thinking model emits when
+    it quotes its own schema (``"verdict": "approve | reject | conditional"``), which
+    counts as a rival candidate and drops the mage. A restatement exclusion derived from
+    ``VALID_VERDICTS`` was written, and it was correct as far as it went. It was removed
+    anyway, on evidence:
 
-    They share one shape, and it is worth naming: **widening the exclusion looks like
-    tightening the check, because the guard it disarms is invisible in the line you
-    are editing.** Anything excluded here is one fewer thing the ambiguity guard can
-    see. So: derive the exclusion from the schema (``VALID_VERDICTS``), never from a
-    pattern that re-encodes the schema's *shape*, and **do not add a second
-    condition** — not even a type guard.
+    * Across **171 captured agent outputs** from the real default trio, it changed the
+      outcome of **zero**. Not one payload contained a restatement rival.
+    * Reverting it left the **entire suite green** — it was unpinned by any positive test.
+    * It matched only **one of six** plausible spellings of a restatement (the agent
+      prompts actually teach the comma form, ``"approve", "reject", or "conditional"``).
+    * And it had a **real, verified cost**: it removed an *accidental* rival, so a
+      payload with a restatement beside an echoed example — which used to fail closed —
+      fabricated an ``approve`` instead.
 
-    **What this still does not close, stated without a guarantee this time.** The
-    LOCKED single-match fabrication residual is untouched: a lone echoed example
-    carries a perfectly valid ``"approve"``. And excluding restatements does remove
-    one *accidental* rival — a payload where a restatement happened to be the second
-    candidate that saved an otherwise-fabricating input now fabricates. That was
-    never a guard, only luck, but it is a real narrowing and the honest thing is to
-    say so. The durable fix is the verdict **sentinel** (MS2); see the residual note
-    in :func:`_embedded_verdict_object` and ``CLAUDE.techdebt.md``.
+    A guard-narrowing whose benefit no test and no artifact can demonstrate, paid for in
+    the one currency this system cannot afford, is not a hardening. The mage drop it
+    aimed at **fails closed** (degraded run ⇒ by the Integrity rule, approves nothing);
+    the fabrication it introduced fails **open**, and silently. Given the choice, take
+    the loud failure every time.
+
+    The durable fix for both is the verdict **sentinel** (MS2): stop *searching* for the
+    verdict and *extract* it from between markers. Then a restatement, an echo, and a
+    tool-use blob are all simply outside the markers, and none of this is a judgement
+    call. See :func:`_embedded_verdict_object` and ``CLAUDE.techdebt.md``.
 
     Args:
         candidate: A JSON value decoded from the agent's output.
@@ -232,20 +200,9 @@ def _is_verdict_shaped(candidate: object) -> bool:
     """
     if not isinstance(candidate, dict):
         return False
-    if not all(key in candidate for key in _VERDICT_KEYS):
-        return False
-    verdict = candidate.get("verdict")
-    # ONE exclusion, written as one expression on purpose: the enum's own definition
-    # is the schema being quoted, not a verdict, so it is no rival. EVERYTHING else
-    # is — a valid member, a case-drifted member, a partial union, a value of the
-    # wrong type entirely — and each one must keep the ambiguity guard armed.
-    #
-    # Do not add a second condition here. Three separate attempts to "tighten" this
-    # check each added one, and each turned a fail-closed mage drop into a silently
-    # fabricated ``approve``. Even an innocent-looking ``isinstance(verdict, str)``
-    # early-return is an exclusion: a model that type-drifts the field (``null``, a
-    # list) then stops being a rival and the echoed example wins by default.
-    return not (isinstance(verdict, str) and _is_enum_definition(verdict))
+    # ONE condition. Do not add a second — see the table above; each of the three
+    # attempts read as a harmless tightening and each one fabricated an ``approve``.
+    return all(key in candidate for key in _VERDICT_KEYS)
 
 
 def _embedded_verdict_object(text: str) -> dict[str, Any] | None:

@@ -579,6 +579,61 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    def test_a_schema_restatement_drops_the_mage_and_that_is_the_SAFE_failure(self):
+        """CHARACTERIZATION: asserts a limitation, so it fails when MS2 fixes it.
+
+        A thinking model that quotes its own schema (``"verdict": "approve | reject |
+        conditional"``) emits a decodable object carrying both discriminating keys. It
+        counts as a rival candidate, the ambiguity guard fires, and the mage is
+        **dropped** → degraded run → by the Integrity rule, approves nothing.
+
+        4.0.6 tried three times to exclude that object from candidacy, and **every
+        attempt fabricated an ``approve``** instead (see ``_is_verdict_shaped``). The
+        exclusion was then removed on evidence: over 171 captured outputs from the real
+        trio it changed **zero** results, while its cost — a narrowed ambiguity guard —
+        was reproducible.
+
+        So this drop is deliberate, and this test says so. **It is the safe failure:**
+        loud, fail-closed, and it blocks the gate rather than approving it. The cure is
+        not a cleverer predicate — it is the verdict **sentinel** (MS2), which stops
+        *searching* for the verdict and *extracts* it from between markers, at which
+        point a restatement is simply outside them.
+
+        When the sentinel lands this test MUST fail. That failure is the signal to
+        delete it — never to weaken the guard so it passes.
+        """
+        restatement = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve | reject | conditional",  # the schema, quoted
+                "confidence": 0.0,
+                "summary": "The shape I must emit",
+                "reasoning": "Recalling the contract",
+                "findings": [],
+                "recommendation": "n/a",
+            }
+        )
+        real_verdict = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "reject",
+                "confidence": 0.93,
+                "summary": "Six concrete defects.",
+                "reasoning": "Traced every claim against the code.",
+                "findings": [{"severity": "critical", "title": "Race", "detail": "TOCTOU."}],
+                "recommendation": "Do not merge.",
+            }
+        )
+        raw = f"<think>{restatement}</think>\n```json\n{real_verdict}\n```"
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_deeply_nested_json_degrades_the_mage_instead_of_crashing_the_run(self):
         """CPython raises RecursionError, not JSONDecodeError, on deep nesting.
 
