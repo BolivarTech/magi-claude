@@ -273,7 +273,24 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         )
 
     with open(input_path, encoding="utf-8") as fh:
-        data = json.load(fh)
+        raw = fh.read()
+
+    # Read as TEXT, then decide whether it is an envelope (4.0.6).
+    #
+    # The Claude backend writes a transport envelope, so the raw file is JSON at
+    # the top level. The Ollama backend writes ``choices[0].message.content``
+    # already unwrapped, so the raw file is the agent's verdict ITSELF — and many
+    # models emit that verdict inside a markdown fence, which is not JSON at all.
+    #
+    # Parsing before stripping the fence (the pre-4.0.6 order) made the fence
+    # handling unreachable on exactly the path that needed it: ``json.load`` blew
+    # up at character 0, the mage was retried, the retry produced the same
+    # perfectly valid fenced verdict, and the mage was dropped. A schema-correct
+    # verdict was discarded because of the ORDER of two operations.
+    try:
+        data: object = json.loads(raw)
+    except json.JSONDecodeError:
+        data = raw  # not an envelope: fenced or prose-wrapped content
 
     text = _extract_text(data)
     text = _strip_code_fences(text)
