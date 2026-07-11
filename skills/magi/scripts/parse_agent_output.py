@@ -473,19 +473,18 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         # guard would otherwise have given it.
         #
         # MEASURED, because two earlier versions of this comment reasoned instead and were
-        # both wrong. Max nesting depth before RecursionError (approximate — the exact
-        # value shifts with how much stack the caller has already used; what matters is
-        # the ORDERING, which is stable):
+        # both wrong. Both encode sites now use the compact ``json.dumps`` (no indent).
+        # Max nesting depth before RecursionError (approximate — it shifts with how much
+        # stack the caller has already used; the ORDERING is what is stable):
         #
-        #                    decoder   dumps()   dumps(indent=2)
-        #     CPython 3.14    ~16.9k    ~15.5k    ~15.5k   <- C encoder handles indent
-        #     CPython 3.12     ~3.0k     ~3.0k     ~1.0k   <- pure-Python for indent
+        #                    decoder   json.dumps()
+        #     CPython 3.14    ~16.9k    ~15.5k
+        #     CPython 3.12     ~3.0k     ~3.0k
         #
-        # So there is no clean "encoders are weaker than the decoder" rule to lean on: on
-        # 3.14 both encoders are, on 3.12 only the indent one is (and this catch never
-        # fires there — anything that decodes also dumps). Which catch fires depends on
-        # the interpreter AND the route, which is exactly why both exist and why neither
-        # may be deleted as redundant.
+        # The encoder is weaker than (3.14) or level with (3.12) the decoder, so an object
+        # that decoded can still fail to encode — which is why both encode catches exist.
+        # Which of the two fires depends only on the ROUTE (bare hits this one, fenced
+        # hits the final one), so neither is redundant.
         raise json.JSONDecodeError(
             "Agent output is nested too deeply to re-serialise", raw, 0
         ) from exc
@@ -499,22 +498,29 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     parsed = _loads_lenient(text)
 
     try:
-        payload = json.dumps(parsed, indent=2)
+        # COMPACT, not ``indent=2``. Reading-as-text-first routes a deeply-nested valid
+        # container here for the first time, and per-level indentation adds ``2 × depth``
+        # spaces per element — a 16 KB fenced payload of nested arrays re-encoded to
+        # ~128 MB (measured), an untrusted input below ``MAX_INPUT_FILE_SIZE`` defeating
+        # the cap that exists to bound resource use, and a comb payload within the cap
+        # projecting to a ``MemoryError`` the orchestrator does not retry. The output is
+        # never read for its formatting — ``load_agent_output`` re-parses it — so the
+        # indentation bought nothing. Compact makes the output O(input).
+        payload = json.dumps(parsed)
     except RecursionError as exc:
-        # The final encode, reached by fenced and prose-wrapped payloads. ``indent=2``
-        # is the weakest (or joint-weakest) of the JSON calls on BOTH supported
-        # interpreters (see the table above), so an object that decoded
-        # cleanly can still fail to re-encode here. An escaping RecursionError is not
-        # caught by the orchestrator's ``(ValidationError, JSONDecodeError)`` retry, so
-        # the mage would be dropped without a second attempt. Map it, exactly as
-        # ``_loads_lenient`` maps the decode side.
+        # The final encode still recurses per level (C encoder: ~15.5k deep on 3.14,
+        # ~3.0k on 3.12 — see the table above), so an object that decoded cleanly can
+        # still fail to re-encode. An escaping RecursionError is not caught by the
+        # orchestrator's ``(ValidationError, JSONDecodeError)`` retry, so the mage would
+        # be dropped without a second attempt. Map it, as ``_loads_lenient`` maps the
+        # decode side.
         raise json.JSONDecodeError(
             "Recovered verdict is nested too deeply to re-encode", text, 0
         ) from exc
 
     # Encode BEFORE opening the file. Streaming straight into ``open(..., "w")`` left a
-    # truncated ~1 MB artifact behind whenever the encoder raised mid-write — for a mage
-    # that was then dropped, in the very run dir a reviewer is told to read.
+    # truncated artifact behind whenever the encoder raised mid-write — for a mage that
+    # was then dropped, in the very run dir a reviewer is told to read.
     with open(output_path, "w", encoding="utf-8") as fh:
         fh.write(payload)
         fh.write("\n")

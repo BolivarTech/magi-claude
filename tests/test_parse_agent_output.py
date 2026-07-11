@@ -662,19 +662,20 @@ class TestOllamaFencedContent:
         * ``json.loads`` on the raw file,
         * ``raw_decode`` during prose recovery (``_loads_lenient``),
         * ``_extract_text``'s ``json.dumps`` — reached only by a **bare** verdict,
-        * the final ``json.dumps(..., indent=2)`` — reached by a **fenced** one.
+        * the final ``json.dumps`` — reached by a **fenced** one.
 
-        Measured, per interpreter (max depth before ``RecursionError``)::
+        Measured, per interpreter (max depth before ``RecursionError``, both encode sites
+        compact since the amplification fix)::
 
-                             decoder   dumps()   dumps(indent=2)
-            CPython 3.14      16909     15500     15500
-            CPython 3.12       2997      2997       993
+                             decoder   json.dumps()
+            CPython 3.14      16909     15500
+            CPython 3.12       2997      2997
 
         So *which* call raises depends on the interpreter **and** on the route (bare vs
         fenced) — one depth at one site proves nothing, which is precisely how the first
-        attempt at this guard passed while the sibling shape was still broken. The
-        depths are chosen to land in both windows: ``1_200`` exercises 3.12's encode gap
-        (993–2997), the larger ones exercise 3.14's.
+        attempt at this guard passed while the sibling shape was still broken. The depths
+        span both regimes: on 3.14 the encoders raise between ~15.5k and ~16.9k while the
+        decoder still succeeds; on 3.12 anything past ~3k raises at the top-level decode.
 
         That first attempt mapped the fenced route only, so the sibling shape — a bare,
         unfenced verdict, the plainest Ollama payload there is — still escaped. So this
@@ -817,7 +818,7 @@ class TestOllamaFencedContent:
         """The written file must be O(input), not O(input × nesting depth).
 
         Reading-as-text-first routes a deeply-nested *valid* container into the final
-        encode for the first time, and ``json.dumps(..., indent=2)`` adds ``2 × depth``
+        encode for the first time, and ``json.dumps(..., indent=2)`` added ``2 × depth``
         spaces per element: a 16 KB fenced payload of nested arrays re-encoded to ~128
         MB, measured — an untrusted input BELOW ``MAX_INPUT_FILE_SIZE`` defeating the
         very cap meant to bound resource use, and writing it into the run dir a reviewer
