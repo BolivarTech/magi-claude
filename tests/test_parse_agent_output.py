@@ -743,6 +743,42 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    @pytest.mark.parametrize("fenced", [False, True], ids=["bare", "fenced"])
+    def test_an_absurdly_long_integer_is_retried_not_dropped(self, fenced):
+        """A huge integer literal must not escape as a bare ``ValueError``.
+
+        CPython 3.11+ caps integer *string conversion* at ``sys.int_info
+        .default_max_str_digits`` (4300). Past that, ``json.loads`` raises a plain
+        ``ValueError`` — **not** a ``JSONDecodeError`` — so ``run_magi``'s
+        ``(ValidationError, JSONDecodeError)`` retry guard does not catch it and the
+        mage is dropped without a second attempt.
+
+        Reachable and not exotic: a degenerate model repeating a digit is a classic
+        failure mode, and the schema has a numeric field (``line``) that invites it.
+
+        This is the same class as the ``RecursionError``, shape-``ValueError`` and
+        ``KeyError`` escapes this release already closed — the decoder simply has one
+        more way to fail that is not a ``JSONDecodeError``. The lesson, since it took
+        five rounds to enumerate them: *catch what the retry can handle, not the list
+        of exceptions you happen to have thought of.*
+        """
+        huge_int = "9" * 5_000
+        verdict = (
+            '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
+            '"reasoning":"r","findings":[{"severity":"info","title":"t","detail":"d",'
+            '"line":' + huge_int + "}],"
+            '"recommendation":"rec"}'
+        )
+        raw = f"```json\n{verdict}\n```" if fenced else verdict
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_undecodable_bytes_do_not_cost_the_mage_its_verdict(self):
         """A raw file with invalid UTF-8 must not raise ``UnicodeDecodeError``.
 
