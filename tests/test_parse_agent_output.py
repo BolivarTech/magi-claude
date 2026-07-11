@@ -788,11 +788,12 @@ class TestOllamaFencedContent:
         guard does not catch it and the mage is dropped without a second attempt.
 
         The house convention for reading untrusted output is already ``errors="replace"``
-        (``cost.py``, ``review_context.py``, and the cp1252 hardening in 2.2.6). Applied
-        here it is strictly better than either alternative: the JSON structure is ASCII,
-        so a bad byte can only land *inside a string field* — the verdict still parses,
-        the mage keeps its verdict, and the worst case is one replacement character in a
-        summary. Nothing is fabricated: the object recovered is still the model's own.
+        (``cost.py``, ``review_context.py``, and the cp1252 hardening in 2.2.6). A bad
+        byte can land anywhere; what matters is that one which **survives to a successful
+        parse** can only be inside a string value — so the worst case is a replacement
+        character in a summary, and the mage keeps its verdict. In the structure it breaks
+        the parse and in a key it mangles the key: both stay on the retry path. Nothing is
+        fabricated either way — what is recovered is still the model's own object.
         """
         raw = (
             b'{"agent":"caspar","verdict":"reject","confidence":0.9,'

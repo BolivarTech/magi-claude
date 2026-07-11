@@ -264,8 +264,12 @@ def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
         text: Text that may contain a verdict object embedded in prose.
 
     Returns:
-        The single qualifying verdict ``dict``, or ``None`` if zero qualify,
-        more than one qualify (ambiguous), or the probe budget is exhausted.
+        The single qualifying verdict ``dict``, or ``None`` if zero qualify or more than
+        one qualifies (ambiguous ⇒ fail closed). **Not** ``None`` merely because the
+        probe budget ran out: if exactly one object qualified before the cap, it is
+        returned — which is precisely how a *second*, real verdict beyond the cap can go
+        unseen, and why an early echo can win. That is the residual described above, not
+        an oversight in this clause.
     """
     decoder = json.JSONDecoder()
     matches: list[dict[str, Any]] = []
@@ -279,7 +283,11 @@ def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
         probes += 1
         try:
             candidate, end = decoder.raw_decode(text, brace)
-        except (json.JSONDecodeError, RecursionError):
+        # ValueError, not just JSONDecodeError: the decoder has more than one way to
+        # refuse a payload (an integer literal past ``int_max_str_digits`` raises a bare
+        # ValueError), and every one of them means the same thing here — this candidate
+        # does not decode, skip it. JSONDecodeError IS a ValueError, so this only widens.
+        except (ValueError, RecursionError):
             index = brace + 1
             continue
         if _is_verdict_shaped(candidate):
@@ -325,12 +333,16 @@ def _loads_lenient(text: str) -> Any:
         The parsed JSON value.
 
     Raises:
-        json.JSONDecodeError: If *text* yields no qualifying verdict object,
-            including the deeply-nested ``RecursionError`` case.
+        json.JSONDecodeError: If *text* yields no qualifying verdict object. **Every**
+            way the decoder can refuse the payload arrives here as this one exception —
+            a syntax error, deep nesting (``RecursionError``), or an integer literal
+            past CPython's ``int_max_str_digits``. That is the contract the orchestrator
+            depends on: it retries on ``(ValidationError, JSONDecodeError)``, so
+            anything else escaping costs the mage its second attempt.
     """
     try:
         return json.loads(text)
-    except (json.JSONDecodeError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:
         if len(text) <= _LENIENT_RECOVERY_MAX_CHARS:
             verdict = _embedded_verdict_object(text)
             if verdict is not None:
@@ -338,6 +350,14 @@ def _loads_lenient(text: str) -> Any:
         if isinstance(exc, RecursionError):
             raise json.JSONDecodeError(
                 "Input nesting exceeds the JSON decoder limit", text, 0
+            ) from exc
+        if not isinstance(exc, json.JSONDecodeError):
+            # A decoder ValueError that is NOT a JSONDecodeError — today that means an
+            # integer literal past CPython's ``int_max_str_digits`` (4300). It must still
+            # leave as a JSONDecodeError or the orchestrator's retry guard misses it and
+            # the mage is dropped without a second attempt.
+            raise json.JSONDecodeError(
+                f"Agent output is not decodable JSON: {exc}", text, 0
             ) from exc
         raise
 
@@ -377,10 +397,16 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     # errors="replace": these are the backend's bytes verbatim, and a strict decode
     # raises UnicodeDecodeError — a ValueError, but NOT a JSONDecodeError, so run_magi's
     # retry guard would miss it and the mage would be dropped without a second attempt.
-    # The JSON structure is ASCII, so a bad byte can only land inside a string field: the
-    # verdict still parses and the mage keeps it, at the cost of one replacement char.
-    # Same convention the rest of the codebase already uses for untrusted output
-    # (cost.py, review_context.py, and the cp1252 hardening of 2.2.6).
+    #
+    # A bad byte can land ANYWHERE — an earlier version of this comment said it could
+    # only land inside a string, and that was measured and false. What is true is the
+    # part that matters: a bad byte that SURVIVES to a successful parse can only be
+    # inside a string value, so the worst case is one replacement character in a summary.
+    # In the structure it breaks the parse (JSONDecodeError → retry); in a key it mangles
+    # the key (ValidationError → retry). Every outcome stays on the retry path, and none
+    # of them fabricates: what is recovered is still the model's own object. Same
+    # convention the codebase already uses for untrusted output (cost.py,
+    # review_context.py, and the cp1252 hardening of 2.2.6).
     with open(input_path, encoding="utf-8", errors="replace") as fh:
         raw = fh.read()
 
@@ -398,7 +424,7 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     # verdict was discarded because of the ORDER of two operations.
     try:
         data: object = json.loads(raw)
-    except (json.JSONDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         # RecursionError, not just JSONDecodeError: CPython raises it on deeply
         # nested input, and on the Ollama path this text is MODEL-AUTHORED, so a
         # pathological response reaches this call directly.
