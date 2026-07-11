@@ -378,6 +378,54 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    def test_think_block_restating_the_schema_still_drops_the_mage(self):
+        """CHARACTERIZATION: 4.0.6 does NOT close this. Asserts the bug on purpose.
+
+        A thinking model (glm-5.2, qwen3.5 — two thirds of the DEFAULT trio) often
+        restates its required schema inside its ``<think>`` block. That restatement
+        is a decodable object carrying both discriminating keys, so it counts as a
+        second verdict candidate: the ambiguity guard fires, the mage is retried, the
+        retry reproduces the same output, and the mage is DROPPED — a degraded run
+        that, by the Integrity rule, approves no gate.
+
+        That is the same symptom this hotfix cures for the naked-fence case, on the
+        same backend and the same model family. 4.0.6 does not fix it, and shipping
+        while quietly implying otherwise is how a "fixed" bug keeps costing runs.
+
+        The surgical fix (require ``verdict`` to be an actual enum member, which the
+        schema restatement's ``"approve | reject | conditional"`` is not) is NOT
+        taken here: ``_recover_embedded_verdict`` LOCKS further heuristic tuning in
+        favour of the verdict sentinel. See CLAUDE.techdebt.md — the owner decides.
+
+        This test asserts the CURRENT (broken) behaviour so it is measured, not
+        merely believed. It must fail the day the drop is fixed.
+        """
+        real = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "reject",
+                "confidence": 0.9,
+                "summary": "s",
+                "reasoning": "r",
+                "findings": [],
+                "recommendation": "x",
+            }
+        )
+        schema_echo = (
+            '{"agent": "caspar", "verdict": "approve | reject | conditional", '
+            '"confidence": 0.85, "summary": "...", "reasoning": "...", '
+            '"findings": [], "recommendation": "..."}'
+        )
+        raw = f"<think>The shape I must emit is {schema_echo}</think>\n```json\n{real}\n```"
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_lone_echoed_example_is_a_known_fabrication_residual(self):
         """CHARACTERIZATION: this asserts a BUG, so it fails when the bug is fixed.
 
