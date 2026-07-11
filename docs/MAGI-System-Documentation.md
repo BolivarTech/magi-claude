@@ -104,9 +104,9 @@ skills/magi/
     reporting.py              -- AGENT_TITLES + format_banner + format_report (ASCII)
     parse_agent_output.py     -- agent-output extractor (Claude envelope + bare/fenced content)
 tests/
-  test_synthesize.py          -- 74 tests: validation, consensus, confidence, dedup, labels
-  test_parse_agent_output.py  -- 65 tests: envelopes, fenced/bare content, fail-closed recovery
-  test_run_magi.py            -- 16 tests: arg parsing, model flag, orchestration, validation
+  test_synthesize.py          -- 166 tests: validation, consensus, confidence, dedup, labels
+  test_parse_agent_output.py  -- 66 tests: envelopes, fenced/bare content, fail-closed recovery
+  test_run_magi.py            -- 169 tests: arg parsing, model flag, orchestration, validation
 docs/
   MAGI-System-Documentation.md  -- This document
 pyproject.toml                -- Python >= 3.12, dual license, dev deps, tool config
@@ -487,13 +487,13 @@ Changes are picked up with `/reload-plugins` without restarting.
 
 ## 13. Test Suite
 
-109 tests across 3 test files, covering all modules:
+697 tests across the suite; the three original files, which the table below details:
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `test_synthesize.py` | 74 | Validation, weight-based consensus, confidence formula (symmetric), findings dedup, empty titles, dynamic labels, banner alignment, report formatting |
-| `test_parse_agent_output.py` | 65 | Envelope extraction (3 CLI formats), fence stripping, **bare content** (Ollama), embedded-verdict recovery and its fail-closed guards |
-| `test_run_magi.py` | 16 | Arg parsing, model flag, model passthrough, orchestration, degraded mode, input validation |
+| `test_synthesize.py` | 166 | Validation, weight-based consensus, confidence formula (symmetric), findings dedup, empty titles, dynamic labels, banner alignment, report formatting |
+| `test_parse_agent_output.py` | 66 | Envelope extraction (3 CLI formats), fence stripping, **bare content** (Ollama), embedded-verdict recovery and its fail-closed guards |
+| `test_run_magi.py` | 169 | Arg parsing, model flag, model passthrough, orchestration, degraded mode, input validation |
 
 ```bash
 # Run all tests

@@ -659,10 +659,16 @@ class TestOllamaFencedContent:
         share a depth window — which is why pinning one depth at one site is not a
         guarantee, and why the first attempt at this guard missed:
 
-        * ``json.loads`` on the raw file (C scanner — survives deepest),
+        * ``json.loads`` on the raw file,
         * ``raw_decode`` during prose recovery (``_loads_lenient``),
-        * ``_extract_text``'s ``json.dumps`` on the bare-verdict dict (**C** encoder),
-        * the final ``json.dumps(..., indent=2)`` (**pure-Python** encoder, lowest limit).
+        * ``_extract_text``'s ``json.dumps`` — reached only by a **bare** verdict,
+        * the final ``json.dumps(..., indent=2)`` — reached by a **fenced** one.
+
+        Measured on the shipped interpreter (3.14): the decoder survives ~16.9k levels,
+        both encoders only ~15.5k — so an object that decodes can still fail to encode,
+        and *which* encode site raises depends on the route the payload took. That is
+        why one depth at one site proves nothing, and why the first attempt at this
+        guard passed while the sibling shape was still broken.
 
         That first attempt mapped the fenced route only, so the sibling shape — a bare,
         unfenced verdict, the plainest Ollama payload there is — still escaped. So this
@@ -694,18 +700,45 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    def test_a_failed_encode_leaves_no_truncated_artifact(self):
+        """When the encoder blows up, the output file must not be written at all.
+
+        The verdict is encoded to a string BEFORE the output file is opened. Streaming
+        straight into ``open(..., "w")`` used to leave ~1 MB of half-written JSON behind
+        whenever the encoder raised mid-write — for a mage that was then dropped, in the
+        very run directory ``CLAUDE.md`` tells a reviewer to read. A truncated artifact
+        that looks like a verdict is exactly the kind of thing someone reads at 3am.
+        """
+        depth = 16_200  # decodes, does not re-encode
+        verdict = (
+            '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
+            '"reasoning":"r","recommendation":"x","findings":' + "[" * depth + "]" * depth + "}"
+        )
+        sentinel = "UNTOUCHED"
+        in_path = _write_temp(verdict)
+        out_path = _write_temp(sentinel, suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                assert f.read() == sentinel, (
+                    "the output file was opened and truncated despite the failure — "
+                    "encode the payload before opening it"
+                )
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_a_bare_too_nested_verdict_is_also_retryable(self):
         """The BARE Ollama shape must be mapped too — it has its own encoder.
 
         Sibling of the fenced case, and the reason that one was not enough: a bare
         verdict (no fence) decodes at the top level, so it reaches ``_extract_text``'s
-        bare-dict branch, which re-serialises it with ``json.dumps`` — the **C**
-        encoder, which survives far deeper nesting than the ``indent=2`` pure-Python
-        one and therefore blows in a *different* depth window, where the C decoder still
-        succeeds.
+        bare-dict branch and is re-serialised there — a *different* encode site from the
+        one a fenced payload reaches. Same limit, different route.
 
-        Two encoders, two windows, one guarantee. Mapping only the fenced route left
-        the plainest Ollama payload losing its retry.
+        Two sites, one guarantee. Mapping only the fenced route left the plainest Ollama
+        payload there is losing its retry.
         """
         depth = 16_200
         verdict = (

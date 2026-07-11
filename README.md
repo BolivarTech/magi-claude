@@ -294,9 +294,9 @@ skills/magi/
     reporting.py              -- AGENT_TITLES + format_banner + format_report (ASCII)
     parse_agent_output.py     -- agent-output extractor (Claude envelope + bare/fenced content)
 tests/
-  test_synthesize.py          -- 74 tests: validation, consensus, confidence, dedup, labels
-  test_parse_agent_output.py  -- 65 tests: envelopes, fenced/bare content, fail-closed recovery
-  test_run_magi.py            -- 16 tests: arg parsing, model flag, orchestration, validation
+  test_synthesize.py          -- 166 tests: validation, consensus, confidence, dedup, labels
+  test_parse_agent_output.py  -- 66 tests: envelopes, fenced/bare content, fail-closed recovery
+  test_run_magi.py            -- 169 tests: arg parsing, model flag, orchestration, validation
 docs/
   MAGI-System-Documentation.md  -- Full technical reference (Spanish)
 pyproject.toml                -- Python >= 3.12, dual license, dev deps, tool config
