@@ -71,7 +71,8 @@ def _extract_text(data: object) -> str:
         - Bare 7-key verdict dict                            (Ollama, unwrapped)
 
     Args:
-        data: Deserialised JSON value from Claude CLI output.
+        data: A decoded Claude CLI envelope, or — since 4.0.6 — the raw model text
+            itself, when the file was never an envelope (the Ollama backend path).
 
     Returns:
         The extracted text content as a string.
@@ -162,7 +163,8 @@ def _is_enum_definition(value: str) -> bool:
 def _is_verdict_shaped(candidate: object) -> bool:
     """Whether *candidate* could be a real verdict — excluding SCHEMA RESTATEMENTS.
 
-    Requires the two discriminating keys, and disqualifies exactly one extra thing:
+    Requires the two discriminating keys, and disqualifies **exactly one** extra thing
+    — a claim the code keeps honest by writing the rule as a single expression:
     a ``verdict`` whose value is the **enum's definition** rather than a verdict —
     ``"approve | reject | conditional"``. A thinking model restating its own schema
     (``glm-5.2`` and ``qwen3.5`` — two thirds of the default trio — do this inside
@@ -190,14 +192,28 @@ def _is_verdict_shaped(candidate: object) -> bool:
     disqualified value is the enum's own definition, decided by
     :func:`_is_enum_definition` against ``VALID_VERDICTS`` itself.
 
-    **The same error, caught twice — do not make it a third time.** The second attempt
-    disqualified any *pipe-union* via a regex, which is broader than "the definition"
-    and broader in the fail-open direction: a verdict drifted to
-    ``"approve | conditional"`` (a subset) stopped being a rival, and the echoed
-    example was fabricated in its place. Both misses share one shape: **widening the
-    exclusion looks like tightening the check, because the guard is invisible in the
-    line you are editing.** Anything excluded here is one fewer thing the ambiguity
-    guard can see.
+    **The same error was made THREE times, in three consecutive review rounds. Every
+    one of them was an extra condition added to this function.**
+
+    ===================  ==================================  =========================
+    Attempt              Exclusion added                     What stopped being a rival
+    ===================  ==================================  =========================
+    enum member          ``verdict in VALID_VERDICTS``       ``"Reject"`` (case drift)
+    pipe-union regex     any ``a | b`` union                 ``"approve | conditional"``
+    type guard           ``isinstance(verdict, str)``        ``null``, ``["reject"]``, ``0``
+    ===================  ==================================  =========================
+
+    In all three, the excluded object was **the mage's real verdict**, the echoed
+    system-prompt example became the sole match, and consensus received a fabricated
+    ``approve`` from the adversarial seat — where the previous behaviour was a clean
+    fail-closed drop and a retry.
+
+    They share one shape, and it is worth naming: **widening the exclusion looks like
+    tightening the check, because the guard it disarms is invisible in the line you
+    are editing.** Anything excluded here is one fewer thing the ambiguity guard can
+    see. So: derive the exclusion from the schema (``VALID_VERDICTS``), never from a
+    pattern that re-encodes the schema's *shape*, and **do not add a second
+    condition** — not even a type guard.
 
     **What this still does not close, stated without a guarantee this time.** The
     LOCKED single-match fabrication residual is untouched: a lone echoed example
@@ -219,14 +235,17 @@ def _is_verdict_shaped(candidate: object) -> bool:
     if not all(key in candidate for key in _VERDICT_KEYS):
         return False
     verdict = candidate.get("verdict")
-    if not isinstance(verdict, str):
-        return False
-    if verdict in VALID_VERDICTS:
-        return True
-    # Not a member. The enum's own definition is the schema being quoted, not a
-    # verdict, so it is no rival. ANY other value — including a drifted one — IS a
-    # rival, and must keep the ambiguity guard armed.
-    return not _is_enum_definition(verdict)
+    # ONE exclusion, written as one expression on purpose: the enum's own definition
+    # is the schema being quoted, not a verdict, so it is no rival. EVERYTHING else
+    # is — a valid member, a case-drifted member, a partial union, a value of the
+    # wrong type entirely — and each one must keep the ambiguity guard armed.
+    #
+    # Do not add a second condition here. Three separate attempts to "tighten" this
+    # check each added one, and each turned a fail-closed mage drop into a silently
+    # fabricated ``approve``. Even an innocent-looking ``isinstance(verdict, str)``
+    # early-return is an exclusion: a model that type-drifts the field (``null``, a
+    # list) then stops being a rival and the echoed example wins by default.
+    return not (isinstance(verdict, str) and _is_enum_definition(verdict))
 
 
 def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
