@@ -34,7 +34,7 @@ _SCRIPT_DIR = str(Path(__file__).parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from validate import MAX_INPUT_FILE_SIZE  # noqa: E402
+from validate import MAX_INPUT_FILE_SIZE, VALID_VERDICTS  # noqa: E402
 
 
 # Regex to strip leading ```json (case-insensitive, optional whitespace) or bare ```
@@ -133,6 +133,42 @@ _LENIENT_RECOVERY_MAX_CHARS = 1_000_000
 _MAX_BRACE_PROBES = 2_000
 
 
+def _is_verdict_shaped(candidate: object) -> bool:
+    """Whether *candidate* could be a real verdict, per the SCHEMA — not a guess.
+
+    Requires the two discriminating keys **and** a ``verdict`` that is an actual
+    member of the enum ``validate.VALID_VERDICTS``. That second condition is the
+    contract, not a heuristic: ``load_agent_output`` enforces the same enum a few
+    lines later, so nothing that fails here could ever have become a verdict anyway.
+
+    It exists because a **thinking model restating its own schema** (``glm-5.2`` and
+    ``qwen3.5`` — two thirds of the default trio — do this inside ``<think>``)
+    produces a decodable object carrying both keys, whose ``verdict`` field holds the
+    enum's *definition* (``"approve | reject | conditional"``) rather than one of its
+    members. That restatement used to count as a second candidate, so the ambiguity
+    guard fired, the mage was retried, the retry reproduced the same output, and the
+    mage was **dropped** — a degraded run, which by the Integrity rule approves
+    nothing. A schema restatement is not a verdict, and it says so itself.
+
+    This check only ever **narrows** what qualifies, so it cannot widen the
+    fabrication surface (4.0.6). It does **not** close the fabrication residual — a
+    lone echoed example carries a perfectly valid ``"approve"`` — and it is not meant
+    to. The durable fix for that remains the verdict **sentinel**; see the residual
+    note in :func:`_embedded_verdict_object` and ``CLAUDE.techdebt.md``.
+
+    Args:
+        candidate: A JSON value decoded from the agent's output.
+
+    Returns:
+        True if it has the shape of a genuine verdict, False otherwise.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    if not all(key in candidate for key in _VERDICT_KEYS):
+        return False
+    return candidate.get("verdict") in VALID_VERDICTS
+
+
 def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
     """Return the *sole* embedded JSON object that looks like an agent verdict.
 
@@ -195,7 +231,7 @@ def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
         except (json.JSONDecodeError, RecursionError):
             index = brace + 1
             continue
-        if isinstance(candidate, dict) and all(key in candidate for key in _VERDICT_KEYS):
+        if _is_verdict_shaped(candidate):
             matches.append(candidate)
             if len(matches) > 1:
                 return None  # ambiguous — fail closed rather than guess
