@@ -529,6 +529,56 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    @pytest.mark.parametrize(
+        "type_drifted_verdict", [None, ["reject"], {"value": "reject"}, 0, False]
+    )
+    def test_a_type_drifted_verdict_stays_a_rival(self, type_drifted_verdict):
+        """A ``verdict`` of the wrong TYPE is still a rival candidate.
+
+        Third instance of the one bug this function keeps growing, and the reason the
+        rule is now stated as a single expression: **every** exclusion added here is
+        one fewer thing the ambiguity guard can see. An ``isinstance(verdict, str)``
+        early-return reads like a harmless type guard — it is a second exclusion, and
+        it removed the mage's real verdict from the rival set whenever the model
+        type-drifted that field (``null``, a list, a number). The echoed system-prompt
+        example was then the sole match: a fabricated ``approve``, in Caspar's seat.
+
+        Type drift is a real failure mode — ``validate`` has a dedicated error for it
+        (``Invalid verdict 'None'``), which is exactly the feedback the retry needs.
+        So the only thing that may ever be disqualified is the enum's own definition;
+        everything else keeps the guard armed.
+        """
+        echoed_example = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve",
+                "confidence": 0.85,
+                "summary": "One-line verdict",
+                "reasoning": "Your risk-focused analysis",
+                "findings": [],
+                "recommendation": "What you recommend",
+            }
+        )
+        real_verdict = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": type_drifted_verdict,
+                "confidence": 0.9,
+                "summary": "Blocking defects.",
+                "reasoning": "Traced every claim against the code.",
+                "findings": [{"severity": "critical", "title": "Race", "detail": "TOCTOU."}],
+                "recommendation": "Do not merge.",
+            }
+        )
+        in_path = _write_temp(f"<think>{echoed_example}</think>\nVerdict:\n{real_verdict}")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_deeply_nested_json_degrades_the_mage_instead_of_crashing_the_run(self):
         """CPython raises RecursionError, not JSONDecodeError, on deep nesting.
 
