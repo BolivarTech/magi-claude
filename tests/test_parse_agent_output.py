@@ -378,6 +378,51 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    def test_lone_echoed_example_is_a_known_fabrication_residual(self):
+        """CHARACTERIZATION: this asserts a BUG, so it fails when the bug is fixed.
+
+        The LOCKED single-match fabrication residual, now reachable on the Ollama
+        path. Every agent system prompt carries a complete example verdict whose
+        value is literally ``"verdict": "approve"`` (see skills/magi/agents/*.md).
+        A model that echoes it — and emits nothing else decodable — has that example
+        recovered as its verdict: a fabricated ``approve``, in the adversarial seat.
+
+        The ambiguity guard does NOT save us here, and that is the subtle part: it
+        only fires when TWO objects decode. One echo alone is a single match. So is
+        an echo beside a *truncated* real verdict. The two guards interact, and the
+        interaction is the hole.
+
+        This test exists so the residual is visible and measured rather than merely
+        described in a docstring. The durable fix is the verdict sentinel
+        (CLAUDE.techdebt.md), NOT more heuristics in ``_recover_embedded_verdict``.
+        When the sentinel lands, this test MUST fail — and its failure is the signal
+        to delete it, not to weaken it.
+        """
+        echoed_example = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve",
+                "confidence": 0.85,
+                "summary": "One-line verdict",
+                "reasoning": "Your risk-focused analysis",
+                "findings": [],
+                "recommendation": "What you recommend",
+            }
+        )
+        in_path = _write_temp(f"Let me recall the required shape:\n{echoed_example}")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                recovered = json.load(f)
+            assert recovered["verdict"] == "approve", (
+                "fabrication residual has changed shape — re-read the docstring "
+                "before touching this test"
+            )
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_deeply_nested_json_degrades_the_mage_instead_of_crashing_the_run(self):
         """CPython raises RecursionError, not JSONDecodeError, on deep nesting.
 
