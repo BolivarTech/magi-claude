@@ -105,7 +105,7 @@ skills/magi/
     parse_agent_output.py     -- agent-output extractor (Claude envelope + bare/fenced content)
 tests/
   test_synthesize.py          -- 74 tests: validation, consensus, confidence, dedup, labels
-  test_parse_agent_output.py  -- 50 tests: envelopes, fenced/bare content, fail-closed recovery
+  test_parse_agent_output.py  -- 52 tests: envelopes, fenced/bare content, fail-closed recovery
   test_run_magi.py            -- 16 tests: arg parsing, model flag, orchestration, validation
 docs/
   MAGI-System-Documentation.md  -- This document
@@ -492,7 +492,7 @@ Changes are picked up with `/reload-plugins` without restarting.
 | File | Tests | Covers |
 |------|-------|--------|
 | `test_synthesize.py` | 74 | Validation, weight-based consensus, confidence formula (symmetric), findings dedup, empty titles, dynamic labels, banner alignment, report formatting |
-| `test_parse_agent_output.py` | 50 | Envelope extraction (3 CLI formats), fence stripping, **bare content** (Ollama), embedded-verdict recovery and its fail-closed guards |
+| `test_parse_agent_output.py` | 52 | Envelope extraction (3 CLI formats), fence stripping, **bare content** (Ollama), embedded-verdict recovery and its fail-closed guards |
 | `test_run_magi.py` | 16 | Arg parsing, model flag, model passthrough, orchestration, degraded mode, input validation |
 
 ```bash
