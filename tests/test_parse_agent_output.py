@@ -700,6 +700,43 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    @pytest.mark.parametrize("missing", ["verdict", "agent"])
+    def test_a_bare_verdict_missing_a_key_is_retried_not_dropped(self, missing):
+        """A bare payload missing a key must reach the schema check, like a fenced one.
+
+        ``_extract_text`` discriminates the bare-verdict-dict branch on exactly two keys
+        — ``agent`` and ``verdict`` — so a model that omits one of *those* falls through
+        to its "unexpected shape" ``ValueError``. The orchestrator retries only on
+        ``(ValidationError, JSONDecodeError)``, so that ``ValueError`` **dropped the mage
+        without a second attempt** — while the identical content inside a fence was
+        retried with corrective feedback. Same defect, opposite treatment, decided by a
+        markdown fence.
+
+        It matters more since 4.0.6, because reading-as-text-first makes the **bare**
+        route the primary one for Ollama. And a missing key is precisely what the retry
+        exists to correct: ``load_agent_output`` names it (*"Missing required key"*), and
+        that message is the feedback the second attempt is built from.
+        """
+        payload = {
+            "agent": "caspar",
+            "verdict": "reject",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [],
+            "recommendation": "x",
+        }
+        del payload[missing]
+        in_path = _write_temp(json.dumps(payload))  # bare: no fence, no prose
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            # JSONDecodeError -- not ValueError -- so the orchestrator's retry catches it.
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_a_failed_encode_leaves_no_truncated_artifact(self):
         """When the encoder blows up, the output file must not be written at all.
 
@@ -708,6 +745,13 @@ class TestOllamaFencedContent:
         whenever the encoder raised mid-write — for a mage that was then dropped, in the
         very run directory ``CLAUDE.md`` tells a reviewer to read. A truncated artifact
         that looks like a verdict is exactly the kind of thing someone reads at 3am.
+
+        **The payload must be FENCED**, and that detail is the whole test. A *bare*
+        payload raises earlier, at ``_extract_text``'s own encode, so the final encode —
+        the one this guarantee is about — is never reached and the test passes with or
+        without the code it claims to pin. The first version of this test did exactly
+        that: it was vacuous, and a review caught it. Only a fenced payload takes the
+        route that opens the output file.
         """
         depth = 16_200  # decodes, does not re-encode
         verdict = (
@@ -715,7 +759,7 @@ class TestOllamaFencedContent:
             '"reasoning":"r","recommendation":"x","findings":' + "[" * depth + "]" * depth + "}"
         )
         sentinel = "UNTOUCHED"
-        in_path = _write_temp(verdict)
+        in_path = _write_temp(f"```json\n{verdict}\n```")
         out_path = _write_temp(sentinel, suffix=".out.json")
         try:
             with pytest.raises(json.JSONDecodeError):
