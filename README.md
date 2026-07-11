@@ -158,7 +158,7 @@ Melchior        Balthasar       Caspar
 (Scientist)     (Pragmatist)    (Critic)
   |               |               |
   v               v               v
-parse_agent_output.py (extract JSON from CLI output)
+parse_agent_output.py (extract the verdict: Claude envelope, or bare/fenced content)
   |               |               |
   v               v               v
 validate.load_agent_output() (schema validation)
@@ -292,10 +292,10 @@ skills/magi/
     validate.py               -- ValidationError + load_agent_output schema validation
     consensus.py              -- VERDICT_WEIGHT + determine_consensus (weight-based scoring)
     reporting.py              -- AGENT_TITLES + format_banner + format_report (ASCII)
-    parse_agent_output.py     -- Claude CLI JSON extractor (3 output formats)
+    parse_agent_output.py     -- agent-output extractor (Claude envelope + bare/fenced content)
 tests/
   test_synthesize.py          -- 74 tests: validation, consensus, confidence, dedup, labels
-  test_parse_agent_output.py  -- 19 tests: fence stripping, text extraction, pipeline
+  test_parse_agent_output.py  -- 50 tests: envelopes, fenced/bare content, fail-closed recovery
   test_run_magi.py            -- 16 tests: arg parsing, model flag, orchestration, validation
 docs/
   MAGI-System-Documentation.md  -- Full technical reference (Spanish)

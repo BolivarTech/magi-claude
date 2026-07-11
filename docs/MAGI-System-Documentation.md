@@ -102,10 +102,10 @@ skills/magi/
     validate.py               -- ValidationError + load_agent_output (schema validation)
     consensus.py              -- VERDICT_WEIGHT + determine_consensus (weight-based scoring)
     reporting.py              -- AGENT_TITLES + format_banner + format_report (ASCII)
-    parse_agent_output.py     -- Claude CLI JSON extractor (3 output formats)
+    parse_agent_output.py     -- agent-output extractor (Claude envelope + bare/fenced content)
 tests/
   test_synthesize.py          -- 74 tests: validation, consensus, confidence, dedup, labels
-  test_parse_agent_output.py  -- 19 tests: fence stripping, text extraction, pipeline
+  test_parse_agent_output.py  -- 50 tests: envelopes, fenced/bare content, fail-closed recovery
   test_run_magi.py            -- 16 tests: arg parsing, model flag, orchestration, validation
 docs/
   MAGI-System-Documentation.md  -- This document
@@ -143,7 +143,7 @@ Melchior           Balthasar          Caspar
 (Scientist)        (Pragmatist)       (Critic)
   |                  |                  |
   v                  v                  v
-parse_agent_output.py (extract JSON from CLI output)
+parse_agent_output.py (extract the verdict: Claude envelope, or bare/fenced content)
   |                  |                  |
   v                  v                  v
 validate.load_agent_output() (schema validation)
@@ -492,7 +492,7 @@ Changes are picked up with `/reload-plugins` without restarting.
 | File | Tests | Covers |
 |------|-------|--------|
 | `test_synthesize.py` | 74 | Validation, weight-based consensus, confidence formula (symmetric), findings dedup, empty titles, dynamic labels, banner alignment, report formatting |
-| `test_parse_agent_output.py` | 19 | Fence stripping, text extraction (3 CLI formats), pipeline integration |
+| `test_parse_agent_output.py` | 50 | Envelope extraction (3 CLI formats), fence stripping, **bare content** (Ollama), embedded-verdict recovery and its fail-closed guards |
 | `test_run_magi.py` | 16 | Arg parsing, model flag, model passthrough, orchestration, degraded mode, input validation |
 
 ```bash
