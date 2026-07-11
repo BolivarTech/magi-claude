@@ -407,6 +407,21 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
 
     try:
         text = _extract_text(data)
+    except ValueError as exc:
+        # An unrecognised SHAPE must still reach the retry. ``_extract_text``
+        # discriminates the bare-verdict-dict branch on exactly ``agent`` + ``verdict``,
+        # so a model that omits one of those two keys falls through to its "unexpected
+        # shape" ``ValueError`` — which ``run_magi``'s ``(ValidationError,
+        # JSONDecodeError)`` guard does not catch, dropping the mage **without a second
+        # attempt**. The identical content inside a markdown fence was retried with
+        # corrective feedback. Same defect, opposite treatment, decided by a fence — and
+        # reading-as-text-first (4.0.6) makes the bare route the PRIMARY one for Ollama.
+        #
+        # Mapping it here makes the two routes agree and keeps the promise this module's
+        # docstring makes: an output that decodes but violates the schema reaches the
+        # check whose error message the retry is built from. The size-cap ``ValueError``
+        # is raised before this block, so it is not swallowed.
+        raise json.JSONDecodeError(f"Unrecognised agent output shape: {exc}", raw, 0) from exc
     except RecursionError as exc:
         # A SECOND encode site, on a DIFFERENT route. The bare-verdict-dict branch of
         # ``_extract_text`` re-serialises with ``json.dumps``, so a bare (unfenced)
