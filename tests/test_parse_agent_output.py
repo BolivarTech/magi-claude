@@ -640,10 +640,39 @@ class TestOllamaFencedContent:
         ``_loads_lenient`` goes to deliberate trouble to map that, precisely so the
         orchestrator's ``except (ValidationError, json.JSONDecodeError)`` retry can
         catch it. The top-level parse must do the same — and on the Ollama path this
-        input is MODEL-AUTHORED content, so a pathological response is the difference
-        between "one mage degrades" and "the whole run dies with a traceback".
+        input is MODEL-AUTHORED content, so a pathological response reaches the call
+        directly. An escaping ``RecursionError`` is not caught by that retry, so the
+        mage is lost **without a second attempt**; mapped, it is simply retried.
         """
         in_path = _write_temp("[" * 100_000)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_a_verdict_too_nested_to_re_encode_is_still_retryable(self):
+        """The ENCODER can blow the stack where the decoder did not.
+
+        Asymmetry worth knowing: ``json.loads`` uses the C scanner and happily
+        decodes ~5000 levels of nesting, but ``json.dump(..., indent=2)`` falls back
+        to the **pure-Python** encoder, which recurses per level and raises
+        ``RecursionError`` writing the very object that just decoded fine.
+
+        Before 4.0.6 this shape never got that far on the Ollama path (the fenced
+        payload failed at ``json.load``), so reading-as-text-first is what makes the
+        encoder reachable. Unmapped, it escapes the orchestrator's
+        ``(ValidationError, JSONDecodeError)`` retry and the mage is dropped without a
+        second attempt. Mapped, the mage is retried like any other malformed output.
+        """
+        deep_findings = "[" * 5_000 + "]" * 5_000
+        verdict = (
+            '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
+            '"reasoning":"r","recommendation":"x","findings":' + deep_findings + "}"
+        )
+        in_path = _write_temp(f"```json\n{verdict}\n```")
         out_path = _write_temp("", suffix=".out.json")
         try:
             with pytest.raises(json.JSONDecodeError):
