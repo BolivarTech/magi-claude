@@ -399,7 +399,20 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     parsed = _loads_lenient(text)
 
     with open(output_path, "w", encoding="utf-8") as fh:
-        json.dump(parsed, fh, indent=2)
+        try:
+            json.dump(parsed, fh, indent=2)
+        except RecursionError as exc:
+            # The ENCODER can blow the stack where the decoder did not: ``json.loads``
+            # uses the C scanner and decodes ~5000 levels happily, while ``indent=2``
+            # forces the pure-Python encoder, which recurses per level. The write of an
+            # object that just decoded cleanly can therefore still raise. An escaping
+            # RecursionError is not caught by the orchestrator's
+            # ``(ValidationError, JSONDecodeError)`` retry, so the mage would be dropped
+            # without a second attempt. Map it, exactly as ``_loads_lenient`` maps the
+            # decode side.
+            raise json.JSONDecodeError(
+                "Recovered verdict is nested too deeply to re-encode", text, 0
+            ) from exc
         fh.write("\n")
 
 
