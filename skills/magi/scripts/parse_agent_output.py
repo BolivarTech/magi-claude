@@ -82,8 +82,13 @@ def _extract_text(data: object) -> str:
         The extracted text content as a string.
 
     Raises:
-        ValueError: If the data format is not recognised (no ``result``
-            or ``content`` key in a dict, or unexpected type).
+        ValueError: If the data format is not recognised — no ``result`` or ``content``
+            key in a dict, an unexpected type, or a ``content`` array with no usable
+            text block (including a block that declares ``type: text`` but omits
+            ``text``). This is the ONLY exception this function raises for a bad shape,
+            and the caller maps it to ``JSONDecodeError`` so the mage keeps its retry;
+            anything else escaping here (a ``KeyError`` did, until 4.0.6) costs the mage
+            its second attempt.
     """
     if isinstance(data, dict) and "result" in data:
         return str(data["result"])
@@ -98,7 +103,11 @@ def _extract_text(data: object) -> str:
             # block found".
             raise ValueError(f"'content' must be a list, got {type(content).__name__}.")
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
+            # ``"text" in block`` matters: a block that declares the type and omits the
+            # key would otherwise raise ``KeyError`` — which ``run_magi`` does not retry,
+            # so the mage would be dropped without a second attempt. Falling through to
+            # the ValueError below (mapped to JSONDecodeError by the caller) retries it.
+            if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
                 return str(block["text"])
         raise ValueError("No text block found in 'content' array")
 
@@ -431,11 +440,13 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         # guard would otherwise have given it.
         #
         # MEASURED, because two earlier versions of this comment reasoned instead and were
-        # both wrong (max nesting depth before RecursionError):
+        # both wrong. Max nesting depth before RecursionError (approximate — the exact
+        # value shifts with how much stack the caller has already used; what matters is
+        # the ORDERING, which is stable):
         #
         #                    decoder   dumps()   dumps(indent=2)
-        #     CPython 3.14     16909     15500     15500   <- C encoder handles indent
-        #     CPython 3.12      2997      2997       993   <- pure-Python for indent
+        #     CPython 3.14    ~16.9k    ~15.5k    ~15.5k   <- C encoder handles indent
+        #     CPython 3.12     ~3.0k     ~3.0k     ~1.0k   <- pure-Python for indent
         #
         # So there is no clean "encoders are weaker than the decoder" rule to lean on: on
         # 3.14 both encoders are, on 3.12 only the indent one is (and this catch never
@@ -458,8 +469,8 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         payload = json.dumps(parsed, indent=2)
     except RecursionError as exc:
         # The final encode, reached by fenced and prose-wrapped payloads. ``indent=2``
-        # is the weakest of the JSON calls on BOTH supported interpreters (see the
-        # measured table above: 15500 on 3.14, 993 on 3.12), so an object that decoded
+        # is the weakest (or joint-weakest) of the JSON calls on BOTH supported
+        # interpreters (see the table above), so an object that decoded
         # cleanly can still fail to re-encode here. An escaping RecursionError is not
         # caught by the orchestrator's ``(ValidationError, JSONDecodeError)`` retry, so
         # the mage would be dropped without a second attempt. Map it, exactly as
