@@ -292,10 +292,15 @@ def _loads_lenient(text: str) -> Any:
 
 
 def parse_agent_output(input_path: str, output_path: str) -> None:
-    """Read raw Claude CLI output, extract and validate JSON, write result.
+    """Read a raw agent response, extract and validate its verdict, write it out.
+
+    Backend-agnostic by contract: the raw file may be a Claude CLI transport
+    envelope, or the agent's verdict itself (the Ollama backend writes the
+    unwrapped content), optionally inside a markdown fence or surrounded by
+    prose. All four shapes converge on the same validated 7-key object.
 
     Args:
-        input_path:  Path to the raw Claude CLI JSON output file.
+        input_path:  Path to the raw agent output file (envelope OR bare content).
         output_path: Destination path for the cleaned JSON.
 
     Raises:
