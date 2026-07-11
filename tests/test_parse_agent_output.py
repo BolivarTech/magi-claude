@@ -394,7 +394,7 @@ class TestOllamaFencedContent:
 
         This test exists so the residual is visible and measured rather than merely
         described in a docstring. The durable fix is the verdict sentinel
-        (CLAUDE.techdebt.md), NOT more heuristics in ``_recover_embedded_verdict``.
+        (CLAUDE.techdebt.md), NOT more heuristics in ``_embedded_verdict_object``.
         When the sentinel lands, this test MUST fail — and its failure is the signal
         to delete it, not to weaken it.
         """
