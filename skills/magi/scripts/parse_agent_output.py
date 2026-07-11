@@ -132,11 +132,31 @@ _LENIENT_RECOVERY_MAX_CHARS = 1_000_000
 # approaches this.
 _MAX_BRACE_PROBES = 2_000
 
-# A schema RESTATEMENT: the enum's definition ("approve | reject | conditional"),
-# not one of its members. No genuine verdict is ever a pipe-union, so disqualifying
-# this shape cannot discard a real verdict — which is the whole reason the exclusion
-# is drawn here and not at "must be a valid enum member" (see _is_verdict_shaped).
-_ENUM_DEFINITION_RE = re.compile(r"^\s*\w[\w-]*(?:\s*\|\s*\w[\w-]*)+\s*$")
+
+def _is_enum_definition(value: str) -> bool:
+    """Whether *value* is the verdict enum's own DEFINITION, member for member.
+
+    ``"approve | reject | conditional"`` — in any order, any case, with or without
+    spaces — is the schema *being quoted*, not a verdict. Nothing else qualifies: a
+    strict subset (``"approve | conditional"``) is a **drifted verdict**, and a
+    drifted verdict must stay a rival candidate (see :func:`_is_verdict_shaped`).
+
+    Derived from ``VALID_VERDICTS`` on purpose. The first implementation used a regex
+    for "any word-token pipe-union", which re-encoded the enum's *shape* instead of
+    its *content* — so the code said "the enum's definition" while the regex said
+    "any pipe-union", and only one of those was true. The gap was fail-open: a real
+    verdict drifted to ``"approve | conditional"`` stopped being a rival, the echoed
+    system-prompt example became the sole match, and consensus received a fabricated
+    ``approve``. One source of truth, or the two drift apart and the drift is silent.
+
+    Args:
+        value: The raw ``verdict`` field of a decoded candidate object.
+
+    Returns:
+        True if *value* enumerates exactly the valid verdicts, False otherwise.
+    """
+    parts = [part.strip().lower() for part in value.split("|")]
+    return len(parts) > 1 and set(parts) == VALID_VERDICTS
 
 
 def _is_verdict_shaped(candidate: object) -> bool:
@@ -166,8 +186,18 @@ def _is_verdict_shaped(candidate: object) -> bool:
 
     So the rule is: **a drifted verdict is still a rival** (it keeps the guard armed,
     and alone it is recovered so ``load_agent_output`` can raise its precise
-    ``Invalid verdict 'Reject'`` — the feedback the retry needs). Only the enum's
-    *definition* is disqualified, because no real verdict can ever be a pipe-union.
+    ``Invalid verdict 'Reject'`` — the feedback the retry needs). The *only*
+    disqualified value is the enum's own definition, decided by
+    :func:`_is_enum_definition` against ``VALID_VERDICTS`` itself.
+
+    **The same error, caught twice — do not make it a third time.** The second attempt
+    disqualified any *pipe-union* via a regex, which is broader than "the definition"
+    and broader in the fail-open direction: a verdict drifted to
+    ``"approve | conditional"`` (a subset) stopped being a rival, and the echoed
+    example was fabricated in its place. Both misses share one shape: **widening the
+    exclusion looks like tightening the check, because the guard is invisible in the
+    line you are editing.** Anything excluded here is one fewer thing the ambiguity
+    guard can see.
 
     **What this still does not close, stated without a guarantee this time.** The
     LOCKED single-match fabrication residual is untouched: a lone echoed example
@@ -193,9 +223,10 @@ def _is_verdict_shaped(candidate: object) -> bool:
         return False
     if verdict in VALID_VERDICTS:
         return True
-    # Not a member. A schema restatement is the enum's definition and is no rival;
-    # a drifted verdict IS one, and must keep the ambiguity guard armed.
-    return not _ENUM_DEFINITION_RE.match(verdict)
+    # Not a member. The enum's own definition is the schema being quoted, not a
+    # verdict, so it is no rival. ANY other value — including a drifted one — IS a
+    # rival, and must keep the ambiguity guard armed.
+    return not _is_enum_definition(verdict)
 
 
 def _embedded_verdict_object(text: str) -> dict[str, Any] | None:

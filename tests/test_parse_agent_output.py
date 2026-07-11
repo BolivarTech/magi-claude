@@ -516,9 +516,7 @@ class TestOllamaFencedContent:
                 "confidence": 0.93,
                 "summary": "Six concrete defects.",
                 "reasoning": "Traced every claim against the code.",
-                "findings": [
-                    {"severity": "critical", "title": "Race", "detail": "TOCTOU."}
-                ],
+                "findings": [{"severity": "critical", "title": "Race", "detail": "TOCTOU."}],
                 "recommendation": "Do not merge.",
             }
         )
