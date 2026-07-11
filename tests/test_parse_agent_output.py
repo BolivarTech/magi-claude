@@ -423,6 +423,67 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    def test_echoed_example_beside_a_case_drifted_verdict_still_fails_closed(self):
+        """A rival verdict with a DRIFTED enum value must still trip the guard.
+
+        This is the regression the enum check (4.0.6) very nearly shipped, and it is
+        worth spelling out because the reasoning error is easy to repeat.
+
+        ``_is_verdict_shaped`` does not only *select* the verdict — it also feeds the
+        **ambiguity guard**, which is the fail-closed mechanism. So narrowing the
+        predicate narrows the guard too: fewer candidates means fewer ambiguity trips
+        means MORE single-match fabrications. Requiring a real enum member excludes a
+        schema restatement (good — that was the mage-drop bug) but it *also* excluded
+        a real verdict whose value merely drifted in case (``"Reject"``) — and enum
+        drift is common, which is exactly why ``_build_retry_prompt`` exists.
+
+        The result, verified: the model's true ``Reject`` (with a ``critical``
+        finding) stopped counting as a candidate, the echoed system-prompt example
+        became the *sole* match, and the parser handed consensus a schema-perfect
+        fabricated ``approve`` — in the adversarial seat, silently.
+
+        The fix disqualifies **schema restatements** ("approve | reject |
+        conditional" — the enum's *definition*), not every non-member. A drifted
+        verdict stays a rival and keeps the guard armed.
+        """
+        echoed_example = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve",
+                "confidence": 0.85,
+                "summary": "One-line verdict",
+                "reasoning": "Your risk-focused analysis",
+                "findings": [],
+                "recommendation": "What you recommend",
+            }
+        )
+        drifted_real_verdict = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "Reject",  # a real verdict, wrong case
+                "confidence": 0.93,
+                "summary": "Six concrete defects.",
+                "reasoning": "Traced every claim against the code.",
+                "findings": [
+                    {"severity": "critical", "title": "Race", "detail": "TOCTOU."}
+                ],
+                "recommendation": "Do not merge.",
+            }
+        )
+        raw = (
+            f"<think>The shape I must follow:\n{echoed_example}\n"
+            f"Now my actual verdict.</think>\n"
+            f"```json\n{drifted_real_verdict}\n```"
+        )
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_deeply_nested_json_degrades_the_mage_instead_of_crashing_the_run(self):
         """CPython raises RecursionError, not JSONDecodeError, on deep nesting.
 
