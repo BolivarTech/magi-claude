@@ -743,6 +743,39 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    def test_undecodable_bytes_do_not_cost_the_mage_its_verdict(self):
+        """A raw file with invalid UTF-8 must not raise ``UnicodeDecodeError``.
+
+        The raw file is written from the backend's bytes verbatim, and it is read back
+        with ``encoding="utf-8"``. A strict decode raises ``UnicodeDecodeError`` — which
+        is a ``ValueError`` but **not** a ``JSONDecodeError``, so ``run_magi``'s retry
+        guard does not catch it and the mage is dropped without a second attempt.
+
+        The house convention for reading untrusted output is already ``errors="replace"``
+        (``cost.py``, ``review_context.py``, and the cp1252 hardening in 2.2.6). Applied
+        here it is strictly better than either alternative: the JSON structure is ASCII,
+        so a bad byte can only land *inside a string field* — the verdict still parses,
+        the mage keeps its verdict, and the worst case is one replacement character in a
+        summary. Nothing is fabricated: the object recovered is still the model's own.
+        """
+        raw = (
+            b'{"agent":"caspar","verdict":"reject","confidence":0.9,'
+            b'"summary":"bad byte: \x80\xff here","reasoning":"r","findings":[],'
+            b'"recommendation":"x"}'
+        )
+        fd, in_path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                recovered = json.load(f)
+            assert recovered["verdict"] == "reject", "the mage's own verdict must survive"
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_a_text_block_without_text_is_retried_not_dropped(self):
         """A malformed content block must not escape as ``KeyError``.
 
