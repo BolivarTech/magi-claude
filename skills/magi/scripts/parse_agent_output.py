@@ -423,21 +423,25 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         # is raised before this block, so it is not swallowed.
         raise json.JSONDecodeError(f"Unrecognised agent output shape: {exc}", raw, 0) from exc
     except RecursionError as exc:
-        # A SECOND encode site, on a DIFFERENT route. The bare-verdict-dict branch of
-        # ``_extract_text`` re-serialises with ``json.dumps``, so a bare (unfenced)
-        # verdict blows up HERE, while a fenced one reaches the encode below instead.
-        # Same limit, different path — and the fenced catch alone left the plainest
-        # Ollama payload there is, a bare verdict, escaping. Unmapped it escapes the
-        # orchestrator's ``(ValidationError, JSONDecodeError)`` retry and the mage
-        # loses its second attempt.
+        # A SECOND encode site, on a DIFFERENT route. ``_extract_text``'s bare-verdict
+        # branch re-serialises with ``json.dumps``, so a BARE (unfenced) verdict blows up
+        # here, while a FENCED one reaches the encode further down instead. Mapping only
+        # the fenced route left the plainest Ollama payload there is escaping, and the
+        # mage losing the retry that ``run_magi``'s ``(ValidationError, JSONDecodeError)``
+        # guard would otherwise have given it.
         #
-        # (Measured, because an earlier version of this comment guessed and was wrong:
-        # on CPython 3.14 ``indent=2`` does NOT force the pure-Python encoder — since
-        # 3.13 the C encoder handles it — so both encode sites share a limit (~15.5k
-        # levels). The load-bearing fact is version-independent and simpler: the
-        # DECODER outruns the encoders (~16.9k), so an object that decodes can still
-        # fail to re-encode. On 3.12 the limits are lower and the asymmetry is larger,
-        # but the conclusion is identical, and BOTH catches are load-bearing on both.)
+        # MEASURED, because two earlier versions of this comment reasoned instead and were
+        # both wrong (max nesting depth before RecursionError):
+        #
+        #                    decoder   dumps()   dumps(indent=2)
+        #     CPython 3.14     16909     15500     15500   <- C encoder handles indent
+        #     CPython 3.12      2997      2997       993   <- pure-Python for indent
+        #
+        # So there is no clean "encoders are weaker than the decoder" rule to lean on: on
+        # 3.14 both encoders are, on 3.12 only the indent one is (and this catch never
+        # fires there — anything that decodes also dumps). Which catch fires depends on
+        # the interpreter AND the route, which is exactly why both exist and why neither
+        # may be deleted as redundant.
         raise json.JSONDecodeError(
             "Agent output is nested too deeply to re-serialise", raw, 0
         ) from exc
@@ -453,14 +457,13 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     try:
         payload = json.dumps(parsed, indent=2)
     except RecursionError as exc:
-        # The ENCODER can blow the stack where the decoder did not — the fact that makes
-        # both encode catches necessary. Measured on the shipped interpreter (3.14):
-        # ``json.loads`` survives ~16.9k levels of nesting, both ``json.dumps`` forms
-        # only ~15.5k. So an object that decoded cleanly can still fail to re-encode.
-        # An escaping RecursionError is not caught by the orchestrator's
-        # ``(ValidationError, JSONDecodeError)`` retry, so the mage would be dropped
-        # without a second attempt. Map it, exactly as ``_loads_lenient`` maps the
-        # decode side.
+        # The final encode, reached by fenced and prose-wrapped payloads. ``indent=2``
+        # is the weakest of the JSON calls on BOTH supported interpreters (see the
+        # measured table above: 15500 on 3.14, 993 on 3.12), so an object that decoded
+        # cleanly can still fail to re-encode here. An escaping RecursionError is not
+        # caught by the orchestrator's ``(ValidationError, JSONDecodeError)`` retry, so
+        # the mage would be dropped without a second attempt. Map it, exactly as
+        # ``_loads_lenient`` maps the decode side.
         raise json.JSONDecodeError(
             "Recovered verdict is nested too deeply to re-encode", text, 0
         ) from exc

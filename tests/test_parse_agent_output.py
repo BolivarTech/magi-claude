@@ -650,7 +650,7 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
-    @pytest.mark.parametrize("depth", [5_000, 16_200, 30_000])
+    @pytest.mark.parametrize("depth", [1_200, 5_000, 16_200, 30_000])
     @pytest.mark.parametrize("fenced", [False, True], ids=["bare", "fenced"])
     def test_a_deeply_nested_verdict_never_escapes_as_RecursionError(self, depth, fenced):
         """No stack overflow may escape this module — from ANY of its four JSON calls.
@@ -664,11 +664,17 @@ class TestOllamaFencedContent:
         * ``_extract_text``'s ``json.dumps`` — reached only by a **bare** verdict,
         * the final ``json.dumps(..., indent=2)`` — reached by a **fenced** one.
 
-        Measured on the shipped interpreter (3.14): the decoder survives ~16.9k levels,
-        both encoders only ~15.5k — so an object that decodes can still fail to encode,
-        and *which* encode site raises depends on the route the payload took. That is
-        why one depth at one site proves nothing, and why the first attempt at this
-        guard passed while the sibling shape was still broken.
+        Measured, per interpreter (max depth before ``RecursionError``)::
+
+                             decoder   dumps()   dumps(indent=2)
+            CPython 3.14      16909     15500     15500
+            CPython 3.12       2997      2997       993
+
+        So *which* call raises depends on the interpreter **and** on the route (bare vs
+        fenced) — one depth at one site proves nothing, which is precisely how the first
+        attempt at this guard passed while the sibling shape was still broken. The
+        depths are chosen to land in both windows: ``1_200`` exercises 3.12's encode gap
+        (993–2997), the larger ones exercise 3.14's.
 
         That first attempt mapped the fenced route only, so the sibling shape — a bare,
         unfenced verdict, the plainest Ollama payload there is — still escaped. So this
@@ -964,27 +970,28 @@ class TestProseWrappedJson:
         self._expect_raises('{"a":' * 100_000)
 
 
-class TestPython39Compatibility:
-    """Pin the Python 3.9 compatibility invariant flagged across MAGI reviews."""
+class TestLazyAnnotations:
+    """Pin ``from __future__ import annotations``, a recurring MAGI review concern."""
 
     def test_module_annotations_stay_lazy(self):
         """`from __future__ import annotations` must remain in effect.
 
-        ``parse_agent_output`` uses PEP 604 ``X | None`` annotations, which are
-        runtime-valid only on CPython 3.10+. ``pyproject`` pins ``>=3.9``, so
-        the module relies on ``from __future__ import annotations`` (PEP 563)
-        keeping annotations as non-evaluated strings. This guard fails if a
-        refactor drops that import: on 3.10+ the annotation becomes an
-        evaluated ``types.UnionType`` (caught here); on 3.9 the import itself
-        would break. Pins the recurring review concern as a tested invariant.
+        ``parse_agent_output`` uses PEP 604 ``X | None`` annotations. ``pyproject``
+        now pins ``>= 3.12``, where those are runtime-valid, so this is no longer a
+        compatibility floor guard — it pins that annotations stay **non-evaluated
+        strings** (PEP 563), which is what keeps the module importable under a lower
+        interpreter and keeps annotation evaluation off the import path.
+
+        (The class was called ``TestPython39Compatibility`` and its docstring claimed
+        the project pinned ``>=3.9``. It pins ``>= 3.12``; the claim was two majors
+        stale.)
         """
         import parse_agent_output as pao
 
         annotation = pao._embedded_verdict_object.__annotations__["return"]
         assert isinstance(annotation, str), (
             "annotations must stay lazy strings (from __future__ import "
-            f"annotations); got an evaluated {type(annotation)!r} — PEP 604 "
-            "unions break module import on Python 3.9"
+            f"annotations); got an evaluated {type(annotation)!r}"
         )
 
 
