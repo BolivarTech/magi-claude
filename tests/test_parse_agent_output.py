@@ -261,6 +261,43 @@ class TestParseAgentOutput:
             os.unlink(output_path)
 
 
+class TestOllamaFencedContent:
+    """4.0.6: an Ollama model that fences its verdict must not kill its mage.
+
+    The Ollama backend returns ``choices[0].message.content`` **already unwrapped**
+    — the raw file therefore holds the agent's verdict *itself*, not an envelope
+    around it. Many models emit that verdict inside a markdown fence, so the raw
+    file starts with ``` and is not JSON at the top level.
+
+    Before 4.0.6, ``parse_agent_output`` called ``json.load(fh)`` **before**
+    stripping fences. On the Claude path that is fine (the raw *is* an envelope).
+    On the Ollama path it blew up at character 0, the mage was retried, the retry
+    produced the same (perfectly valid) fenced verdict, and the mage was dropped —
+    a degraded run whose verdict, by the Integrity rule, approves nothing.
+
+    The fence-stripping code existed all along. It was simply unreachable on the
+    one path that needed it: it ran *after* a parse that could never succeed.
+
+    Observed 2026-07-11: glm-5.2 emitted a schema-perfect 7-key verdict with 7
+    findings, fenced; MAGI discarded it twice and reported a degraded run.
+    """
+
+    def test_bare_fenced_verdict_is_parsed(self):
+        """The exact shape that killed Caspar: a fenced verdict, no envelope."""
+        payload = _sample_agent_payload()
+        raw = f"```json\n{json.dumps(payload)}\n```"
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                result = json.load(f)
+            assert result == payload
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+
 class TestProseWrappedJson:
     """Recover the JSON verdict when an agent wraps it in natural language.
 
