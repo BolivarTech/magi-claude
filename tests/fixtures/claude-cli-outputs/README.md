@@ -26,3 +26,19 @@ the new raw output into a `.json` file in this directory. The file must:
 
 The suite auto-discovers every `.json` file in this directory, so no
 test edit is required when adding a new fixture.
+
+## Not every fixture here is JSON (4.0.6)
+
+The directory is named for the backend that came first, but the contract it
+pins is **every** backend. `ollama-fenced-content.json` holds an Ollama shape:
+that backend returns `choices[0].message.content` **already unwrapped**, so the
+raw output is the verdict *itself* — and a model may wrap it in a markdown
+fence. The file therefore **starts with ```` ``` ```` and is deliberately NOT
+valid JSON at the top level**, even though its name ends in `.json`.
+
+That is intentional (it reproduces the exact bytes that made MAGI discard a
+valid verdict), and the parser reads it as text. But it *is* a trap for any
+tool that assumes `*.json` parses: a `check-json` hook, `jq`, IDE validation,
+or a future "all fixtures must parse" test would fail on it. If you add such a
+tool, exclude this file rather than "fixing" it — the whole point is that it
+does not parse.

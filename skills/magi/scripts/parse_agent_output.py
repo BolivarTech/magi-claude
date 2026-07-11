@@ -300,6 +300,14 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         # turn "one mage degrades" into "the whole run dies with a traceback" —
         # ``_loads_lenient`` already maps it downstream, and the orchestrator's
         # retry only catches (ValidationError, JSONDecodeError).
+        #
+        # Scope of the behaviour change: a WELL-FORMED envelope is untouched (it
+        # parses here exactly as before). A *malformed* Claude envelope, which used
+        # to raise immediately, now goes through prose-recovery and could succeed.
+        # That path is practically unreachable — a non-zero ``claude -p`` exit is
+        # caught before the parse, and ``--output-format json`` always emits an
+        # envelope — but the honest claim is "no change for well-formed envelopes",
+        # not "no change on the Claude path".
         data = raw  # not an envelope: fenced or prose-wrapped content
 
     text = _extract_text(data)
