@@ -7,8 +7,12 @@
 Extracts the structured verdict from every shape a backend can produce —
 the Claude CLI's transport envelopes, and the Ollama backend's *unwrapped*
 content, whether bare or wrapped in a markdown fence (4.0.6) — strips those
-fences, recovers the verdict even when an agent buries it in prose (2.4.2),
-validates the result, and writes clean JSON to the output file.
+fences, and recovers the verdict even when an agent buries it in prose (2.4.2).
+
+It does NOT validate the schema. The 7-key contract and the verdict enum are
+enforced downstream by ``load_agent_output`` -- deliberately, because an object
+that decodes but violates the schema must reach that check: its error message is
+the corrective feedback the agent's retry depends on.
 
 Usage:
     python3 parse_agent_output.py <input_file> <output_file>
