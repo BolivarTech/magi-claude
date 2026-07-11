@@ -650,6 +650,50 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    @pytest.mark.parametrize("depth", [5_000, 16_200, 30_000])
+    @pytest.mark.parametrize("fenced", [False, True], ids=["bare", "fenced"])
+    def test_a_deeply_nested_verdict_never_escapes_as_RecursionError(self, depth, fenced):
+        """No stack overflow may escape this module — from ANY of its four JSON calls.
+
+        Four places can blow the stack on a pathological payload, and they do **not**
+        share a depth window — which is why pinning one depth at one site is not a
+        guarantee, and why the first attempt at this guard missed:
+
+        * ``json.loads`` on the raw file (C scanner — survives deepest),
+        * ``raw_decode`` during prose recovery (``_loads_lenient``),
+        * ``_extract_text``'s ``json.dumps`` on the bare-verdict dict (**C** encoder),
+        * the final ``json.dumps(..., indent=2)`` (**pure-Python** encoder, lowest limit).
+
+        That first attempt mapped the fenced route only, so the sibling shape — a bare,
+        unfenced verdict, the plainest Ollama payload there is — still escaped. So this
+        test asserts the **property**, not a site: whatever blows, the mage sees a
+        ``JSONDecodeError`` and gets its retry. A ``RecursionError`` escapes the
+        orchestrator's ``(ValidationError, JSONDecodeError)`` catch and costs the mage
+        its second attempt.
+
+        Surviving a depth is allowed — that is not a failure. Only ``RecursionError`` is.
+        """
+        verdict = (
+            '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
+            '"reasoning":"r","recommendation":"x","findings":' + "[" * depth + "]" * depth + "}"
+        )
+        raw = f"```json\n{verdict}\n```" if fenced else verdict
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            try:
+                parse_agent_output(in_path, out_path)
+            except json.JSONDecodeError:
+                pass  # mapped: the mage is retried
+            except RecursionError as exc:  # pragma: no cover - the bug this pins
+                raise AssertionError(
+                    f"RecursionError escaped at depth={depth} fenced={fenced}. The mage "
+                    "loses its retry. Map it to JSONDecodeError at the site that raised."
+                ) from exc
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_a_bare_too_nested_verdict_is_also_retryable(self):
         """The BARE Ollama shape must be mapped too — it has its own encoder.
 
@@ -669,34 +713,6 @@ class TestOllamaFencedContent:
             '"reasoning":"r","recommendation":"x","findings":' + "[" * depth + "]" * depth + "}"
         )
         in_path = _write_temp(verdict)  # bare: no fence, no prose
-        out_path = _write_temp("", suffix=".out.json")
-        try:
-            with pytest.raises(json.JSONDecodeError):
-                parse_agent_output(in_path, out_path)
-        finally:
-            os.unlink(in_path)
-            os.unlink(out_path)
-
-    def test_a_verdict_too_nested_to_re_encode_is_still_retryable(self):
-        """The ENCODER can blow the stack where the decoder did not.
-
-        Asymmetry worth knowing: ``json.loads`` uses the C scanner and happily
-        decodes ~5000 levels of nesting, but ``json.dump(..., indent=2)`` falls back
-        to the **pure-Python** encoder, which recurses per level and raises
-        ``RecursionError`` writing the very object that just decoded fine.
-
-        Before 4.0.6 this shape never got that far on the Ollama path (the fenced
-        payload failed at ``json.load``), so reading-as-text-first is what makes the
-        encoder reachable. Unmapped, it escapes the orchestrator's
-        ``(ValidationError, JSONDecodeError)`` retry and the mage is dropped without a
-        second attempt. Mapped, the mage is retried like any other malformed output.
-        """
-        deep_findings = "[" * 5_000 + "]" * 5_000
-        verdict = (
-            '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
-            '"reasoning":"r","recommendation":"x","findings":' + deep_findings + "}"
-        )
-        in_path = _write_temp(f"```json\n{verdict}\n```")
         out_path = _write_temp("", suffix=".out.json")
         try:
             with pytest.raises(json.JSONDecodeError):

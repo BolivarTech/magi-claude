@@ -330,12 +330,18 @@ def _loads_lenient(text: str) -> Any:
 
 
 def parse_agent_output(input_path: str, output_path: str) -> None:
-    """Read a raw agent response, extract and validate its verdict, write it out.
+    """Read a raw agent response, extract its verdict object, and write it out.
 
     Backend-agnostic by contract: the raw file may be a Claude CLI transport
     envelope, or the agent's verdict itself (the Ollama backend writes the
     unwrapped content), optionally inside a markdown fence or surrounded by
-    prose. All four shapes converge on the same validated 7-key object.
+    prose. All four shapes converge on the same decodable JSON object.
+
+    It does **not** validate the schema, despite what an earlier version of this line
+    claimed: the 7-key contract and the verdict enum are enforced downstream by
+    ``load_agent_output``. That is deliberate — an object that decodes but violates the
+    schema must reach that check, because its error message ("Invalid verdict 'Reject'")
+    is the corrective feedback the agent's retry depends on.
 
     Args:
         input_path:  Path to the raw agent output file (envelope OR bare content).
@@ -380,7 +386,7 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         # What letting it escape actually costs — checked, not assumed, because this
         # file has a history of comments asserting more than they can: the orchestrator
         # gathers with ``return_exceptions=True`` and re-raises only non-Exception
-        # BaseExceptions (``run_magi.py:711``), so a stray RecursionError does NOT kill
+        # BaseExceptions other than CancelledError, so a stray RecursionError does NOT kill
         # the run — the mage is excluded and the run degrades. But the retry at
         # ``run_magi.py`` only catches ``(ValidationError, JSONDecodeError)``, so the
         # mage would be dropped **without its second attempt**. Mapping it here buys
@@ -395,7 +401,20 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         # not "no change on the Claude path".
         data = raw  # not an envelope: fenced or prose-wrapped content
 
-    text = _extract_text(data)
+    try:
+        text = _extract_text(data)
+    except RecursionError as exc:
+        # A SECOND encoder, with its own depth window. The bare-verdict-dict branch of
+        # ``_extract_text`` re-serialises with ``json.dumps`` (the C encoder), which
+        # survives far deeper nesting than the ``indent=2`` pure-Python encoder used at
+        # the write below — so it blows on inputs the decoder accepted and the other
+        # catch never sees. Unmapped it escapes the orchestrator's
+        # ``(ValidationError, JSONDecodeError)`` retry and the mage loses its second
+        # attempt, on the plainest Ollama payload there is: a bare, unfenced verdict.
+        raise json.JSONDecodeError(
+            "Agent output is nested too deeply to re-serialise", raw, 0
+        ) from exc
+
     text = _strip_code_fences(text)
 
     # Validate that the cleaned text is valid JSON. Agents that do
@@ -404,21 +423,25 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     # JSON object at all still raises (fail closed). See ``_loads_lenient``.
     parsed = _loads_lenient(text)
 
+    try:
+        payload = json.dumps(parsed, indent=2)
+    except RecursionError as exc:
+        # The ENCODER can blow the stack where the decoder did not: ``json.loads`` uses
+        # the C scanner and decodes ~16k levels of nesting, while ``indent=2`` forces
+        # the pure-Python encoder, whose limit is far lower. Encoding an object that
+        # just decoded cleanly can therefore still raise. An escaping RecursionError is
+        # not caught by the orchestrator's ``(ValidationError, JSONDecodeError)`` retry,
+        # so the mage would be dropped without a second attempt. Map it, exactly as
+        # ``_loads_lenient`` maps the decode side.
+        raise json.JSONDecodeError(
+            "Recovered verdict is nested too deeply to re-encode", text, 0
+        ) from exc
+
+    # Encode BEFORE opening the file. Streaming straight into ``open(..., "w")`` left a
+    # truncated ~1 MB artifact behind whenever the encoder raised mid-write — for a mage
+    # that was then dropped, in the very run dir a reviewer is told to read.
     with open(output_path, "w", encoding="utf-8") as fh:
-        try:
-            json.dump(parsed, fh, indent=2)
-        except RecursionError as exc:
-            # The ENCODER can blow the stack where the decoder did not: ``json.loads``
-            # uses the C scanner and decodes ~5000 levels happily, while ``indent=2``
-            # forces the pure-Python encoder, which recurses per level. The write of an
-            # object that just decoded cleanly can therefore still raise. An escaping
-            # RecursionError is not caught by the orchestrator's
-            # ``(ValidationError, JSONDecodeError)`` retry, so the mage would be dropped
-            # without a second attempt. Map it, exactly as ``_loads_lenient`` maps the
-            # decode side.
-            raise json.JSONDecodeError(
-                "Recovered verdict is nested too deeply to re-encode", text, 0
-            ) from exc
+        fh.write(payload)
         fh.write("\n")
 
 
