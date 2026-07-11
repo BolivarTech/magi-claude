@@ -743,7 +743,30 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
-    def test_a_failed_encode_leaves_no_truncated_artifact(self):
+    def test_a_text_block_without_text_is_retried_not_dropped(self):
+        """A malformed content block must not escape as ``KeyError``.
+
+        ``_extract_text`` selects a block on ``type == "text"`` and then indexes
+        ``block["text"]`` — so a block that declares the type and omits the key raises
+        ``KeyError``, which ``run_magi``'s ``(ValidationError, JSONDecodeError)`` guard
+        does not catch. The mage is dropped **without its second attempt** — the exact
+        cost this release exists to remove, surviving in the branch it patched.
+
+        Reachable on the Ollama path: the backend writes the model's text verbatim as
+        the whole raw file, so any model emitting a top-level ``content`` key holding
+        such a block lands here. A genuine Claude envelope always carries ``text``.
+        """
+        in_path = _write_temp('{"content": [{"type": "text"}]}')
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    @pytest.mark.parametrize("depth", [1_200, 16_200])
+    def test_a_failed_encode_leaves_no_truncated_artifact(self, depth):
         """When the encoder blows up, the output file must not be written at all.
 
         The verdict is encoded to a string BEFORE the output file is opened. Streaming
@@ -752,14 +775,18 @@ class TestOllamaFencedContent:
         very run directory ``CLAUDE.md`` tells a reviewer to read. A truncated artifact
         that looks like a verdict is exactly the kind of thing someone reads at 3am.
 
-        **The payload must be FENCED**, and that detail is the whole test. A *bare*
-        payload raises earlier, at ``_extract_text``'s own encode, so the final encode —
-        the one this guarantee is about — is never reached and the test passes with or
-        without the code it claims to pin. The first version of this test did exactly
-        that: it was vacuous, and a review caught it. Only a fenced payload takes the
-        route that opens the output file.
+        **Fenced, and at a depth inside THIS interpreter's encode window** — the two
+        qualifications are the whole test, and each one has already shipped wrong once.
+
+        A *bare* payload raises at ``_extract_text``'s own encode, before the output file
+        is ever opened, so it cannot exercise the guarantee. And the encode windows are
+        **disjoint** across supported interpreters — 3.12: 995–2997, 3.14: 15510–16918 —
+        so a single depth is vacuous on the other one: 16_200 exceeds 3.12's *decoder*
+        limit, so the parse fails at the top and the sentinel survives because the file
+        was never opened, not because the guarantee holds. Both depths are therefore
+        parametrized, and the assertion runs only on the failure path (surviving a depth
+        is not a failure — it just means this interpreter encoded it fine).
         """
-        depth = 16_200  # decodes, does not re-encode
         verdict = (
             '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
             '"reasoning":"r","recommendation":"x","findings":' + "[" * depth + "]" * depth + "}"
@@ -768,13 +795,14 @@ class TestOllamaFencedContent:
         in_path = _write_temp(f"```json\n{verdict}\n```")
         out_path = _write_temp(sentinel, suffix=".out.json")
         try:
-            with pytest.raises(json.JSONDecodeError):
+            try:
                 parse_agent_output(in_path, out_path)
-            with open(out_path, encoding="utf-8") as f:
-                assert f.read() == sentinel, (
-                    "the output file was opened and truncated despite the failure — "
-                    "encode the payload before opening it"
-                )
+            except json.JSONDecodeError:
+                with open(out_path, encoding="utf-8") as f:
+                    assert f.read() == sentinel, (
+                        "the output file was opened and truncated despite the failure — "
+                        "encode the payload before opening it"
+                    )
         finally:
             os.unlink(in_path)
             os.unlink(out_path)
