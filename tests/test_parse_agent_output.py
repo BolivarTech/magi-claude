@@ -830,7 +830,15 @@ class TestOllamaFencedContent:
         output proportional to the input. This test would also pass under a depth cap or
         a length bound; what it forbids is the amplification.
         """
-        depth = 4_000  # decodes on both interpreters; indent would blow the size, not raise
+        # Depth 700 is chosen so that on BOTH interpreters the payload (a) decodes,
+        # (b) compact-encodes, and — critically — (c) ``indent=2`` *amplifies* rather
+        # than raising. Getting this wrong is how the pin went vacuous twice: at 4_000 it
+        # exceeded 3.12's ~2997 decoder limit (parse raised, assertion skipped), and at
+        # 2_000 it exceeded 3.12's ~993 *indent-encoder* limit (the reverted code would
+        # raise, not amplify, so the mutation was not caught there). At 700, ``indent=2``
+        # projects to ~980 KB (~700× input) on both — far above the 4×input bound — so
+        # reverting to indented output fails this test on 3.12 and 3.14 alike.
+        depth = 700
         nested = "[" * depth + "1" + "]" * depth
         raw = f"```json\n{nested}\n```"
         in_path = _write_temp(raw)

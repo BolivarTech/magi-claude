@@ -1,7 +1,7 @@
 # MAGI — Multi-Perspective Analysis Plugin for Claude Code
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-109%20passing-brightgreen.svg)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-707%20passing-brightgreen.svg)](#running-tests)
 [![Ruff](https://img.shields.io/badge/linter-ruff-orange.svg)](https://docs.astral.sh/ruff/)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
@@ -295,7 +295,7 @@ skills/magi/
     parse_agent_output.py     -- agent-output extractor (Claude envelope + bare/fenced content)
 tests/
   test_synthesize.py          -- 166 tests: validation, consensus, confidence, dedup, labels
-  test_parse_agent_output.py  -- 75 tests: envelopes, fenced/bare content, fail-closed recovery
+  test_parse_agent_output.py  -- 76 tests: envelopes, fenced/bare content, fail-closed recovery
   test_run_magi.py            -- 169 tests: arg parsing, model flag, orchestration, validation
 docs/
   MAGI-System-Documentation.md  -- Full technical reference (Spanish)
@@ -326,7 +326,7 @@ from synthesize import load_agent_output, determine_consensus, format_report
 ## Running Tests
 
 ```bash
-# All tests (109 total)
+# All tests (707 total)
 python -m pytest tests/ -v
 
 # Full verification (tests + lint + format + types)
