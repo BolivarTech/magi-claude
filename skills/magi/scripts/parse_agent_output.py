@@ -374,7 +374,14 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
             f"exceeding maximum of {MAX_INPUT_FILE_SIZE} bytes."
         )
 
-    with open(input_path, encoding="utf-8") as fh:
+    # errors="replace": these are the backend's bytes verbatim, and a strict decode
+    # raises UnicodeDecodeError — a ValueError, but NOT a JSONDecodeError, so run_magi's
+    # retry guard would miss it and the mage would be dropped without a second attempt.
+    # The JSON structure is ASCII, so a bad byte can only land inside a string field: the
+    # verdict still parses and the mage keeps it, at the cost of one replacement char.
+    # Same convention the rest of the codebase already uses for untrusted output
+    # (cost.py, review_context.py, and the cp1252 hardening of 2.2.6).
+    with open(input_path, encoding="utf-8", errors="replace") as fh:
         raw = fh.read()
 
     # Read as TEXT, then decide whether it is an envelope (4.0.6).
