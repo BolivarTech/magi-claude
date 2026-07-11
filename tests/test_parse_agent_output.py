@@ -101,7 +101,7 @@ class TestExtractText:
 
     def test_fallback_dict_raises_value_error(self):
         data = {"unknown_key": "some_value"}
-        with pytest.raises(ValueError, match="Unexpected Claude CLI output type"):
+        with pytest.raises(ValueError, match="Unexpected agent output type"):
             _extract_text(data)
 
     def test_result_key_takes_precedence_over_content(self):

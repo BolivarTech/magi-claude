@@ -108,7 +108,7 @@ def _extract_text(data: object) -> str:
         return json.dumps(data)
 
     raise ValueError(
-        f"Unexpected Claude CLI output type: {type(data).__name__}. "
+        f"Unexpected agent output type: {type(data).__name__}. "
         f"Expected dict with 'result' or 'content' key, or plain string."
     )
 
@@ -240,10 +240,12 @@ def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
     object decodes but it is NOT the real verdict — a quoted example beside a
     truncated real verdict, an early echo with the real verdict beyond the
     probe cap, or a lone echoed example — it is recovered and a fabricated
-    ``approve`` can reach consensus. The durable fix is a verdict
-    sentinel/delimiter (or Option C). See CLAUDE.md "Durable verdict-recovery
-    fix". Do not add more heuristic tuning here; the next change should be the
-    sentinel.
+    ``approve`` can reach consensus. The durable fix is the verdict
+    **sentinel** — scheduled as **MS2** (``sbtdd/spec-behavior-base-MS2.md``;
+    debt in ``CLAUDE.techdebt.md``). Do not add more heuristic tuning here, and
+    do not try to make :func:`_is_verdict_shaped` smarter either: 4.0.6 attempted
+    that three times and produced a fail-open every time. The next change here is
+    the sentinel.
 
     Args:
         text: Text that may contain a verdict object embedded in prose.
