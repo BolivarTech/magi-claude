@@ -132,29 +132,51 @@ _LENIENT_RECOVERY_MAX_CHARS = 1_000_000
 # approaches this.
 _MAX_BRACE_PROBES = 2_000
 
+# A schema RESTATEMENT: the enum's definition ("approve | reject | conditional"),
+# not one of its members. No genuine verdict is ever a pipe-union, so disqualifying
+# this shape cannot discard a real verdict — which is the whole reason the exclusion
+# is drawn here and not at "must be a valid enum member" (see _is_verdict_shaped).
+_ENUM_DEFINITION_RE = re.compile(r"^\s*\w[\w-]*(?:\s*\|\s*\w[\w-]*)+\s*$")
+
 
 def _is_verdict_shaped(candidate: object) -> bool:
-    """Whether *candidate* could be a real verdict, per the SCHEMA — not a guess.
+    """Whether *candidate* could be a real verdict — excluding SCHEMA RESTATEMENTS.
 
-    Requires the two discriminating keys **and** a ``verdict`` that is an actual
-    member of the enum ``validate.VALID_VERDICTS``. That second condition is the
-    contract, not a heuristic: ``load_agent_output`` enforces the same enum a few
-    lines later, so nothing that fails here could ever have become a verdict anyway.
+    Requires the two discriminating keys, and disqualifies exactly one extra thing:
+    a ``verdict`` whose value is the **enum's definition** rather than a verdict —
+    ``"approve | reject | conditional"``. A thinking model restating its own schema
+    (``glm-5.2`` and ``qwen3.5`` — two thirds of the default trio — do this inside
+    ``<think>``) emits a decodable object carrying both keys, and that restatement
+    used to count as a rival candidate: the ambiguity guard fired, the mage was
+    retried, the retry reproduced the same output, and the mage was **dropped** — a
+    degraded run, which by the Integrity rule approves nothing.
 
-    It exists because a **thinking model restating its own schema** (``glm-5.2`` and
-    ``qwen3.5`` — two thirds of the default trio — do this inside ``<think>``)
-    produces a decodable object carrying both keys, whose ``verdict`` field holds the
-    enum's *definition* (``"approve | reject | conditional"``) rather than one of its
-    members. That restatement used to count as a second candidate, so the ambiguity
-    guard fired, the mage was retried, the retry reproduced the same output, and the
-    mage was **dropped** — a degraded run, which by the Integrity rule approves
-    nothing. A schema restatement is not a verdict, and it says so itself.
+    **Why this is NOT simply "verdict must be a valid enum member" (4.0.6 review).**
+    That was the first attempt and it was a fail-closed → fail-open regression. This
+    predicate does not only *select* the verdict — it feeds the **ambiguity guard**,
+    which is the fail-closed mechanism. Narrowing the predicate narrows the guard:
+    fewer candidates ⇒ fewer ambiguity trips ⇒ **more single-match fabrications**.
+    Requiring an enum member also excluded a *real* verdict whose value merely
+    drifted in case (``"Reject"``) — and enum drift is common; it is why
+    ``_build_retry_prompt`` exists. Verified consequence: the model's true ``Reject``
+    (carrying a ``critical`` finding) stopped counting, the echoed system-prompt
+    example became the sole match, and consensus received a schema-perfect fabricated
+    ``approve`` from the adversarial seat. Pinned by
+    ``test_echoed_example_beside_a_case_drifted_verdict_still_fails_closed``.
 
-    This check only ever **narrows** what qualifies, so it cannot widen the
-    fabrication surface (4.0.6). It does **not** close the fabrication residual — a
-    lone echoed example carries a perfectly valid ``"approve"`` — and it is not meant
-    to. The durable fix for that remains the verdict **sentinel**; see the residual
-    note in :func:`_embedded_verdict_object` and ``CLAUDE.techdebt.md``.
+    So the rule is: **a drifted verdict is still a rival** (it keeps the guard armed,
+    and alone it is recovered so ``load_agent_output`` can raise its precise
+    ``Invalid verdict 'Reject'`` — the feedback the retry needs). Only the enum's
+    *definition* is disqualified, because no real verdict can ever be a pipe-union.
+
+    **What this still does not close, stated without a guarantee this time.** The
+    LOCKED single-match fabrication residual is untouched: a lone echoed example
+    carries a perfectly valid ``"approve"``. And excluding restatements does remove
+    one *accidental* rival — a payload where a restatement happened to be the second
+    candidate that saved an otherwise-fabricating input now fabricates. That was
+    never a guard, only luck, but it is a real narrowing and the honest thing is to
+    say so. The durable fix is the verdict **sentinel** (MS2); see the residual note
+    in :func:`_embedded_verdict_object` and ``CLAUDE.techdebt.md``.
 
     Args:
         candidate: A JSON value decoded from the agent's output.
@@ -166,7 +188,14 @@ def _is_verdict_shaped(candidate: object) -> bool:
         return False
     if not all(key in candidate for key in _VERDICT_KEYS):
         return False
-    return candidate.get("verdict") in VALID_VERDICTS
+    verdict = candidate.get("verdict")
+    if not isinstance(verdict, str):
+        return False
+    if verdict in VALID_VERDICTS:
+        return True
+    # Not a member. A schema restatement is the enum's definition and is no rival;
+    # a drifted verdict IS one, and must keep the ambiguity guard armed.
+    return not _ENUM_DEFINITION_RE.match(verdict)
 
 
 def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
