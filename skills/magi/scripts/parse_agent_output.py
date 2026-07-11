@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-05-21
-"""Parse and validate agent JSON output from Claude CLI.
+# Version: 1.2.0
+# Date: 2026-07-11
+"""Parse and validate an agent's JSON verdict from any supported backend.
 
-Extracts structured JSON from various Claude CLI output formats,
-strips markdown code fences, recovers the JSON verdict even when an
-agent wraps it in natural-language prose (2.4.2), validates the result,
-and writes clean JSON to the specified output file.
+Extracts the structured verdict from every shape a backend can produce —
+the Claude CLI's transport envelopes, and the Ollama backend's *unwrapped*
+content, whether bare or wrapped in a markdown fence (4.0.6) — strips those
+fences, recovers the verdict even when an agent buries it in prose (2.4.2),
+validates the result, and writes clean JSON to the output file.
 
 Usage:
     python3 parse_agent_output.py <input_file> <output_file>
@@ -59,12 +60,15 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _extract_text(data: object) -> str:
-    """Extract the meaningful text payload from Claude CLI JSON output.
+    """Extract the meaningful text payload from a backend's raw output.
 
-    Supports multiple output shapes:
-        - ``{"result": "..."}``
-        - ``{"content": [{"type": "text", "text": "..."}]}``
-        - Plain string
+    Supports every shape a backend can produce:
+        - ``{"result": "..."}``                              (Claude CLI envelope)
+        - ``{"content": [{"type": "text", "text": "..."}]}`` (Claude CLI envelope)
+        - Plain string                                       (incl. fenced or
+          prose-wrapped content, which reaches here as raw text when the file is
+          not JSON at the top level — the Ollama path, 4.0.6)
+        - Bare 7-key verdict dict                            (Ollama, unwrapped)
 
     Args:
         data: Deserialised JSON value from Claude CLI output.

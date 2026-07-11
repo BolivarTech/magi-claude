@@ -600,11 +600,15 @@ _FIXTURE_DIR = os.path.join(
 def _discovered_fixtures() -> list[str]:
     """Return every ``*.json`` file under the fixtures directory.
 
-    Auto-discovery keeps the contract test cheap to extend: drop a new
-    captured ``claude -p`` output into the fixtures dir and the suite
-    will validate it on the next run without a test edit. See
-    ``tests/fixtures/claude-cli-outputs/README.md`` for the capture
-    procedure.
+    Auto-discovery keeps the contract test cheap to extend: drop a captured
+    backend output into the fixtures dir and the suite validates it on the
+    next run, with no test edit. See
+    ``tests/fixtures/claude-cli-outputs/README.md`` for the capture procedure.
+
+    The directory is named for the backend that came first, but the contract it
+    pins is **every** backend: since 4.0.6 it also holds Ollama shapes, whose raw
+    output is the verdict itself rather than a CLI envelope. The name is kept for
+    continuity; the scope is not limited by it.
     """
     if not os.path.isdir(_FIXTURE_DIR):
         return []
