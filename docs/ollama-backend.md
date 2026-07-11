@@ -145,6 +145,7 @@ requires `ollama signin`).
 | `Auth failed (401/403)` | invalid/absent api_key | fix `MAGI_OLLAMA_API_KEY` / the TOML |
 | 400 + degraded on every run | server does not support `response_format` | use `structured="object"` or `"off"` |
 | `--model does not apply with --ollama` | you passed both | drop `--model`; models go in the TOML/env |
+| A mage is dropped although its `*.raw.json` looks like a valid verdict | the model wrapped its JSON in a markdown fence or a `<think>` block | **fixed in 4.0.6** — the parser now reads the raw file as text before assuming an envelope. If you still see it on 4.0.6+, keep the `raw.json`: it is a parser bug, not a config problem |
 
 ---
 

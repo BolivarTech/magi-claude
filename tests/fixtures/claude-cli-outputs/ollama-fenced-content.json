@@ -1,0 +1,18 @@
+```json
+{
+  "agent": "caspar",
+  "verdict": "conditional",
+  "confidence": 0.82,
+  "summary": "Architecturally sound plan with several concrete defects.",
+  "reasoning": "Read the plan against the standards and the spec, line by line.",
+  "findings": [
+    {
+      "severity": "warning",
+      "title": "T1 test has a forward dependency on a Phase-2 symbol",
+      "detail": "A Phase-1 test calls a helper that does not exist until Phase 2.",
+      "category": "logic-error"
+    }
+  ],
+  "recommendation": "Fix the six concrete defects, then execute."
+}
+```

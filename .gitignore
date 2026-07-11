@@ -41,3 +41,16 @@ experiments/
 /scripts/claude_usage.py
 /scripts/sleep_signal.py
 /scripts/graphify_ollama.py
+
+# Review-gate artifacts: bundles handed to MAGI (spec + plan + standards) and
+# usage-gate snapshots. Local to a gate run, never part of the shipped plugin.
+# A `git add -A` during a release swept a 7k-line bundle into a 19-line hotfix
+# once; these entries are why it will not happen again.
+#
+# Anchored with a leading `/`: the bundles always live at the repo root, and an
+# unanchored `magi-review-*.md` would match at ANY depth — silently swallowing a
+# future *tracked* doc that happened to be named that way. A .gitignore that
+# eats a file you meant to commit is worse than one that misses an artifact.
+/checkpoint2-bundle.md
+/magi-review-*.md
+/claude-usage.txt

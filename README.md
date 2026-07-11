@@ -1,7 +1,7 @@
 # MAGI — Multi-Perspective Analysis Plugin for Claude Code
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-109%20passing-brightgreen.svg)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-707%20passing-brightgreen.svg)](#running-tests)
 [![Ruff](https://img.shields.io/badge/linter-ruff-orange.svg)](https://docs.astral.sh/ruff/)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
@@ -158,7 +158,7 @@ Melchior        Balthasar       Caspar
 (Scientist)     (Pragmatist)    (Critic)
   |               |               |
   v               v               v
-parse_agent_output.py (extract JSON from CLI output)
+parse_agent_output.py (extract the verdict: Claude envelope, or bare/fenced content)
   |               |               |
   v               v               v
 validate.load_agent_output() (schema validation)
@@ -292,11 +292,11 @@ skills/magi/
     validate.py               -- ValidationError + load_agent_output schema validation
     consensus.py              -- VERDICT_WEIGHT + determine_consensus (weight-based scoring)
     reporting.py              -- AGENT_TITLES + format_banner + format_report (ASCII)
-    parse_agent_output.py     -- Claude CLI JSON extractor (3 output formats)
+    parse_agent_output.py     -- agent-output extractor (Claude envelope + bare/fenced content)
 tests/
-  test_synthesize.py          -- 74 tests: validation, consensus, confidence, dedup, labels
-  test_parse_agent_output.py  -- 19 tests: fence stripping, text extraction, pipeline
-  test_run_magi.py            -- 16 tests: arg parsing, model flag, orchestration, validation
+  test_synthesize.py          -- 166 tests: validation, consensus, confidence, dedup, labels
+  test_parse_agent_output.py  -- 76 tests: envelopes, fenced/bare content, fail-closed recovery
+  test_run_magi.py            -- 169 tests: arg parsing, model flag, orchestration, validation
 docs/
   MAGI-System-Documentation.md  -- Full technical reference (Spanish)
 pyproject.toml                -- Python >= 3.12, dual license, dev deps, tool config
@@ -326,7 +326,7 @@ from synthesize import load_agent_output, determine_consensus, format_report
 ## Running Tests
 
 ```bash
-# All tests (109 total)
+# All tests (707 total)
 python -m pytest tests/ -v
 
 # Full verification (tests + lint + format + types)

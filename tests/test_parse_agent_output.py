@@ -101,7 +101,7 @@ class TestExtractText:
 
     def test_fallback_dict_raises_value_error(self):
         data = {"unknown_key": "some_value"}
-        with pytest.raises(ValueError, match="Unexpected Claude CLI output type"):
+        with pytest.raises(ValueError, match="Unexpected agent output type"):
             _extract_text(data)
 
     def test_result_key_takes_precedence_over_content(self):
@@ -259,6 +259,692 @@ class TestParseAgentOutput:
         finally:
             os.unlink(input_path)
             os.unlink(output_path)
+
+
+class TestOllamaFencedContent:
+    """4.0.6: an Ollama model that fences its verdict must not kill its mage.
+
+    The Ollama backend returns ``choices[0].message.content`` **already unwrapped**
+    — the raw file therefore holds the agent's verdict *itself*, not an envelope
+    around it. Many models emit that verdict inside a markdown fence, so the raw
+    file starts with ``` and is not JSON at the top level.
+
+    Before 4.0.6, ``parse_agent_output`` called ``json.load(fh)`` **before**
+    stripping fences. On the Claude path that is fine (the raw *is* an envelope).
+    On the Ollama path it blew up at character 0, the mage was retried, the retry
+    produced the same (perfectly valid) fenced verdict, and the mage was dropped —
+    a degraded run whose verdict, by the Integrity rule, approves nothing.
+
+    The fence-stripping code existed all along. It was simply unreachable on the
+    one path that needed it: it ran *after* a parse that could never succeed.
+
+    Observed 2026-07-11: glm-5.2 emitted a schema-perfect 7-key verdict with 7
+    findings, fenced; MAGI discarded it twice and reported a degraded run.
+    """
+
+    def test_bare_fenced_verdict_is_parsed(self):
+        """The exact shape that killed Caspar: a fenced verdict, no envelope."""
+        payload = _sample_agent_payload()
+        raw = f"```json\n{json.dumps(payload)}\n```"
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                result = json.load(f)
+            assert result == payload
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_bare_fenced_verdict_without_language_tag(self):
+        """A bare ``` fence is as common as ```json — both must work."""
+        payload = _sample_agent_payload()
+        raw = f"```\n{json.dumps(payload)}\n```"
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                assert json.load(f) == payload
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_bare_unfenced_verdict_still_works(self):
+        """Regression: models that emit bare JSON kept working (the 4.0.0 path)."""
+        payload = _sample_agent_payload()
+        in_path = _write_temp(json.dumps(payload))
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                assert json.load(f) == payload
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_unparseable_content_still_fails_closed(self):
+        """The fix must not turn "unparseable" into "silently accepted".
+
+        Widening the input a parser tolerates is exactly how a fail-closed guard
+        becomes fail-open by accident. A response with no JSON at all must still
+        raise, so the agent is retried and — if it persists — dropped, rather than
+        contributing an empty verdict to a consensus that would look complete.
+        """
+        in_path = _write_temp("I refuse to answer, and there is no JSON here at all.")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_two_verdicts_at_top_level_still_fail_closed(self):
+        """Ambiguity must fail closed on the BARE path too, not just the envelope.
+
+        A model that echoes the example verdict from its own system prompt beside its
+        real one produces two schema-shaped objects. Picking either would be
+        fabrication. The guard already existed, but was pinned only through the
+        envelope path — and this fix is what makes the bare path reachable, so the
+        guard needs its own pin here.
+        """
+        first = json.dumps(_sample_agent_payload())
+        second = json.dumps({**_sample_agent_payload(), "verdict": "approve"})
+        in_path = _write_temp(f"Two of them:\n```json\n{first}\n```\n```json\n{second}\n```")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_truncated_verdict_at_top_level_still_fails_closed(self):
+        """A verdict cut mid-object is not a verdict — on the bare path either.
+
+        This is the LOUD half of the truncation asymmetry: a cut-off *output* breaks
+        the JSON and dies here, noisily, which is exactly why only a truncated
+        *input* (which yields perfectly valid JSON) needs a guard of its own.
+        """
+        cut = json.dumps(_sample_agent_payload())[:60]
+        in_path = _write_temp(f"```json\n{cut}")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_lone_echoed_example_is_a_known_fabrication_residual(self):
+        """CHARACTERIZATION: this asserts a BUG, so it fails when the bug is fixed.
+
+        The LOCKED single-match fabrication residual, now reachable on the Ollama
+        path. Every agent system prompt carries a complete example verdict whose
+        value is literally ``"verdict": "approve"`` (see skills/magi/agents/*.md).
+        A model that echoes it — and emits nothing else decodable — has that example
+        recovered as its verdict: a fabricated ``approve``, in the adversarial seat.
+
+        The ambiguity guard does NOT save us here, and that is the subtle part: it
+        only fires when TWO objects decode. One echo alone is a single match. So is
+        an echo beside a *truncated* real verdict. The two guards interact, and the
+        interaction is the hole.
+
+        This test exists so the residual is visible and measured rather than merely
+        described in a docstring. The durable fix is the verdict sentinel
+        (CLAUDE.techdebt.md), NOT more heuristics in ``_embedded_verdict_object``.
+        When the sentinel lands, this test MUST fail — and its failure is the signal
+        to delete it, not to weaken it.
+        """
+        echoed_example = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve",
+                "confidence": 0.85,
+                "summary": "One-line verdict",
+                "reasoning": "Your risk-focused analysis",
+                "findings": [],
+                "recommendation": "What you recommend",
+            }
+        )
+        in_path = _write_temp(f"Let me recall the required shape:\n{echoed_example}")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                recovered = json.load(f)
+            assert recovered["verdict"] == "approve", (
+                "fabrication residual has changed shape — re-read the docstring "
+                "before touching this test"
+            )
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_echoed_example_beside_a_case_drifted_verdict_still_fails_closed(self):
+        """A rival verdict with a DRIFTED enum value must still trip the guard.
+
+        The predicate is **key-only**, so this object — a genuine verdict whose enum
+        value merely drifted in case — is still verdict-shaped, still a rival, and the
+        ambiguity guard still trips. That is the whole point of this test.
+
+        It exists because 4.0.6 tried to make the predicate smarter and broke exactly
+        this. Requiring ``verdict`` to be a valid enum member excluded ``"Reject"``
+        from candidacy, so the echoed system-prompt example became the *sole* match and
+        the parser handed consensus a schema-perfect fabricated ``approve`` — in the
+        adversarial seat, silently — on a payload that had failed closed before.
+
+        The reason is structural, and it is why no exclusion belongs in that predicate:
+        ``_is_verdict_shaped`` does not only *select* the verdict, **it feeds the
+        ambiguity guard**, which is the fail-closed mechanism. Narrowing the predicate
+        narrows the guard: fewer candidates ⇒ fewer ambiguity trips ⇒ MORE single-match
+        fabrications. Enum drift is common — it is why ``_build_retry_prompt`` exists —
+        so a drifted verdict must stay a rival.
+        """
+        echoed_example = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve",
+                "confidence": 0.85,
+                "summary": "One-line verdict",
+                "reasoning": "Your risk-focused analysis",
+                "findings": [],
+                "recommendation": "What you recommend",
+            }
+        )
+        drifted_real_verdict = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "Reject",  # a real verdict, wrong case
+                "confidence": 0.93,
+                "summary": "Six concrete defects.",
+                "reasoning": "Traced every claim against the code.",
+                "findings": [{"severity": "critical", "title": "Race", "detail": "TOCTOU."}],
+                "recommendation": "Do not merge.",
+            }
+        )
+        raw = (
+            f"<think>The shape I must follow:\n{echoed_example}\n"
+            f"Now my actual verdict.</think>\n"
+            f"```json\n{drifted_real_verdict}\n```"
+        )
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_a_pipe_union_verdict_stays_a_rival(self):
+        """A ``verdict`` value of ``"approve | conditional"`` is still a rival.
+
+        Second attempt at the same reasoning error, one notch finer. That version
+        excluded any candidate whose ``verdict`` matched a regex for "word-token pipe
+        union" — broader than the rule it claimed to enforce, and broader in the
+        fail-open direction: a real verdict that drifted into ``"approve |
+        conditional"`` stopped being a rival, so the echoed system-prompt example
+        became the sole match and consensus received a fabricated ``approve``.
+
+        With the key-only predicate this object is verdict-shaped, the guard sees two
+        candidates, and the parse fails closed. No exclusion is correct here — see
+        ``_is_verdict_shaped``; the durable fix is the sentinel (MS2).
+        """
+        echoed_example = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve",
+                "confidence": 0.85,
+                "summary": "One-line verdict",
+                "reasoning": "Your risk-focused analysis",
+                "findings": [],
+                "recommendation": "What you recommend",
+            }
+        )
+        partial_union = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve | conditional",  # a subset, NOT the definition
+                "confidence": 0.93,
+                "summary": "Six concrete defects.",
+                "reasoning": "Traced every claim against the code.",
+                "findings": [{"severity": "critical", "title": "Race", "detail": "TOCTOU."}],
+                "recommendation": "Do not merge.",
+            }
+        )
+        in_path = _write_temp(f"{echoed_example}\n```json\n{partial_union}\n```")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    @pytest.mark.parametrize(
+        "type_drifted_verdict", [None, ["reject"], {"value": "reject"}, 0, False]
+    )
+    def test_a_type_drifted_verdict_stays_a_rival(self, type_drifted_verdict):
+        """A ``verdict`` of the wrong TYPE is still a rival candidate.
+
+        Third and last instance of the one bug this function kept growing, and the
+        reason it now carries **no** exclusion at all: every condition added there is
+        one fewer thing the ambiguity guard can see. An ``isinstance(verdict, str)``
+        early-return reads like harmless type hygiene — it is an exclusion, and it
+        removed the mage's real verdict from the rival set whenever the model
+        type-drifted that field (``null``, a list, a number). The echoed system-prompt
+        example was then the sole match: a fabricated ``approve``, in Caspar's seat.
+
+        Type drift is a real failure mode — ``validate`` has a dedicated error for it
+        (``Invalid verdict 'None'``), which is exactly the feedback the retry needs.
+        With the key-only predicate the object stays a rival and the guard trips, which
+        is what this test pins. **Nothing** may be disqualified in that predicate: the
+        exclusion it was chasing was reverted after three fail-opens. See
+        ``_is_verdict_shaped``.
+        """
+        echoed_example = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve",
+                "confidence": 0.85,
+                "summary": "One-line verdict",
+                "reasoning": "Your risk-focused analysis",
+                "findings": [],
+                "recommendation": "What you recommend",
+            }
+        )
+        real_verdict = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": type_drifted_verdict,
+                "confidence": 0.9,
+                "summary": "Blocking defects.",
+                "reasoning": "Traced every claim against the code.",
+                "findings": [{"severity": "critical", "title": "Race", "detail": "TOCTOU."}],
+                "recommendation": "Do not merge.",
+            }
+        )
+        in_path = _write_temp(f"<think>{echoed_example}</think>\nVerdict:\n{real_verdict}")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_a_schema_restatement_drops_the_mage_and_that_is_the_SAFE_failure(self):
+        """CHARACTERIZATION: asserts a limitation, so it fails when MS2 fixes it.
+
+        A thinking model that quotes its own schema (``"verdict": "approve | reject |
+        conditional"``) emits a decodable object carrying both discriminating keys. It
+        counts as a rival candidate, the ambiguity guard fires, and the mage is
+        **dropped** → degraded run → by the Integrity rule, approves nothing.
+
+        4.0.6 tried three times to exclude that object from candidacy, and **every
+        attempt fabricated an ``approve``** instead (see ``_is_verdict_shaped``). The
+        exclusion was then removed on evidence: over 171 captured outputs from the real
+        trio it changed **zero** results, while its cost — a narrowed ambiguity guard —
+        was reproducible.
+
+        So this drop is deliberate, and this test says so. **It is the safe failure:**
+        loud, fail-closed, and it blocks the gate rather than approving it. The cure is
+        not a cleverer predicate — it is the verdict **sentinel** (MS2), which stops
+        *searching* for the verdict and *extracts* it from between markers, at which
+        point a restatement is simply outside them.
+
+        When the sentinel lands this test MUST fail. That failure is the signal to
+        delete it — never to weaken the guard so it passes.
+        """
+        restatement = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve | reject | conditional",  # the schema, quoted
+                "confidence": 0.0,
+                "summary": "The shape I must emit",
+                "reasoning": "Recalling the contract",
+                "findings": [],
+                "recommendation": "n/a",
+            }
+        )
+        real_verdict = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "reject",
+                "confidence": 0.93,
+                "summary": "Six concrete defects.",
+                "reasoning": "Traced every claim against the code.",
+                "findings": [{"severity": "critical", "title": "Race", "detail": "TOCTOU."}],
+                "recommendation": "Do not merge.",
+            }
+        )
+        raw = f"<think>{restatement}</think>\n```json\n{real_verdict}\n```"
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_deeply_nested_json_degrades_the_mage_instead_of_crashing_the_run(self):
+        """CPython raises RecursionError, not JSONDecodeError, on deep nesting.
+
+        ``_loads_lenient`` goes to deliberate trouble to map that, precisely so the
+        orchestrator's ``except (ValidationError, json.JSONDecodeError)`` retry can
+        catch it. The top-level parse must do the same — and on the Ollama path this
+        input is MODEL-AUTHORED content, so a pathological response reaches the call
+        directly. An escaping ``RecursionError`` is not caught by that retry, so the
+        mage is lost **without a second attempt**; mapped, it is simply retried.
+        """
+        in_path = _write_temp("[" * 100_000)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    @pytest.mark.parametrize("depth", [1_200, 5_000, 16_200, 30_000])
+    @pytest.mark.parametrize("fenced", [False, True], ids=["bare", "fenced"])
+    def test_a_deeply_nested_verdict_never_escapes_as_RecursionError(self, depth, fenced):
+        """No stack overflow may escape this module — from ANY of its four JSON calls.
+
+        Four places can blow the stack on a pathological payload, and they do **not**
+        share a depth window — which is why pinning one depth at one site is not a
+        guarantee, and why the first attempt at this guard missed:
+
+        * ``json.loads`` on the raw file,
+        * ``raw_decode`` during prose recovery (``_loads_lenient``),
+        * ``_extract_text``'s ``json.dumps`` — reached only by a **bare** verdict,
+        * the final ``json.dumps`` — reached by a **fenced** one.
+
+        Measured, per interpreter (max depth before ``RecursionError``, both encode sites
+        compact since the amplification fix)::
+
+                             decoder   json.dumps()
+            CPython 3.14      16909     15500
+            CPython 3.12       2997      2997
+
+        So *which* call raises depends on the interpreter **and** on the route (bare vs
+        fenced) — one depth at one site proves nothing, which is precisely how the first
+        attempt at this guard passed while the sibling shape was still broken. The depths
+        span both regimes: on 3.14 the encoders raise between ~15.5k and ~16.9k while the
+        decoder still succeeds; on 3.12 anything past ~3k raises at the top-level decode.
+
+        That first attempt mapped the fenced route only, so the sibling shape — a bare,
+        unfenced verdict, the plainest Ollama payload there is — still escaped. So this
+        test asserts the **property**, not a site: whatever blows, the mage sees a
+        ``JSONDecodeError`` and gets its retry. A ``RecursionError`` escapes the
+        orchestrator's ``(ValidationError, JSONDecodeError)`` catch and costs the mage
+        its second attempt.
+
+        Surviving a depth is allowed — that is not a failure. Only ``RecursionError`` is.
+        """
+        verdict = (
+            '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
+            '"reasoning":"r","recommendation":"x","findings":' + "[" * depth + "]" * depth + "}"
+        )
+        raw = f"```json\n{verdict}\n```" if fenced else verdict
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            try:
+                parse_agent_output(in_path, out_path)
+            except json.JSONDecodeError:
+                pass  # mapped: the mage is retried
+            except RecursionError as exc:  # pragma: no cover - the bug this pins
+                raise AssertionError(
+                    f"RecursionError escaped at depth={depth} fenced={fenced}. The mage "
+                    "loses its retry. Map it to JSONDecodeError at the site that raised."
+                ) from exc
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    @pytest.mark.parametrize("missing", ["verdict", "agent"])
+    def test_a_bare_verdict_missing_a_key_is_retried_not_dropped(self, missing):
+        """A bare payload missing a key must reach the schema check, like a fenced one.
+
+        ``_extract_text`` discriminates the bare-verdict-dict branch on exactly two keys
+        — ``agent`` and ``verdict`` — so a model that omits one of *those* falls through
+        to its "unexpected shape" ``ValueError``. The orchestrator retries only on
+        ``(ValidationError, JSONDecodeError)``, so that ``ValueError`` **dropped the mage
+        without a second attempt** — while the identical content inside a fence was
+        retried with corrective feedback. Same defect, opposite treatment, decided by a
+        markdown fence.
+
+        It matters more since 4.0.6, because reading-as-text-first makes the **bare**
+        route the primary one for Ollama. And a missing key is precisely what the retry
+        exists to correct: ``load_agent_output`` names it (*"Missing required key"*), and
+        that message is the feedback the second attempt is built from.
+        """
+        payload = {
+            "agent": "caspar",
+            "verdict": "reject",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [],
+            "recommendation": "x",
+        }
+        del payload[missing]
+        in_path = _write_temp(json.dumps(payload))  # bare: no fence, no prose
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            # JSONDecodeError -- not ValueError -- so the orchestrator's retry catches it.
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    @pytest.mark.parametrize("fenced", [False, True], ids=["bare", "fenced"])
+    def test_an_absurdly_long_integer_is_retried_not_dropped(self, fenced):
+        """A huge integer literal must not escape as a bare ``ValueError``.
+
+        CPython 3.11+ caps integer *string conversion* at ``sys.int_info
+        .default_max_str_digits`` (4300). Past that, ``json.loads`` raises a plain
+        ``ValueError`` — **not** a ``JSONDecodeError`` — so ``run_magi``'s
+        ``(ValidationError, JSONDecodeError)`` retry guard does not catch it and the
+        mage is dropped without a second attempt.
+
+        Reachable and not exotic: a degenerate model repeating a digit is a classic
+        failure mode, and the schema has a numeric field (``line``) that invites it.
+
+        This is the same class as the ``RecursionError``, shape-``ValueError`` and
+        ``KeyError`` escapes this release already closed — the decoder simply has one
+        more way to fail that is not a ``JSONDecodeError``. The lesson, since it took
+        five rounds to enumerate them: *catch what the retry can handle, not the list
+        of exceptions you happen to have thought of.*
+        """
+        huge_int = "9" * 5_000
+        verdict = (
+            '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
+            '"reasoning":"r","findings":[{"severity":"info","title":"t","detail":"d",'
+            '"line":' + huge_int + "}],"
+            '"recommendation":"rec"}'
+        )
+        raw = f"```json\n{verdict}\n```" if fenced else verdict
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_undecodable_bytes_do_not_cost_the_mage_its_verdict(self):
+        """A raw file with invalid UTF-8 must not raise ``UnicodeDecodeError``.
+
+        The raw file is written from the backend's bytes verbatim, and it is read back
+        with ``encoding="utf-8"``. A strict decode raises ``UnicodeDecodeError`` — which
+        is a ``ValueError`` but **not** a ``JSONDecodeError``, so ``run_magi``'s retry
+        guard does not catch it and the mage is dropped without a second attempt.
+
+        The house convention for reading untrusted output is already ``errors="replace"``
+        (``cost.py``, ``review_context.py``, and the cp1252 hardening in 2.2.6). A bad
+        byte can land anywhere; what matters is that one which **survives to a successful
+        parse** can only be inside a string value — so the worst case is a replacement
+        character in a summary, and the mage keeps its verdict. In the structure it breaks
+        the parse and in a key it mangles the key: both stay on the retry path. Nothing is
+        fabricated either way — what is recovered is still the model's own object.
+        """
+        raw = (
+            b'{"agent":"caspar","verdict":"reject","confidence":0.9,'
+            b'"summary":"bad byte: \x80\xff here","reasoning":"r","findings":[],'
+            b'"recommendation":"x"}'
+        )
+        fd, in_path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                recovered = json.load(f)
+            assert recovered["verdict"] == "reject", "the mage's own verdict must survive"
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_output_size_stays_proportional_to_input(self):
+        """The written file must be O(input), not O(input × nesting depth).
+
+        Reading-as-text-first routes a deeply-nested *valid* container into the final
+        encode for the first time, and ``json.dumps(..., indent=2)`` added ``2 × depth``
+        spaces per element: a 16 KB fenced payload of nested arrays re-encoded to ~128
+        MB, measured — an untrusted input BELOW ``MAX_INPUT_FILE_SIZE`` defeating the
+        very cap meant to bound resource use, and writing it into the run dir a reviewer
+        is told to read. Left unbounded, a comb payload within the cap projects to tens
+        of GB and a ``MemoryError`` that the orchestrator does not retry.
+
+        The output is never read for its formatting — ``load_agent_output`` re-parses it
+        — so the indentation bought nothing and cost everything. A compact dump makes the
+        output proportional to the input. This test would also pass under a depth cap or
+        a length bound; what it forbids is the amplification.
+        """
+        # Depth 700 is chosen so that on BOTH interpreters the payload (a) decodes,
+        # (b) compact-encodes, and — critically — (c) ``indent=2`` *amplifies* rather
+        # than raising. Getting this wrong is how the pin went vacuous twice: at 4_000 it
+        # exceeded 3.12's ~2997 decoder limit (parse raised, assertion skipped), and at
+        # 2_000 it exceeded 3.12's ~993 *indent-encoder* limit (the reverted code would
+        # raise, not amplify, so the mutation was not caught there). At 700, ``indent=2``
+        # projects to ~980 KB (~700× input) on both — far above the 4×input bound — so
+        # reverting to indented output fails this test on 3.12 and 3.14 alike.
+        depth = 700
+        nested = "[" * depth + "1" + "]" * depth
+        raw = f"```json\n{nested}\n```"
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            try:
+                parse_agent_output(in_path, out_path)
+            except json.JSONDecodeError:
+                return  # failing closed is fine; amplifying is not
+            written = os.path.getsize(out_path)
+            assert written <= 4 * len(raw.encode("utf-8")), (
+                f"output {written} B is disproportionate to input {len(raw)} B — "
+                "the encode is amplifying by nesting depth; dump compact"
+            )
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_a_text_block_without_text_is_retried_not_dropped(self):
+        """A malformed content block must not escape as ``KeyError``.
+
+        ``_extract_text`` selects a block on ``type == "text"`` and then indexes
+        ``block["text"]`` — so a block that declares the type and omits the key raises
+        ``KeyError``, which ``run_magi``'s ``(ValidationError, JSONDecodeError)`` guard
+        does not catch. The mage is dropped **without its second attempt** — the exact
+        cost this release exists to remove, surviving in the branch it patched.
+
+        Reachable on the Ollama path: the backend writes the model's text verbatim as
+        the whole raw file, so any model emitting a top-level ``content`` key holding
+        such a block lands here. A genuine Claude envelope always carries ``text``.
+        """
+        in_path = _write_temp('{"content": [{"type": "text"}]}')
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    @pytest.mark.parametrize("depth", [1_200, 16_200])
+    def test_a_failed_encode_leaves_no_truncated_artifact(self, depth):
+        """When the encoder blows up, the output file must not be written at all.
+
+        The verdict is encoded to a string BEFORE the output file is opened. Streaming
+        straight into ``open(..., "w")`` used to leave ~1 MB of half-written JSON behind
+        whenever the encoder raised mid-write — for a mage that was then dropped, in the
+        very run directory ``CLAUDE.md`` tells a reviewer to read. A truncated artifact
+        that looks like a verdict is exactly the kind of thing someone reads at 3am.
+
+        **Fenced, and at a depth inside THIS interpreter's encode window** — the two
+        qualifications are the whole test, and each one has already shipped wrong once.
+
+        A *bare* payload raises at ``_extract_text``'s own encode, before the output file
+        is ever opened, so it cannot exercise the guarantee. And the encode windows are
+        **disjoint** across supported interpreters — 3.12: 995–2997, 3.14: 15510–16918 —
+        so a single depth is vacuous on the other one: 16_200 exceeds 3.12's *decoder*
+        limit, so the parse fails at the top and the sentinel survives because the file
+        was never opened, not because the guarantee holds. Both depths are therefore
+        parametrized, and the assertion runs only on the failure path (surviving a depth
+        is not a failure — it just means this interpreter encoded it fine).
+        """
+        verdict = (
+            '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
+            '"reasoning":"r","recommendation":"x","findings":' + "[" * depth + "]" * depth + "}"
+        )
+        sentinel = "UNTOUCHED"
+        in_path = _write_temp(f"```json\n{verdict}\n```")
+        out_path = _write_temp(sentinel, suffix=".out.json")
+        try:
+            try:
+                parse_agent_output(in_path, out_path)
+            except json.JSONDecodeError:
+                with open(out_path, encoding="utf-8") as f:
+                    assert f.read() == sentinel, (
+                        "the output file was opened and truncated despite the failure — "
+                        "encode the payload before opening it"
+                    )
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_a_bare_too_nested_verdict_is_also_retryable(self):
+        """The BARE Ollama shape must be mapped too — it has its own encoder.
+
+        Sibling of the fenced case, and the reason that one was not enough: a bare
+        verdict (no fence) decodes at the top level, so it reaches ``_extract_text``'s
+        bare-dict branch and is re-serialised there — a *different* encode site from the
+        one a fenced payload reaches. Same limit, different route.
+
+        Two sites, one guarantee. Mapping only the fenced route left the plainest Ollama
+        payload there is losing its retry.
+        """
+        depth = 16_200
+        verdict = (
+            '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
+            '"reasoning":"r","recommendation":"x","findings":' + "[" * depth + "]" * depth + "}"
+        )
+        in_path = _write_temp(verdict)  # bare: no fence, no prose
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
 
 
 class TestProseWrappedJson:
@@ -426,27 +1112,28 @@ class TestProseWrappedJson:
         self._expect_raises('{"a":' * 100_000)
 
 
-class TestPython39Compatibility:
-    """Pin the Python 3.9 compatibility invariant flagged across MAGI reviews."""
+class TestLazyAnnotations:
+    """Pin ``from __future__ import annotations``, a recurring MAGI review concern."""
 
     def test_module_annotations_stay_lazy(self):
         """`from __future__ import annotations` must remain in effect.
 
-        ``parse_agent_output`` uses PEP 604 ``X | None`` annotations, which are
-        runtime-valid only on CPython 3.10+. ``pyproject`` pins ``>=3.9``, so
-        the module relies on ``from __future__ import annotations`` (PEP 563)
-        keeping annotations as non-evaluated strings. This guard fails if a
-        refactor drops that import: on 3.10+ the annotation becomes an
-        evaluated ``types.UnionType`` (caught here); on 3.9 the import itself
-        would break. Pins the recurring review concern as a tested invariant.
+        ``parse_agent_output`` uses PEP 604 ``X | None`` annotations. ``pyproject``
+        now pins ``>= 3.12``, where those are runtime-valid, so this is no longer a
+        compatibility floor guard — it pins that annotations stay **non-evaluated
+        strings** (PEP 563), which is what keeps the module importable under a lower
+        interpreter and keeps annotation evaluation off the import path.
+
+        (The class was called ``TestPython39Compatibility`` and its docstring claimed
+        the project pinned ``>=3.9``. It pins ``>= 3.12``; the claim was two majors
+        stale.)
         """
         import parse_agent_output as pao
 
         annotation = pao._embedded_verdict_object.__annotations__["return"]
         assert isinstance(annotation, str), (
             "annotations must stay lazy strings (from __future__ import "
-            f"annotations); got an evaluated {type(annotation)!r} — PEP 604 "
-            "unions break module import on Python 3.9"
+            f"annotations); got an evaluated {type(annotation)!r}"
         )
 
 
@@ -464,11 +1151,15 @@ _FIXTURE_DIR = os.path.join(
 def _discovered_fixtures() -> list[str]:
     """Return every ``*.json`` file under the fixtures directory.
 
-    Auto-discovery keeps the contract test cheap to extend: drop a new
-    captured ``claude -p`` output into the fixtures dir and the suite
-    will validate it on the next run without a test edit. See
-    ``tests/fixtures/claude-cli-outputs/README.md`` for the capture
-    procedure.
+    Auto-discovery keeps the contract test cheap to extend: drop a captured
+    backend output into the fixtures dir and the suite validates it on the
+    next run, with no test edit. See
+    ``tests/fixtures/claude-cli-outputs/README.md`` for the capture procedure.
+
+    The directory is named for the backend that came first, but the contract it
+    pins is **every** backend: since 4.0.6 it also holds Ollama shapes, whose raw
+    output is the verdict itself rather than a CLI envelope. The name is kept for
+    continuity; the scope is not limited by it.
     """
     if not os.path.isdir(_FIXTURE_DIR):
         return []

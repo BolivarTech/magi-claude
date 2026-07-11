@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-05-21
-"""Parse and validate agent JSON output from Claude CLI.
+# Version: 1.2.0
+# Date: 2026-07-11
+"""Parse and validate an agent's JSON verdict from any supported backend.
 
-Extracts structured JSON from various Claude CLI output formats,
-strips markdown code fences, recovers the JSON verdict even when an
-agent wraps it in natural-language prose (2.4.2), validates the result,
-and writes clean JSON to the specified output file.
+Extracts the structured verdict from every shape a backend can produce —
+the Claude CLI's transport envelopes, and the Ollama backend's *unwrapped*
+content, whether bare or wrapped in a markdown fence (4.0.6) — strips those
+fences, and recovers the verdict even when an agent buries it in prose (2.4.2).
+
+It does NOT validate the schema. The 7-key contract and the verdict enum are
+enforced downstream by ``load_agent_output`` -- deliberately, because an object
+that decodes but violates the schema must reach that check: its error message is
+the corrective feedback the agent's retry depends on.
 
 Usage:
     python3 parse_agent_output.py <input_file> <output_file>
@@ -59,22 +64,31 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _extract_text(data: object) -> str:
-    """Extract the meaningful text payload from Claude CLI JSON output.
+    """Extract the meaningful text payload from a backend's raw output.
 
-    Supports multiple output shapes:
-        - ``{"result": "..."}``
-        - ``{"content": [{"type": "text", "text": "..."}]}``
-        - Plain string
+    Supports every shape a backend can produce:
+        - ``{"result": "..."}``                              (Claude CLI envelope)
+        - ``{"content": [{"type": "text", "text": "..."}]}`` (Claude CLI envelope)
+        - Plain string                                       (incl. fenced or
+          prose-wrapped content, which reaches here as raw text when the file is
+          not JSON at the top level — the Ollama path, 4.0.6)
+        - Bare 7-key verdict dict                            (Ollama, unwrapped)
 
     Args:
-        data: Deserialised JSON value from Claude CLI output.
+        data: A decoded Claude CLI envelope, or — since 4.0.6 — the raw model text
+            itself, when the file was never an envelope (the Ollama backend path).
 
     Returns:
         The extracted text content as a string.
 
     Raises:
-        ValueError: If the data format is not recognised (no ``result``
-            or ``content`` key in a dict, or unexpected type).
+        ValueError: If the data format is not recognised — no ``result`` or ``content``
+            key in a dict, an unexpected type, or a ``content`` array with no usable
+            text block (including a block that declares ``type: text`` but omits
+            ``text``). This is the ONLY exception this function raises for a bad shape,
+            and the caller maps it to ``JSONDecodeError`` so the mage keeps its retry;
+            anything else escaping here (a ``KeyError`` did, until 4.0.6) costs the mage
+            its second attempt.
     """
     if isinstance(data, dict) and "result" in data:
         return str(data["result"])
@@ -89,7 +103,11 @@ def _extract_text(data: object) -> str:
             # block found".
             raise ValueError(f"'content' must be a list, got {type(content).__name__}.")
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
+            # ``"text" in block`` matters: a block that declares the type and omits the
+            # key would otherwise raise ``KeyError`` — which ``run_magi`` does not retry,
+            # so the mage would be dropped without a second attempt. Falling through to
+            # the ValueError below (mapped to JSONDecodeError by the caller) retries it.
+            if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
                 return str(block["text"])
         raise ValueError("No text block found in 'content' array")
 
@@ -103,7 +121,7 @@ def _extract_text(data: object) -> str:
         return json.dumps(data)
 
     raise ValueError(
-        f"Unexpected Claude CLI output type: {type(data).__name__}. "
+        f"Unexpected agent output type: {type(data).__name__}. "
         f"Expected dict with 'result' or 'content' key, or plain string."
     )
 
@@ -127,6 +145,77 @@ _LENIENT_RECOVERY_MAX_CHARS = 1_000_000
 # verdict is found within the first few probes; a legitimate output never
 # approaches this.
 _MAX_BRACE_PROBES = 2_000
+
+
+def _is_verdict_shaped(candidate: object) -> bool:
+    """Whether *candidate* has the shape of an agent verdict: the two keys, no further conditions.
+
+    Deliberately **key-only**. Every attempt to make it smarter has been a fail-open,
+    and 4.0.6 made three of them in three consecutive review rounds before the
+    evidence settled it. This docstring is the record, because the next person to
+    "harden" this function will feel exactly as certain as I did.
+
+    **The trap.** This predicate does not only *select* the verdict — it also feeds the
+    **ambiguity guard** (``_embedded_verdict_object``: two candidates ⇒ fail closed).
+    So every exclusion added here narrows the guard: fewer candidates ⇒ fewer ambiguity
+    trips ⇒ **more single-match fabrications**. *Widening the exclusion looks like
+    tightening the check*, because the guard you are disarming is invisible in the line
+    you are editing.
+
+    **The three attempts, all rejected:**
+
+    ================  ===============================  ==============================
+    Attempt           Exclusion added                  What stopped being a rival
+    ================  ===============================  ==============================
+    enum member       ``verdict in VALID_VERDICTS``    ``"Reject"`` (case drift)
+    pipe-union regex  any ``a | b`` union              ``"approve | conditional"``
+    type guard        ``isinstance(verdict, str)``     ``null``, ``["reject"]``, ``0``
+    ================  ===============================  ==============================
+
+    In each one the excluded object was **the mage's real verdict**; the echoed
+    system-prompt example (which literally carries ``"verdict": "approve"``) became the
+    sole match; and consensus received a schema-perfect fabricated ``approve`` **from
+    the adversarial seat** — where the previous behaviour was a clean fail-closed drop
+    and a retry.
+
+    **Why no exclusion at all, not even a "correct" one.** The three attempts were all
+    trying to disqualify a *schema restatement* — the object a thinking model emits when
+    it quotes its own schema (``"verdict": "approve | reject | conditional"``), which
+    counts as a rival candidate and drops the mage. A restatement exclusion derived from
+    ``VALID_VERDICTS`` was written, and it was correct as far as it went. It was removed
+    anyway, on evidence:
+
+    * Across **171 captured agent outputs** from the real default trio, it changed the
+      outcome of **zero**. Not one payload contained a restatement rival.
+    * Reverting it left the **entire suite green** — it was unpinned by any positive test.
+    * It matched only **one of six** plausible spellings of a restatement (the agent
+      prompts actually teach the comma form, ``"approve", "reject", or "conditional"``).
+    * And it had a **real, verified cost**: it removed an *accidental* rival, so a
+      payload with a restatement beside an echoed example — which used to fail closed —
+      fabricated an ``approve`` instead.
+
+    A guard-narrowing whose benefit no test and no artifact can demonstrate, paid for in
+    the one currency this system cannot afford, is not a hardening. The mage drop it
+    aimed at **fails closed** (degraded run ⇒ by the Integrity rule, approves nothing);
+    the fabrication it introduced fails **open**, and silently. Given the choice, take
+    the loud failure every time.
+
+    The durable fix for both is the verdict **sentinel** (MS2): stop *searching* for the
+    verdict and *extract* it from between markers. Then a restatement, an echo, and a
+    tool-use blob are all simply outside the markers, and none of this is a judgement
+    call. See :func:`_embedded_verdict_object` and ``CLAUDE.techdebt.md``.
+
+    Args:
+        candidate: A JSON value decoded from the agent's output.
+
+    Returns:
+        True if it has the shape of a genuine verdict, False otherwise.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    # ONE condition. Do not add a second — see the table above; each of the three
+    # attempts read as a harmless tightening and each one fabricated an ``approve``.
+    return all(key in candidate for key in _VERDICT_KEYS)
 
 
 def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
@@ -164,17 +253,23 @@ def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
     object decodes but it is NOT the real verdict — a quoted example beside a
     truncated real verdict, an early echo with the real verdict beyond the
     probe cap, or a lone echoed example — it is recovered and a fabricated
-    ``approve`` can reach consensus. The durable fix is a verdict
-    sentinel/delimiter (or Option C). See CLAUDE.md "Durable verdict-recovery
-    fix". Do not add more heuristic tuning here; the next change should be the
-    sentinel.
+    ``approve`` can reach consensus. The durable fix is the verdict
+    **sentinel** — scheduled as **MS2** (``sbtdd/spec-behavior-base-MS2.md``;
+    debt in ``CLAUDE.techdebt.md``). Do not add more heuristic tuning here, and
+    do not try to make :func:`_is_verdict_shaped` smarter either: 4.0.6 attempted
+    that three times and produced a fail-open every time. The next change here is
+    the sentinel.
 
     Args:
         text: Text that may contain a verdict object embedded in prose.
 
     Returns:
-        The single qualifying verdict ``dict``, or ``None`` if zero qualify,
-        more than one qualify (ambiguous), or the probe budget is exhausted.
+        The single qualifying verdict ``dict``, or ``None`` if zero qualify or more than
+        one qualifies (ambiguous ⇒ fail closed). **Not** ``None`` merely because the
+        probe budget ran out: if exactly one object qualified before the cap, it is
+        returned — which is precisely how a *second*, real verdict beyond the cap can go
+        unseen, and why an early echo can win. That is the residual described above, not
+        an oversight in this clause.
     """
     decoder = json.JSONDecoder()
     matches: list[dict[str, Any]] = []
@@ -188,10 +283,14 @@ def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
         probes += 1
         try:
             candidate, end = decoder.raw_decode(text, brace)
-        except (json.JSONDecodeError, RecursionError):
+        # ValueError, not just JSONDecodeError: the decoder has more than one way to
+        # refuse a payload (an integer literal past ``int_max_str_digits`` raises a bare
+        # ValueError), and every one of them means the same thing here — this candidate
+        # does not decode, skip it. JSONDecodeError IS a ValueError, so this only widens.
+        except (ValueError, RecursionError):
             index = brace + 1
             continue
-        if isinstance(candidate, dict) and all(key in candidate for key in _VERDICT_KEYS):
+        if _is_verdict_shaped(candidate):
             matches.append(candidate)
             if len(matches) > 1:
                 return None  # ambiguous — fail closed rather than guess
@@ -234,12 +333,16 @@ def _loads_lenient(text: str) -> Any:
         The parsed JSON value.
 
     Raises:
-        json.JSONDecodeError: If *text* yields no qualifying verdict object,
-            including the deeply-nested ``RecursionError`` case.
+        json.JSONDecodeError: If *text* yields no qualifying verdict object. **Every**
+            way the decoder can refuse the payload arrives here as this one exception —
+            a syntax error, deep nesting (``RecursionError``), or an integer literal
+            past CPython's ``int_max_str_digits``. That is the contract the orchestrator
+            depends on: it retries on ``(ValidationError, JSONDecodeError)``, so
+            anything else escaping costs the mage its second attempt.
     """
     try:
         return json.loads(text)
-    except (json.JSONDecodeError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:
         if len(text) <= _LENIENT_RECOVERY_MAX_CHARS:
             verdict = _embedded_verdict_object(text)
             if verdict is not None:
@@ -248,14 +351,33 @@ def _loads_lenient(text: str) -> Any:
             raise json.JSONDecodeError(
                 "Input nesting exceeds the JSON decoder limit", text, 0
             ) from exc
+        if not isinstance(exc, json.JSONDecodeError):
+            # A decoder ValueError that is NOT a JSONDecodeError — today that means an
+            # integer literal past CPython's ``int_max_str_digits`` (4300). It must still
+            # leave as a JSONDecodeError or the orchestrator's retry guard misses it and
+            # the mage is dropped without a second attempt.
+            raise json.JSONDecodeError(
+                f"Agent output is not decodable JSON: {exc}", text, 0
+            ) from exc
         raise
 
 
 def parse_agent_output(input_path: str, output_path: str) -> None:
-    """Read raw Claude CLI output, extract and validate JSON, write result.
+    """Read a raw agent response, extract its verdict object, and write it out.
+
+    Backend-agnostic by contract: the raw file may be a Claude CLI transport
+    envelope, or the agent's verdict itself (the Ollama backend writes the
+    unwrapped content), optionally inside a markdown fence or surrounded by
+    prose. All four shapes converge on the same decodable JSON object.
+
+    It does **not** validate the schema, despite what an earlier version of this line
+    claimed: the 7-key contract and the verdict enum are enforced downstream by
+    ``load_agent_output``. That is deliberate — an object that decodes but violates the
+    schema must reach that check, because its error message ("Invalid verdict 'Reject'")
+    is the corrective feedback the agent's retry depends on.
 
     Args:
-        input_path:  Path to the raw Claude CLI JSON output file.
+        input_path:  Path to the raw agent output file (envelope OR bare content).
         output_path: Destination path for the cleaned JSON.
 
     Raises:
@@ -272,10 +394,101 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
             f"exceeding maximum of {MAX_INPUT_FILE_SIZE} bytes."
         )
 
-    with open(input_path, encoding="utf-8") as fh:
-        data = json.load(fh)
+    # errors="replace": these are the backend's bytes verbatim, and a strict decode
+    # raises UnicodeDecodeError — a ValueError, but NOT a JSONDecodeError, so run_magi's
+    # retry guard would miss it and the mage would be dropped without a second attempt.
+    #
+    # A bad byte can land ANYWHERE — an earlier version of this comment said it could
+    # only land inside a string, and that was measured and false. What is true is the
+    # part that matters: a bad byte that SURVIVES to a successful parse can only be
+    # inside a string value, so the worst case is one replacement character in a summary.
+    # In the structure it breaks the parse (JSONDecodeError → retry); in a key it mangles
+    # the key (ValidationError → retry). Every outcome stays on the retry path, and none
+    # of them fabricates: what is recovered is still the model's own object. Same
+    # convention the codebase already uses for untrusted output (cost.py,
+    # review_context.py, and the cp1252 hardening of 2.2.6).
+    with open(input_path, encoding="utf-8", errors="replace") as fh:
+        raw = fh.read()
 
-    text = _extract_text(data)
+    # Read as TEXT, then decide whether it is an envelope (4.0.6).
+    #
+    # The Claude backend writes a transport envelope, so the raw file is JSON at
+    # the top level. The Ollama backend writes ``choices[0].message.content``
+    # already unwrapped, so the raw file is the agent's verdict ITSELF — and many
+    # models emit that verdict inside a markdown fence, which is not JSON at all.
+    #
+    # Parsing before stripping the fence (the pre-4.0.6 order) made the fence
+    # handling unreachable on exactly the path that needed it: ``json.load`` blew
+    # up at character 0, the mage was retried, the retry produced the same
+    # perfectly valid fenced verdict, and the mage was dropped. A schema-correct
+    # verdict was discarded because of the ORDER of two operations.
+    try:
+        data: object = json.loads(raw)
+    except (ValueError, RecursionError):
+        # RecursionError, not just JSONDecodeError: CPython raises it on deeply
+        # nested input, and on the Ollama path this text is MODEL-AUTHORED, so a
+        # pathological response reaches this call directly.
+        #
+        # What letting it escape actually costs — checked, not assumed, because this
+        # file has a history of comments asserting more than they can: the orchestrator
+        # gathers with ``return_exceptions=True`` and re-raises only non-Exception
+        # BaseExceptions other than CancelledError, so a stray RecursionError does NOT kill
+        # the run — the mage is excluded and the run degrades. But the retry at
+        # ``run_magi.py`` only catches ``(ValidationError, JSONDecodeError)``, so the
+        # mage would be dropped **without its second attempt**. Mapping it here buys
+        # back the retry, exactly as ``_loads_lenient`` does on the decode side.
+        #
+        # Scope of the behaviour change: a WELL-FORMED envelope is untouched (it
+        # parses here exactly as before). A *malformed* Claude envelope, which used
+        # to raise immediately, now goes through prose-recovery and could succeed.
+        # That path is practically unreachable — a non-zero ``claude -p`` exit is
+        # caught before the parse, and ``--output-format json`` always emits an
+        # envelope — but the honest claim is "no change for well-formed envelopes",
+        # not "no change on the Claude path".
+        data = raw  # not an envelope: fenced or prose-wrapped content
+
+    try:
+        text = _extract_text(data)
+    except ValueError as exc:
+        # An unrecognised SHAPE must still reach the retry. ``_extract_text``
+        # discriminates the bare-verdict-dict branch on exactly ``agent`` + ``verdict``,
+        # so a model that omits one of those two keys falls through to its "unexpected
+        # shape" ``ValueError`` — which ``run_magi``'s ``(ValidationError,
+        # JSONDecodeError)`` guard does not catch, dropping the mage **without a second
+        # attempt**. The identical content inside a markdown fence was retried with
+        # corrective feedback. Same defect, opposite treatment, decided by a fence — and
+        # reading-as-text-first (4.0.6) makes the bare route the PRIMARY one for Ollama.
+        #
+        # Mapping it here makes the two routes agree and keeps the promise this module's
+        # docstring makes: an output that decodes but violates the schema reaches the
+        # check whose error message the retry is built from. The size-cap ``ValueError``
+        # is raised before this block, so it is not swallowed.
+        raise json.JSONDecodeError(f"Unrecognised agent output shape: {exc}", raw, 0) from exc
+    except RecursionError as exc:
+        # A SECOND encode site, on a DIFFERENT route. ``_extract_text``'s bare-verdict
+        # branch re-serialises with ``json.dumps``, so a BARE (unfenced) verdict blows up
+        # here, while a FENCED one reaches the encode further down instead. Mapping only
+        # the fenced route left the plainest Ollama payload there is escaping, and the
+        # mage losing the retry that ``run_magi``'s ``(ValidationError, JSONDecodeError)``
+        # guard would otherwise have given it.
+        #
+        # MEASURED, because two earlier versions of this comment reasoned instead and were
+        # both wrong. Both encode sites now use the compact ``json.dumps`` (no indent).
+        # Max nesting depth before RecursionError (approximate — it shifts with how much
+        # stack the caller has already used; the ORDERING is what is stable):
+        #
+        #                    decoder   json.dumps()
+        #     CPython 3.14    ~16.9k    ~15.5k
+        #     CPython 3.12     ~3.0k     ~3.0k
+        #
+        # The encoder is weaker than (3.14) or level with (3.12) the decoder, so an object
+        # that decoded can still fail to encode — which is why both encode catches exist.
+        # Which of the two fires depends only on the ROUTE (bare hits this one, fenced
+        # hits the final one), so neither is redundant.
+        raise json.JSONDecodeError(
+            "Agent output is nested too deeply to re-serialise", raw, 0
+        ) from exc
+
     text = _strip_code_fences(text)
 
     # Validate that the cleaned text is valid JSON. Agents that do
@@ -284,8 +497,32 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     # JSON object at all still raises (fail closed). See ``_loads_lenient``.
     parsed = _loads_lenient(text)
 
+    try:
+        # COMPACT, not ``indent=2``. Reading-as-text-first routes a deeply-nested valid
+        # container here for the first time, and per-level indentation adds ``2 × depth``
+        # spaces per element — a 16 KB fenced payload of nested arrays re-encoded to
+        # ~128 MB (measured), an untrusted input below ``MAX_INPUT_FILE_SIZE`` defeating
+        # the cap that exists to bound resource use, and a comb payload within the cap
+        # projecting to a ``MemoryError`` the orchestrator does not retry. The output is
+        # never read for its formatting — ``load_agent_output`` re-parses it — so the
+        # indentation bought nothing. Compact makes the output O(input).
+        payload = json.dumps(parsed)
+    except RecursionError as exc:
+        # The final encode still recurses per level (C encoder: ~15.5k deep on 3.14,
+        # ~3.0k on 3.12 — see the table above), so an object that decoded cleanly can
+        # still fail to re-encode. An escaping RecursionError is not caught by the
+        # orchestrator's ``(ValidationError, JSONDecodeError)`` retry, so the mage would
+        # be dropped without a second attempt. Map it, as ``_loads_lenient`` maps the
+        # decode side.
+        raise json.JSONDecodeError(
+            "Recovered verdict is nested too deeply to re-encode", text, 0
+        ) from exc
+
+    # Encode BEFORE opening the file. Streaming straight into ``open(..., "w")`` left a
+    # truncated artifact behind whenever the encoder raised mid-write — for a mage that
+    # was then dropped, in the very run dir a reviewer is told to read.
     with open(output_path, "w", encoding="utf-8") as fh:
-        json.dump(parsed, fh, indent=2)
+        fh.write(payload)
         fh.write("\n")
 
 
