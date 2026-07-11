@@ -297,6 +297,105 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    def test_bare_fenced_verdict_without_language_tag(self):
+        """A bare ``` fence is as common as ```json — both must work."""
+        payload = _sample_agent_payload()
+        raw = f"```\n{json.dumps(payload)}\n```"
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                assert json.load(f) == payload
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_bare_unfenced_verdict_still_works(self):
+        """Regression: models that emit bare JSON kept working (the 4.0.0 path)."""
+        payload = _sample_agent_payload()
+        in_path = _write_temp(json.dumps(payload))
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            parse_agent_output(in_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                assert json.load(f) == payload
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_unparseable_content_still_fails_closed(self):
+        """The fix must not turn "unparseable" into "silently accepted".
+
+        Widening the input a parser tolerates is exactly how a fail-closed guard
+        becomes fail-open by accident. A response with no JSON at all must still
+        raise, so the agent is retried and — if it persists — dropped, rather than
+        contributing an empty verdict to a consensus that would look complete.
+        """
+        in_path = _write_temp("I refuse to answer, and there is no JSON here at all.")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_two_verdicts_at_top_level_still_fail_closed(self):
+        """Ambiguity must fail closed on the BARE path too, not just the envelope.
+
+        A model that echoes the example verdict from its own system prompt beside its
+        real one produces two schema-shaped objects. Picking either would be
+        fabrication. The guard already existed, but was pinned only through the
+        envelope path — and this fix is what makes the bare path reachable, so the
+        guard needs its own pin here.
+        """
+        first = json.dumps(_sample_agent_payload())
+        second = json.dumps({**_sample_agent_payload(), "verdict": "approve"})
+        in_path = _write_temp(f"Two of them:\n```json\n{first}\n```\n```json\n{second}\n```")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_truncated_verdict_at_top_level_still_fails_closed(self):
+        """A verdict cut mid-object is not a verdict — on the bare path either.
+
+        This is the LOUD half of the truncation asymmetry: a cut-off *output* breaks
+        the JSON and dies here, noisily, which is exactly why only a truncated
+        *input* (which yields perfectly valid JSON) needs a guard of its own.
+        """
+        cut = json.dumps(_sample_agent_payload())[:60]
+        in_path = _write_temp(f"```json\n{cut}")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    def test_deeply_nested_json_degrades_the_mage_instead_of_crashing_the_run(self):
+        """CPython raises RecursionError, not JSONDecodeError, on deep nesting.
+
+        ``_loads_lenient`` goes to deliberate trouble to map that, precisely so the
+        orchestrator's ``except (ValidationError, json.JSONDecodeError)`` retry can
+        catch it. The top-level parse must do the same — and on the Ollama path this
+        input is MODEL-AUTHORED content, so a pathological response is the difference
+        between "one mage degrades" and "the whole run dies with a traceback".
+        """
+        in_path = _write_temp("[" * 100_000)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
 
 class TestProseWrappedJson:
     """Recover the JSON verdict when an agent wraps it in natural language.
