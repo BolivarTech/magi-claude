@@ -650,6 +650,33 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    def test_a_bare_too_nested_verdict_is_also_retryable(self):
+        """The BARE Ollama shape must be mapped too — it has its own encoder.
+
+        Sibling of the fenced case, and the reason that one was not enough: a bare
+        verdict (no fence) decodes at the top level, so it reaches ``_extract_text``'s
+        bare-dict branch, which re-serialises it with ``json.dumps`` — the **C**
+        encoder, which survives far deeper nesting than the ``indent=2`` pure-Python
+        one and therefore blows in a *different* depth window, where the C decoder still
+        succeeds.
+
+        Two encoders, two windows, one guarantee. Mapping only the fenced route left
+        the plainest Ollama payload losing its retry.
+        """
+        depth = 16_200
+        verdict = (
+            '{"agent":"caspar","verdict":"reject","confidence":0.9,"summary":"s",'
+            '"reasoning":"r","recommendation":"x","findings":' + "[" * depth + "]" * depth + "}"
+        )
+        in_path = _write_temp(verdict)  # bare: no fence, no prose
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_a_verdict_too_nested_to_re_encode_is_still_retryable(self):
         """The ENCODER can blow the stack where the decoder did not.
 
