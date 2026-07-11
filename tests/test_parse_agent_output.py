@@ -813,6 +813,41 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    def test_output_size_stays_proportional_to_input(self):
+        """The written file must be O(input), not O(input × nesting depth).
+
+        Reading-as-text-first routes a deeply-nested *valid* container into the final
+        encode for the first time, and ``json.dumps(..., indent=2)`` adds ``2 × depth``
+        spaces per element: a 16 KB fenced payload of nested arrays re-encoded to ~128
+        MB, measured — an untrusted input BELOW ``MAX_INPUT_FILE_SIZE`` defeating the
+        very cap meant to bound resource use, and writing it into the run dir a reviewer
+        is told to read. Left unbounded, a comb payload within the cap projects to tens
+        of GB and a ``MemoryError`` that the orchestrator does not retry.
+
+        The output is never read for its formatting — ``load_agent_output`` re-parses it
+        — so the indentation bought nothing and cost everything. A compact dump makes the
+        output proportional to the input. This test would also pass under a depth cap or
+        a length bound; what it forbids is the amplification.
+        """
+        depth = 4_000  # decodes on both interpreters; indent would blow the size, not raise
+        nested = "[" * depth + "1" + "]" * depth
+        raw = f"```json\n{nested}\n```"
+        in_path = _write_temp(raw)
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            try:
+                parse_agent_output(in_path, out_path)
+            except json.JSONDecodeError:
+                return  # failing closed is fine; amplifying is not
+            written = os.path.getsize(out_path)
+            assert written <= 4 * len(raw.encode("utf-8")), (
+                f"output {written} B is disproportionate to input {len(raw)} B — "
+                "the encode is amplifying by nesting depth; dump compact"
+            )
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_a_text_block_without_text_is_retried_not_dropped(self):
         """A malformed content block must not escape as ``KeyError``.
 
