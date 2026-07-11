@@ -426,25 +426,22 @@ class TestOllamaFencedContent:
     def test_echoed_example_beside_a_case_drifted_verdict_still_fails_closed(self):
         """A rival verdict with a DRIFTED enum value must still trip the guard.
 
-        This is the regression the enum check (4.0.6) very nearly shipped, and it is
-        worth spelling out because the reasoning error is easy to repeat.
+        The predicate is **key-only**, so this object — a genuine verdict whose enum
+        value merely drifted in case — is still verdict-shaped, still a rival, and the
+        ambiguity guard still trips. That is the whole point of this test.
 
-        ``_is_verdict_shaped`` does not only *select* the verdict — it also feeds the
-        **ambiguity guard**, which is the fail-closed mechanism. So narrowing the
-        predicate narrows the guard too: fewer candidates means fewer ambiguity trips
-        means MORE single-match fabrications. Requiring a real enum member excludes a
-        schema restatement (good — that was the mage-drop bug) but it *also* excluded
-        a real verdict whose value merely drifted in case (``"Reject"``) — and enum
-        drift is common, which is exactly why ``_build_retry_prompt`` exists.
+        It exists because 4.0.6 tried to make the predicate smarter and broke exactly
+        this. Requiring ``verdict`` to be a valid enum member excluded ``"Reject"``
+        from candidacy, so the echoed system-prompt example became the *sole* match and
+        the parser handed consensus a schema-perfect fabricated ``approve`` — in the
+        adversarial seat, silently — on a payload that had failed closed before.
 
-        The result, verified: the model's true ``Reject`` (with a ``critical``
-        finding) stopped counting as a candidate, the echoed system-prompt example
-        became the *sole* match, and the parser handed consensus a schema-perfect
-        fabricated ``approve`` — in the adversarial seat, silently.
-
-        The fix disqualifies **schema restatements** ("approve | reject |
-        conditional" — the enum's *definition*), not every non-member. A drifted
-        verdict stays a rival and keeps the guard armed.
+        The reason is structural, and it is why no exclusion belongs in that predicate:
+        ``_is_verdict_shaped`` does not only *select* the verdict, **it feeds the
+        ambiguity guard**, which is the fail-closed mechanism. Narrowing the predicate
+        narrows the guard: fewer candidates ⇒ fewer ambiguity trips ⇒ MORE single-match
+        fabrications. Enum drift is common — it is why ``_build_retry_prompt`` exists —
+        so a drifted verdict must stay a rival.
         """
         echoed_example = json.dumps(
             {
@@ -482,21 +479,19 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
-    def test_a_partial_pipe_union_is_not_the_enum_definition_and_stays_a_rival(self):
-        """Only the enum's DEFINITION is disqualified — not every pipe-union.
+    def test_a_pipe_union_verdict_stays_a_rival(self):
+        """A ``verdict`` value of ``"approve | conditional"`` is still a rival.
 
-        Second attempt at the same reasoning error, one notch finer. The first
-        implementation excluded any candidate whose ``verdict`` matched a regex for
-        "word-token pipe union". That is broader than the rule it claimed to enforce,
-        and broader in the fail-open direction: a real verdict that drifted into
-        ``"approve | conditional"`` — a *subset*, not the definition — stopped being a
-        rival, so the echoed system-prompt example became the sole match and consensus
-        received a fabricated ``approve``. Verified before the fix.
+        Second attempt at the same reasoning error, one notch finer. That version
+        excluded any candidate whose ``verdict`` matched a regex for "word-token pipe
+        union" — broader than the rule it claimed to enforce, and broader in the
+        fail-open direction: a real verdict that drifted into ``"approve |
+        conditional"`` stopped being a rival, so the echoed system-prompt example
+        became the sole match and consensus received a fabricated ``approve``.
 
-        The exclusion must therefore be derived from ``VALID_VERDICTS`` itself (every
-        member, exactly), not from a regex that re-encodes the enum's *shape*. That
-        duplication was the hole: the code said "the enum's definition" and the regex
-        said "any pipe-union", and only one of them was true.
+        With the key-only predicate this object is verdict-shaped, the guard sees two
+        candidates, and the parse fails closed. No exclusion is correct here — see
+        ``_is_verdict_shaped``; the durable fix is the sentinel (MS2).
         """
         echoed_example = json.dumps(
             {
@@ -535,18 +530,20 @@ class TestOllamaFencedContent:
     def test_a_type_drifted_verdict_stays_a_rival(self, type_drifted_verdict):
         """A ``verdict`` of the wrong TYPE is still a rival candidate.
 
-        Third instance of the one bug this function keeps growing, and the reason the
-        rule is now stated as a single expression: **every** exclusion added here is
+        Third and last instance of the one bug this function kept growing, and the
+        reason it now carries **no** exclusion at all: every condition added there is
         one fewer thing the ambiguity guard can see. An ``isinstance(verdict, str)``
-        early-return reads like a harmless type guard — it is a second exclusion, and
-        it removed the mage's real verdict from the rival set whenever the model
+        early-return reads like harmless type hygiene — it is an exclusion, and it
+        removed the mage's real verdict from the rival set whenever the model
         type-drifted that field (``null``, a list, a number). The echoed system-prompt
         example was then the sole match: a fabricated ``approve``, in Caspar's seat.
 
         Type drift is a real failure mode — ``validate`` has a dedicated error for it
         (``Invalid verdict 'None'``), which is exactly the feedback the retry needs.
-        So the only thing that may ever be disqualified is the enum's own definition;
-        everything else keeps the guard armed.
+        With the key-only predicate the object stays a rival and the guard trips, which
+        is what this test pins. **Nothing** may be disqualified in that predicate: the
+        exclusion it was chasing was reverted after three fail-opens. See
+        ``_is_verdict_shaped``.
         """
         echoed_example = json.dumps(
             {

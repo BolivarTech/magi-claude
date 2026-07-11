@@ -135,7 +135,7 @@ _MAX_BRACE_PROBES = 2_000
 
 
 def _is_verdict_shaped(candidate: object) -> bool:
-    """Whether *candidate* has the shape of an agent verdict: the two keys, nothing else.
+    """Whether *candidate* has the shape of an agent verdict: the two keys, no further conditions.
 
     Deliberately **key-only**. Every attempt to make it smarter has been a fail-open,
     and 4.0.6 made three of them in three consecutive review rounds before the
@@ -375,10 +375,16 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     except (json.JSONDecodeError, RecursionError):
         # RecursionError, not just JSONDecodeError: CPython raises it on deeply
         # nested input, and on the Ollama path this text is MODEL-AUTHORED, so a
-        # pathological response reaches this call directly. Letting it escape would
-        # turn "one mage degrades" into "the whole run dies with a traceback" —
-        # ``_loads_lenient`` already maps it downstream, and the orchestrator's
-        # retry only catches (ValidationError, JSONDecodeError).
+        # pathological response reaches this call directly.
+        #
+        # What letting it escape actually costs — checked, not assumed, because this
+        # file has a history of comments asserting more than they can: the orchestrator
+        # gathers with ``return_exceptions=True`` and re-raises only non-Exception
+        # BaseExceptions (``run_magi.py:711``), so a stray RecursionError does NOT kill
+        # the run — the mage is excluded and the run degrades. But the retry at
+        # ``run_magi.py`` only catches ``(ValidationError, JSONDecodeError)``, so the
+        # mage would be dropped **without its second attempt**. Mapping it here buys
+        # back the retry, exactly as ``_loads_lenient`` does on the decode side.
         #
         # Scope of the behaviour change: a WELL-FORMED envelope is untouched (it
         # parses here exactly as before). A *malformed* Claude envelope, which used
