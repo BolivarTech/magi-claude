@@ -482,6 +482,55 @@ class TestOllamaFencedContent:
             os.unlink(in_path)
             os.unlink(out_path)
 
+    def test_a_partial_pipe_union_is_not_the_enum_definition_and_stays_a_rival(self):
+        """Only the enum's DEFINITION is disqualified — not every pipe-union.
+
+        Second attempt at the same reasoning error, one notch finer. The first
+        implementation excluded any candidate whose ``verdict`` matched a regex for
+        "word-token pipe union". That is broader than the rule it claimed to enforce,
+        and broader in the fail-open direction: a real verdict that drifted into
+        ``"approve | conditional"`` — a *subset*, not the definition — stopped being a
+        rival, so the echoed system-prompt example became the sole match and consensus
+        received a fabricated ``approve``. Verified before the fix.
+
+        The exclusion must therefore be derived from ``VALID_VERDICTS`` itself (every
+        member, exactly), not from a regex that re-encodes the enum's *shape*. That
+        duplication was the hole: the code said "the enum's definition" and the regex
+        said "any pipe-union", and only one of them was true.
+        """
+        echoed_example = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve",
+                "confidence": 0.85,
+                "summary": "One-line verdict",
+                "reasoning": "Your risk-focused analysis",
+                "findings": [],
+                "recommendation": "What you recommend",
+            }
+        )
+        partial_union = json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve | conditional",  # a subset, NOT the definition
+                "confidence": 0.93,
+                "summary": "Six concrete defects.",
+                "reasoning": "Traced every claim against the code.",
+                "findings": [
+                    {"severity": "critical", "title": "Race", "detail": "TOCTOU."}
+                ],
+                "recommendation": "Do not merge.",
+            }
+        )
+        in_path = _write_temp(f"{echoed_example}\n```json\n{partial_union}\n```")
+        out_path = _write_temp("", suffix=".out.json")
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                parse_agent_output(in_path, out_path)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
     def test_deeply_nested_json_degrades_the_mage_instead_of_crashing_the_run(self):
         """CPython raises RecursionError, not JSONDecodeError, on deep nesting.
 
