@@ -289,7 +289,13 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     # verdict was discarded because of the ORDER of two operations.
     try:
         data: object = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
+        # RecursionError, not just JSONDecodeError: CPython raises it on deeply
+        # nested input, and on the Ollama path this text is MODEL-AUTHORED, so a
+        # pathological response reaches this call directly. Letting it escape would
+        # turn "one mage degrades" into "the whole run dies with a traceback" —
+        # ``_loads_lenient`` already maps it downstream, and the orchestrator's
+        # retry only catches (ValidationError, JSONDecodeError).
         data = raw  # not an envelope: fenced or prose-wrapped content
 
     text = _extract_text(data)
