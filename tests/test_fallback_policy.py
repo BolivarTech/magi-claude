@@ -3,6 +3,9 @@
 # Date: 2026-07-11
 """Tests for the pure fallback rotation policy (Task 3, R5/R5a/R6/R24)."""
 
+from hypothesis import given
+from hypothesis import strategies as st
+
 from fallback_policy import ModelCapability, RotationPolicy
 from ollama_config import ModelSpec
 
@@ -96,3 +99,62 @@ def test_max_rotations_zero_disables_rotation_entirely():
 def test_returns_none_when_no_candidate_qualifies():
     # BDD-9
     assert _next(_policy(), lineages_in_play={"zhipu", "openai", "minimax"}) is None
+
+
+# ----------------------------------------------------------------------------
+# Property-based invariants (hypothesis) over the eligibility state space (R5).
+# LINEAGES here is a GENERIC 5-lineage fixture (synthetic "m-<lineage>" ids), not
+# an assertion about DEFAULT_FALLBACK -- it only needs 5 distinct lineage strings.
+# ----------------------------------------------------------------------------
+
+LINEAGES = ["deepseek", "openai", "minimax", "nvidia", "google"]
+SPECS = [ModelSpec(f"m-{lin}", lin) for lin in LINEAGES]
+_sets = st.sets(st.sampled_from(LINEAGES))
+
+
+@given(
+    in_play=_sets,
+    failed=_sets,
+    condemned=_sets,
+    used=st.sets(st.sampled_from([s.model for s in SPECS])),
+    rotations=st.integers(min_value=0, max_value=4),
+    cap=st.integers(min_value=0, max_value=4),
+)
+def test_property_result_never_violates_any_condition(
+    in_play, failed, condemned, used, rotations, cap
+):
+    caps = {s.model: ModelCapability(window=200_000, supports_completion=True) for s in SPECS}
+    policy = RotationPolicy(SPECS, cap, REQUIRED_RAW, caps, strict_context_guard=False)
+    got = policy.next_model(
+        agent="caspar",
+        failed_lineages=failed,
+        run_failed_lineages=condemned,
+        lineages_in_play=in_play,
+        used=used,
+        window_rejected={},
+        rotations_done=rotations,
+    )
+    if got is None:
+        return
+    assert rotations < cap  # never exceeds the cap
+    assert got.lineage not in in_play  # never duplicates a live lineage
+    assert got.lineage not in failed  # never revisits a failed lineage
+    assert got.lineage not in condemned  # never uses a condemned lineage
+    assert got.model not in used  # never repeats a model
+
+
+@given(in_play=_sets, failed=_sets, condemned=_sets)
+def test_property_none_iff_no_candidate_is_eligible(in_play, failed, condemned):
+    caps = {s.model: ModelCapability(window=200_000, supports_completion=True) for s in SPECS}
+    policy = RotationPolicy(SPECS, 5, REQUIRED_RAW, caps, strict_context_guard=False)
+    got = policy.next_model(
+        agent="caspar",
+        failed_lineages=failed,
+        run_failed_lineages=condemned,
+        lineages_in_play=in_play,
+        used=set(),
+        window_rejected={},
+        rotations_done=0,
+    )
+    eligible = [s for s in SPECS if s.lineage not in (in_play | failed | condemned)]
+    assert (got is None) == (not eligible)  # None iff nothing qualifies

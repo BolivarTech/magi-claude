@@ -38,3 +38,8 @@ disallow_incomplete_defs = false
 check_untyped_defs = false
 warn_return_any = false
 disable_error_code = ["type-arg", "misc", "unused-ignore"]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.156.6",
+]
