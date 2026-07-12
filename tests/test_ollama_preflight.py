@@ -3,7 +3,7 @@ import io
 import json
 import urllib.error
 import pytest
-from ollama_config import OllamaConfig
+from ollama_config import ModelSpec, OllamaConfig
 from ollama_preflight import preflight, OllamaPreflightError, PREFLIGHT_TIMEOUT, _is_cloud_tag
 
 
@@ -19,7 +19,11 @@ def _cfg(api_key=None):
     return OllamaConfig(
         base_url="http://h:11434/v1",
         api_key=api_key,
-        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+        models={
+            "melchior": ModelSpec("m", "la"),
+            "balthasar": ModelSpec("b", "lb"),
+            "caspar": ModelSpec("c", "lc"),
+        },
     )
 
 
@@ -63,9 +67,9 @@ def test_cloud_tags_no_signin_emits_signin_hint(monkeypatch):  # BDD-27
         base_url="http://h:11434/v1",
         api_key=None,
         models={
-            "melchior": "glm-5:cloud",
-            "balthasar": "gpt-oss:120b-cloud",
-            "caspar": "deepseek-v4-pro:cloud",
+            "melchior": ModelSpec("glm-5:cloud", "zhipu"),
+            "balthasar": ModelSpec("gpt-oss:120b-cloud", "openai"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
         },
     )
     _patch(monkeypatch, body=_models_body(["llama3:8b", "qwen3:8b"]))  # none :cloud
@@ -89,9 +93,9 @@ def test_generic_missing_model_fires_when_some_cloud_available(monkeypatch):
         base_url="http://h:11434/v1",
         api_key=None,
         models={
-            "melchior": "glm-5:cloud",
-            "balthasar": "new-model:cloud",
-            "caspar": "deepseek-v4-pro:cloud",
+            "melchior": ModelSpec("glm-5:cloud", "zhipu"),
+            "balthasar": ModelSpec("new-model:cloud", "openai"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
         },
     )
     # Daemon lists two of the three — new-model:cloud is missing, but cloud IS available.

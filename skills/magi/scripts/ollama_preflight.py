@@ -85,12 +85,15 @@ def preflight(config: OllamaConfig) -> None:
         ) from None
 
     available = {m.get("id") for m in payload.get("data", []) if isinstance(m, dict)}
-    missing = sorted(set(config.models.values()) - available)
+    # config.models values are ModelSpec (v5.0.0); presence is checked against the
+    # bare model tag. Lineage-aware preflight checks land in Phase 2.
+    trio_tags = [spec.model for spec in config.models.values()]
+    missing = sorted(set(trio_tags) - available)
     if missing:
         # Cloud-no-signin diagnostic (BDD-27 / F-B): when the whole trio is
         # :cloud-tagged but the daemon lists NO :cloud model, the likely cause
         # is a missing `ollama signin` — surface that as the primary hint.
-        all_cloud = all(_is_cloud_tag(tag) for tag in config.models.values())
+        all_cloud = all(_is_cloud_tag(tag) for tag in trio_tags)
         none_cloud_available = not any(_is_cloud_tag(str(m)) for m in available)
         if all_cloud and none_cloud_available:
             raise OllamaPreflightError(

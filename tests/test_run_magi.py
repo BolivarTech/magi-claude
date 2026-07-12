@@ -4826,12 +4826,16 @@ def test_select_backend_ollama_uses_trio(monkeypatch):
     from run_magi import parse_args, select_backend
     import run_magi
     from ollama_backend import OllamaBackend
-    from ollama_config import OllamaConfig
+    from ollama_config import ModelSpec, OllamaConfig
 
     cfg = OllamaConfig(
         base_url="http://h/v1",
         api_key=None,
-        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+        models={
+            "melchior": ModelSpec("m", "la"),
+            "balthasar": ModelSpec("b", "lb"),
+            "caspar": ModelSpec("c", "lc"),
+        },
     )
     monkeypatch.setattr(run_magi, "resolve_config", lambda **k: cfg)
     monkeypatch.setattr(run_magi, "preflight", lambda c: None)
@@ -4887,7 +4891,7 @@ def test_resolve_config_called_once_in_select_backend(monkeypatch):
     """F-M invariant: resolve_config is called exactly once in select_backend."""
     from run_magi import parse_args, select_backend
     import run_magi
-    from ollama_config import OllamaConfig
+    from ollama_config import ModelSpec, OllamaConfig
 
     call_count = 0
 
@@ -4897,7 +4901,11 @@ def test_resolve_config_called_once_in_select_backend(monkeypatch):
         return OllamaConfig(
             base_url="http://h/v1",
             api_key=None,
-            models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+            models={
+                "melchior": ModelSpec("m", "la"),
+                "balthasar": ModelSpec("b", "lb"),
+                "caspar": ModelSpec("c", "lc"),
+            },
         )
 
     monkeypatch.setattr(run_magi, "resolve_config", counting_resolve)
@@ -4914,12 +4922,16 @@ def test_resolve_config_called_once_in_select_backend(monkeypatch):
 
 def _make_ollama_cfg():  # type: ignore[return]  # OllamaConfig imported lazily
     """Return a minimal OllamaConfig for T10 tests."""
-    from ollama_config import OllamaConfig
+    from ollama_config import ModelSpec, OllamaConfig
 
     return OllamaConfig(
         base_url="http://h/v1",
         api_key=None,
-        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+        models={
+            "melchior": ModelSpec("m", "la"),
+            "balthasar": ModelSpec("b", "lb"),
+            "caspar": ModelSpec("c", "lc"),
+        },
     )
 
 

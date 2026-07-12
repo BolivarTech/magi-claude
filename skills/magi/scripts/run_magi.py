@@ -533,7 +533,10 @@ def select_backend(
     if args.ollama:
         config = resolve_config()
         preflight(config)
-        return OllamaBackend(config), dict(config.models)
+        # Task 1 (v5.0.0): config.models is now dict[str, ModelSpec]. Map to bare
+        # tags here so the orchestrator keeps working unchanged; Task 9 threads the
+        # full spec (with lineage) through for rotation.
+        return OllamaBackend(config), {name: spec.model for name, spec in config.models.items()}
     return ClaudeBackend(), {name: args.model for name in AGENTS}
 
 

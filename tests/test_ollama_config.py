@@ -40,20 +40,28 @@ def test_defaults_when_no_files_no_env(monkeypatch):
 def test_repo_overrides_global_per_key(tmp_path):
     g = _write(
         tmp_path / "g.toml",
-        'base_url="http://g:11434/v1"\n[models]\nmelchior="gm"\nbalthasar="gb"\ncaspar="gc"\n',
+        'base_url="http://g:11434/v1"\n[models]\n'
+        'melchior  = { model = "gm", lineage = "la" }\n'
+        'balthasar = { model = "gb", lineage = "lb" }\n'
+        'caspar    = { model = "gc", lineage = "lc" }\n',
     )
     r = _write(tmp_path / "r.toml", 'base_url="http://r:11434/v1"\n')
     cfg = resolve_config(global_path=g, repo_path=r, env={})
     assert cfg.base_url == "http://r:11434/v1"  # repo wins
-    assert cfg.models == {"melchior": "gm", "balthasar": "gb", "caspar": "gc"}  # from global
+    assert cfg.models == {  # from global
+        "melchior": ModelSpec("gm", "la"),
+        "balthasar": ModelSpec("gb", "lb"),
+        "caspar": ModelSpec("gc", "lc"),
+    }
 
 
 def test_env_overrides_files(tmp_path):
-    r = _write(tmp_path / "r.toml", '[models]\ncaspar="rc"\n')
+    r = _write(tmp_path / "r.toml", '[models]\ncaspar = { model = "rc", lineage = "zhipu" }\n')
     cfg = resolve_config(
         global_path="/nope.toml", repo_path=r, env={"MAGI_OLLAMA_MODEL_CASPAR": "ec"}
     )
-    assert cfg.models["caspar"] == "ec"
+    # env forces the tag; the DECLARED lineage of the resolved spec is preserved.
+    assert cfg.models["caspar"] == ModelSpec("ec", "zhipu")
 
 
 def test_ollama_host_is_fallback_below_files(tmp_path):
@@ -176,8 +184,8 @@ def test_old_string_schema_raises_actionable_migration_error(tmp_path):
     with pytest.raises(OllamaConfigError) as exc:
         resolve_config(repo_path=path, global_path=None, env={})
     msg = str(exc.value)
-    assert path in msg                    # names the offending file
-    assert "lineage" in msg               # shows the new shape
+    assert path in msg  # names the offending file
+    assert "lineage" in msg  # shows the new shape
     assert "melchior" in msg
 
 

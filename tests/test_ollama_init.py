@@ -11,8 +11,9 @@ def test_creates_template_with_active_base_url_and_trio(tmp_path):
     assert f'base_url = "{DEFAULT_BASE_URL}"' in text  # active, not commented
     assert "# api_key" in text  # commented
     assert "signin" in text.lower()  # 2-mode header (F-B)
-    for tag in DEFAULT_MODELS.values():
-        assert tag in text
+    for spec in DEFAULT_MODELS.values():
+        assert spec.model in text  # tag rendered
+        assert spec.lineage in text  # lineage declared (v5.0.0 schema)
 
 
 def test_refuses_to_overwrite(tmp_path):
