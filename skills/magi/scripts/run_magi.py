@@ -21,9 +21,11 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -361,6 +363,57 @@ def _safe_display_update(
         # own BaseException escape here, that outer ``raise`` never runs
         # and the real shutdown reason is lost.
         log_gate.emit_once(exc)
+
+
+_FAIL_SCHEMA = "schema"
+_FAIL_HTTP = "http"
+_FAIL_CONNECTION = "connection"
+_FAIL_TIMEOUT = "timeout"
+_FAIL_UNEXPECTED = "unexpected"
+
+#: Signatures of the transport RuntimeErrors ``ollama_backend._call`` raises. A
+#: RuntimeError has no type to inspect, so its SCOPE is read from the message.
+#: ``HTTP <digit>`` -- NOT bare "HTTP", which also matches "no HTTP status" in a
+#: coding-bug message -- plus the chat-time 404. These MUST stay coupled to the
+#: backend's templates -- pinned by test_classify_matches_the_real_ollama_backend_messages.
+_HTTP_MESSAGE_RE = re.compile(r"HTTP \d|at chat-time")
+_CONNECTION_MESSAGE_MARKERS = ("Cannot reach Ollama",)
+
+
+def _classify(exc: BaseException) -> str:
+    """Classify a failure to decide retry SCOPE and whether the fast-fail fires.
+
+    Args:
+        exc: The exception raised by :func:`launch_agent` / the backend.
+
+    Returns:
+        One of ``_FAIL_SCHEMA`` / ``_FAIL_HTTP`` / ``_FAIL_CONNECTION`` /
+        ``_FAIL_TIMEOUT`` / ``_FAIL_UNEXPECTED``. A ``RuntimeError`` is transport
+        ONLY when its message matches a known backend signature; one matching
+        neither falls through to ``_FAIL_UNEXPECTED`` so a genuine coding bug
+        surfaces on the spot instead of being retried, rotated and globalized.
+    """
+    if isinstance(exc, (ValidationError, json.JSONDecodeError)):
+        return _FAIL_SCHEMA
+    # HTTPError BEFORE URLError: HTTPError is a URLError subclass, and a 5xx must
+    # not be read as a connection failure (that would fast-fail a live endpoint).
+    if isinstance(exc, urllib.error.HTTPError):
+        return _FAIL_HTTP
+    if isinstance(exc, urllib.error.URLError):
+        # A socket timeout arrives WRAPPED: URLError(TimeoutError()).
+        return _FAIL_TIMEOUT if isinstance(exc.reason, TimeoutError) else _FAIL_CONNECTION
+    if isinstance(exc, TimeoutError):  # asyncio.TimeoutError is an alias since 3.11
+        return _FAIL_TIMEOUT
+    if isinstance(exc, ConnectionError):
+        return _FAIL_CONNECTION
+    if isinstance(exc, RuntimeError):
+        msg = str(exc)
+        if _HTTP_MESSAGE_RE.search(msg):
+            return _FAIL_HTTP
+        if any(marker in msg for marker in _CONNECTION_MESSAGE_MARKERS):
+            return _FAIL_CONNECTION
+        return _FAIL_UNEXPECTED
+    return _FAIL_UNEXPECTED
 
 
 def _build_retry_prompt(original_prompt: str, error: ValidationError | json.JSONDecodeError) -> str:
