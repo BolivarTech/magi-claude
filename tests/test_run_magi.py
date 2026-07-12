@@ -16,8 +16,9 @@ from unittest.mock import patch
 
 import pytest
 
+from fallback_policy import AgentRotationState
 from ollama_config import ModelSpec
-from rotation_harness import _rotation, _run, _valid
+from rotation_harness import REQUIRED, _rotation, _run, _valid
 from validate import ValidationError
 
 
@@ -5316,3 +5317,222 @@ class TestAttemptsPerModel:
         assert calls["caspar"] == 1, "v4 contract: transport failures are NOT retried"
         assert result["degraded"] is True
         assert len(result["agents"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 10: rotation propose-verify-commit (R5/R8/R24) + failure routing (R13)
+# ---------------------------------------------------------------------------
+
+
+class TestRotationProposeVerifyCommit:
+    """R24: propose under the lock, VERIFY with a probe outside it, then commit."""
+
+    @pytest.mark.asyncio
+    async def test_mage_rotates_after_exhausting_attempts_and_still_votes(self, tmp_path):
+        """BDD-2/BDD-11: a dead model no longer costs a mage, and the run is VALID
+        (not degraded), because the fallback was DECLARED."""
+        seen: list[str] = []
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            seen.append(spec.model)
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert seen == ["deepseek-v4-pro:cloud", "deepseek-v4-pro:cloud", "glm-5.2:cloud"]
+        assert result.get("degraded") is not True, (
+            "a declared fallback keeps the run VALID -- that is the whole feature"
+        )
+        assert len(result["agents"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_schema_failure_also_reaches_rotation(self, tmp_path):
+        """BDD-3: rotation is failure-type AGNOSTIC. A mage that exhausts its attempts
+        with SCHEMA failures (the model answered but never satisfied the contract)
+        must rotate just the same and vote."""
+        seen: list[str] = []
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            seen.append(spec.model)
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise ValidationError("missing keys: ['findings']")  # SCHEMA, not transport
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert seen == ["deepseek-v4-pro:cloud", "deepseek-v4-pro:cloud", "glm-5.2:cloud"]
+        assert result.get("degraded") is not True, "the schema path reaches rotation too"
+        assert len(result["agents"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_max_attempts_per_model_is_never_exceeded(self, tmp_path):
+        """Two attempts per model, then the model is spent -- never a third."""
+        per_model: dict[str, int] = {}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            per_model[spec.model] = per_model.get(spec.model, 0) + 1
+            raise RuntimeError("HTTP 503 Service Unavailable")
+
+        await _run(tmp_path, mock_launch, rotation=_rotation(max_attempts=2, max_rotations=1))
+
+        assert per_model["deepseek-v4-pro:cloud"] == 2, "trio model: exactly max_attempts"
+        assert per_model["glm-5.2:cloud"] == 2, "fallback: a FULL fresh budget"
+        assert len(per_model) == 2, "1 + max_rotations models, no more"
+
+    def test_fallback_reason_kind_is_always_an_R13_enum_value(self):
+        """R13: telemetry carries {transport, schema, timeout} ONLY. The internal
+        connection/http distinction must NEVER leak into fallback_reason.kind."""
+        from run_magi import (
+            _FAIL_CONNECTION,
+            _FAIL_HTTP,
+            _FAIL_SCHEMA,
+            _FAIL_TIMEOUT,
+            _AttemptsExhausted,
+            _reason,
+        )
+
+        old = ModelSpec("deepseek-v4-pro:cloud", "deepseek")
+        new = ModelSpec("glm-5.2:cloud", "zhipu")
+        for fail_kind in (_FAIL_CONNECTION, _FAIL_HTTP, _FAIL_TIMEOUT, _FAIL_SCHEMA):
+            exc = _AttemptsExhausted(fail_kind, "boom", http_status=None, attempts=2)
+            reason = _reason(old, new, exc, AgentRotationState(rotations_done=1))
+            assert reason["kind"] in ("transport", "schema", "timeout"), fail_kind
+
+    @pytest.mark.asyncio
+    async def test_probe_rejects_a_candidate_that_does_not_fit_and_we_repropose(self, tmp_path):
+        """BDD-54: the pre-filter PROPOSED it; the probe MEASURED it; the probe wins."""
+        probed: list[str] = []
+
+        async def probe(model: str, prompt: str, timeout: int) -> int | None:
+            probed.append(model)
+            return 10_000_000 if model == "glm-5.2:cloud" else REQUIRED
+
+        seen: list[str] = []
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            seen.append(spec.model)
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation(probe=probe))
+
+        assert probed == ["glm-5.2:cloud", "gpt-oss:120b-cloud"]
+        assert "glm-5.2:cloud" not in seen, "a model that would truncate must NEVER run"
+        assert seen[-1] == "gpt-oss:120b-cloud"
+        assert result.get("degraded") is not True
+
+    @pytest.mark.asyncio
+    async def test_no_io_call_ever_holds_the_registry_lock(self, tmp_path):
+        """Caspar's deadlock CRITICAL, made executable: no I/O under the registry lock."""
+        ctx = _rotation()
+        violations: list[str] = []
+
+        async def probe(model: str, prompt: str, timeout: int) -> int | None:
+            if ctx.registry._lock.locked():
+                violations.append(f"probe({model})")
+            return REQUIRED
+
+        ctx = _rotation(probe=probe)
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and spec.lineage == "deepseek":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert not violations, f"I/O executed while holding the registry lock: {violations}"
+
+    @pytest.mark.asyncio
+    async def test_probe_runs_outside_the_registry_lock(self, tmp_path):
+        """BDD-55: the probe must never hold the registry lock."""
+        ctx = _rotation()
+        held_during_probe: list[bool] = []
+
+        async def probe(model: str, prompt: str, timeout: int) -> int | None:
+            held_during_probe.append(ctx.registry._lock.locked())
+            return REQUIRED
+
+        ctx = _rotation(probe=probe)
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert held_during_probe, "the probe must have run at least once"
+        assert not any(held_during_probe), "the registry lock was held during a network call"
+
+    @pytest.mark.asyncio
+    async def test_attempt_counter_resets_on_rotation(self, tmp_path):
+        """BDD-10: the new model gets a FULL budget, not the leftovers of the old."""
+        per_model: dict[str, int] = {}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            per_model[spec.model] = per_model.get(spec.model, 0) + 1
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            if per_model[spec.model] == 1:
+                raise RuntimeError("HTTP 503 Service Unavailable")  # fallback fails ONCE
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert per_model == {"deepseek-v4-pro:cloud": 2, "glm-5.2:cloud": 2}
+        assert result.get("degraded") is not True, "the fallback's 2nd attempt succeeded"
+
+    @pytest.mark.asyncio
+    async def test_max_probe_attempts_bounds_the_propose_verify_loop(self, tmp_path):
+        """A stale window cache must not turn a correctness guard into a latency hole:
+        the loop is bounded, and exhausting it kills the mage cleanly."""
+        probed: list[str] = []
+
+        async def probe(model: str, prompt: str, timeout: int) -> int | None:
+            probed.append(model)
+            return 10_000_000  # NOTHING fits
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            raise RuntimeError("HTTP 503 Service Unavailable")
+
+        result = await _run(
+            tmp_path,
+            mock_launch,
+            rotation=_rotation(probe=probe, max_probe_attempts=3, max_rotations=5),
+        )
+
+        assert len(probed) == 3, f"bounded by max_probe_attempts, got {len(probed)}"
+        assert result["degraded"] is True, "no fitting candidate -> the mage dies"
+        assert len(result["agents"]) == 2, "degraded mode still synthesizes with 2"
