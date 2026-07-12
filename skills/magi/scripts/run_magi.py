@@ -517,6 +517,7 @@ def _maybe_enrich(
 
 def select_backend(
     args: argparse.Namespace,
+    prompt: str,
 ) -> tuple[AgentBackend, dict[str, str]]:
     """Return (backend, per-agent model map) for the chosen mode.
 
@@ -530,16 +531,20 @@ def select_backend(
 
     Args:
         args: Parsed CLI namespace (requires .ollama and .model attributes).
+        prompt: The built user prompt; the Ollama preflight MEASURES it to size
+            the context guard, so it must be the exact payload the agents receive.
 
     Returns:
         Tuple of (backend instance, dict mapping agent name to model string).
     """
     if args.ollama:
         config = resolve_config()
-        preflight(config)
-        # Task 1 (v5.0.0): config.models is now dict[str, ModelSpec]. Map to bare
-        # tags here so the orchestrator keeps working unchanged; Task 9 threads the
-        # full spec (with lineage) through for rotation.
+        # v5.0.0 (T8): preflight is now async (it MEASURES the payload) and enforces
+        # the lineage/capability/window guards. Run it once here, before any agent
+        # launches; a violated guard raises OllamaPreflightError. Its measured result
+        # is threaded into the rotation path by Phase 3.
+        asyncio.run(preflight(config, prompt))
+        # config.models is dict[str, ModelSpec]; map to bare tags for the orchestrator.
         return OllamaBackend(config), {name: spec.model for name, spec in config.models.items()}
     return ClaudeBackend(), {name: args.model for name in AGENTS}
 
@@ -1017,7 +1022,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        backend, agent_models = select_backend(args)
+        backend, agent_models = select_backend(args, prompt)
     except (OllamaConfigError, OllamaPreflightError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)

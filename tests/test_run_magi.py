@@ -14,6 +14,11 @@ from unittest.mock import patch
 import pytest
 
 
+async def _preflight_ok(config, prompt=""):
+    """Async no-op preflight for tests that patch out the network guard (T8)."""
+    return None
+
+
 class TestParseArgs:
     """Verify CLI argument parsing."""
 
@@ -4045,7 +4050,10 @@ class TestFindingGuardWiring:
         monkeypatch.setattr(
             run_magi,
             "select_backend",
-            lambda args: (ollama_backend, {"melchior": "m", "balthasar": "b", "caspar": "c"}),
+            lambda args, prompt: (
+                ollama_backend,
+                {"melchior": "m", "balthasar": "b", "caspar": "c"},
+            ),
         )
 
         def fake_create(output_dir: object, run_root: object = None) -> str:
@@ -4817,7 +4825,7 @@ def test_select_backend_claude_default():
     from claude_backend import ClaudeBackend
 
     args = parse_args(["design", "x"])
-    backend, agent_models = select_backend(args)
+    backend, agent_models = select_backend(args, "payload")
     assert isinstance(backend, ClaudeBackend)
     assert set(agent_models.values()) == {"opus"}
 
@@ -4838,9 +4846,9 @@ def test_select_backend_ollama_uses_trio(monkeypatch):
         },
     )
     monkeypatch.setattr(run_magi, "resolve_config", lambda **k: cfg)
-    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+    monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
     args = parse_args(["design", "x", "--ollama"])
-    backend, agent_models = select_backend(args)
+    backend, agent_models = select_backend(args, "payload")
     assert isinstance(backend, OllamaBackend)
     assert agent_models == {"melchior": "m", "balthasar": "b", "caspar": "c"}
 
@@ -4909,9 +4917,9 @@ def test_resolve_config_called_once_in_select_backend(monkeypatch):
         )
 
     monkeypatch.setattr(run_magi, "resolve_config", counting_resolve)
-    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+    monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
     args = parse_args(["design", "x", "--ollama"])
-    select_backend(args)
+    select_backend(args, "payload")
     assert call_count == 1
 
 
@@ -4974,7 +4982,7 @@ def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
     monkeypatch.setattr(run_magi.shutil, "which", lambda _: None)  # claude absent
     monkeypatch.setattr(run_magi, "resolve_config", lambda **k: _make_ollama_cfg())
-    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+    monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
 
     captured: dict[str, object] = {}
 
