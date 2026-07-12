@@ -146,6 +146,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", help="Directory for agent outputs")
     parser.add_argument(
+        "-o",
+        "--out",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Also write the human-readable verdict report (the banner + findings) to "
+            "FILE, in addition to stdout. Useful when stdout is not captured (e.g. a "
+            "remote/phone client). The structured per-agent JSON still goes to "
+            "--output-dir."
+        ),
+    )
+    parser.add_argument(
         "--model",
         choices=VALID_MODELS,
         default=None,
@@ -1828,14 +1840,28 @@ def main() -> None:
     if len(report["agents"]) >= 2:
         report["consensus"] = determine_consensus(report["agents"])
 
-    print(
-        format_report(
-            report["agents"],
-            report["consensus"],
-            context_guard=report.get("context_guard"),
-            lineage_warnings=report.get("lineage_warnings"),
-        )
+    report_text = format_report(
+        report["agents"],
+        report["consensus"],
+        context_guard=report.get("context_guard"),
+        lineage_warnings=report.get("lineage_warnings"),
     )
+    # -o/--out REDIRECTS the report to a file and SUPPRESSES it on stdout. A write
+    # failure is not allowed to lose the verdict: it warns LOUDLY on stderr and falls
+    # back to printing the report on stdout.
+    if args.out:
+        try:
+            with open(args.out, "w", encoding="utf-8") as out_file:
+                out_file.write(report_text + "\n")
+        except OSError as exc:
+            print(
+                f"WARNING: could not write report to {args.out} ({exc}); "
+                "printing it to stdout instead so the verdict is not lost",
+                file=sys.stderr,
+            )
+            print(report_text)
+    else:
+        print(report_text)
 
     # A1: aggregate per-run cost into the report BEFORE it is serialized so the
     # saved magi-report.json carries the ``cost`` block. Aggregate over all

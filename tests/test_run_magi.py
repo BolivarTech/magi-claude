@@ -4336,17 +4336,29 @@ class TestInputSizeWiring:
 
         return created, buf
 
-    def test_out_flag_writes_the_human_readable_report_to_a_file(self, tmp_path, monkeypatch):
-        """-o/--out writes the format_report text (verdict banner + findings) to a file,
-        so the verdict is retrievable when stdout is not (e.g. a remote/phone client)."""
+    def test_out_flag_redirects_the_report_to_a_file_and_suppresses_stdout(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """-o/--out REDIRECTS the report to a file AND removes it from stdout -- a
+        remote/phone client that cannot capture stdout gets the verdict in the file."""
         out = tmp_path / "verdict.txt"
         self._patch_main(tmp_path, monkeypatch, extra_argv=["-o", str(out)])
-        assert out.exists(), "the -o target file must be written"
-        assert "REPORT" in out.read_text(encoding="utf-8"), "it must contain the report text"
+        assert "REPORT" in out.read_text(encoding="utf-8"), "the file must hold the report"
+        assert "REPORT" not in capsys.readouterr().out, "with -o the report is off stdout"
 
-    def test_no_out_flag_writes_no_file(self, tmp_path, monkeypatch):
-        """Without -o, nothing new is written (stdout only) -- the flag is opt-in."""
+    def test_out_flag_write_failure_warns_and_falls_back_to_stdout(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A write failure must NEVER lose the verdict: warn loudly and fall back to
+        stdout. A directory as the -o target makes ``open(..., 'w')`` raise OSError."""
+        _created, buf = self._patch_main(tmp_path, monkeypatch, extra_argv=["-o", str(tmp_path)])
+        assert "REPORT" in capsys.readouterr().out, "on write failure, fall back to stdout"
+        assert "could not write report" in buf.getvalue(), "and warn loudly on stderr"
+
+    def test_no_out_flag_prints_to_stdout_and_writes_no_file(self, tmp_path, monkeypatch, capsys):
+        """Without -o, the report goes to stdout (normal v4 behaviour) and no file is made."""
         self._patch_main(tmp_path, monkeypatch)
+        assert "REPORT" in capsys.readouterr().out
         assert not (tmp_path / "verdict.txt").exists()
 
     def test_input_size_block_in_saved_report(self, tmp_path, monkeypatch):
