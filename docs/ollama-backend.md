@@ -169,17 +169,42 @@ lineage = "openai"
 model   = "minimax-m3:cloud"
 lineage = "minimax"
 
-max_attempts_per_model = 2     # attempts per model before rotating (>= 1)
-max_rotations          = 2     # rotations per mage; 0 disables rotation entirely
-max_probe_attempts     = 3     # propose-verify loop bound
-strict_context_guard   = false # true => abort/skip when a window cannot be measured
-retry_backoff_seconds  = 2.0   # backoff between TRANSPORT retries (schema retries do not wait)
+# Rotation and context-window settings (apply to ALL mages; top-level, before [models]).
+max_attempts_per_model    = 2     # tries per model before rotating to a fallback (>= 1)
+max_rotations             = 2     # fallback models a mage may rotate through (0 disables rotation)
+max_probe_attempts        = 3     # fallback candidates to size-check before a mage gives up (>= 1)
+output_headroom_tokens    = 8192  # context tokens reserved for the model's answer plus its thinking
+input_margin_pct          = 40    # extra margin when checking the input fits a model's window, percent
+strict_context_guard      = false # if true, refuse a model whose context window cannot be measured
+retry_backoff_seconds     = 2.0   # seconds to wait between transport retries (0 = no wait)
+preflight_timeout_seconds = 30    # timeout for preflight metadata calls, seconds
+probe_timeout_seconds     = 120   # timeout for the context-probe call, seconds
 ```
 
-`--ollama-init` scaffolds this shape. A **v4 config fails closed** with an actionable
-error; **`python scripts/validate_magi_toml.py [path]`** reports exactly what to change —
-it never guesses a lineage (two mages sharing a lineage would give a consensus that only
-*looks* like three perspectives).
+`--ollama-init` scaffolds this shape — **all nine settings are emitted as active keys at
+their defaults**, so every knob (and the kill-switch) is visible and editable without
+reading the docs. Editing any of them is optional; an untouched scaffold behaves exactly
+as the built-in defaults. A **v4 config fails closed** with an actionable error;
+**`python scripts/validate_magi_toml.py [path]`** reports exactly what to change — it never
+guesses a lineage (two mages sharing a lineage would give a consensus that only *looks*
+like three perspectives).
+
+### Settings — what each one does
+
+These are top-level keys (they apply to all three mages) and must appear **before**
+`[models]`. Every one has a safe default; change them only if you have a reason.
+
+| Setting | Default | Plain-language meaning |
+|---|---|---|
+| `max_attempts_per_model` | 2 | How many times a mage retries the **same** model before it gives up and rotates to a fallback. |
+| `max_rotations` | 2 | How many fallback models a mage may move through. **`0` turns rotation off** (the kill-switch). |
+| `max_probe_attempts` | 3 | When rotating, how many candidate models to size-check (does the payload fit?) before the mage gives up. |
+| `output_headroom_tokens` | 8192 | Context space reserved for the model's **answer plus its thinking**, so the reply is never cut off. Raise it for very verbose reasoning models. |
+| `input_margin_pct` | 40 | Safety cushion (percent) when estimating whether the input fits a model's context window, for the models MAGI can only estimate rather than measure exactly. |
+| `strict_context_guard` | false | If `true`, refuse to run a model whose context window **cannot be measured** (fail closed) instead of proceeding on an estimate. |
+| `retry_backoff_seconds` | 2.0 | Seconds to wait between **connection/transport** retries (e.g. after a 503). `0` = no wait. Schema-error retries never wait. |
+| `preflight_timeout_seconds` | 30 | Timeout for the small preflight metadata calls (`/models`, `/api/show`). |
+| `probe_timeout_seconds` | 120 | Timeout for the context probe, which processes the **whole prompt** once — larger than the metadata timeout on purpose. |
 
 ### Kill-switch and shadow rollout
 

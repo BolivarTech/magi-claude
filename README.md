@@ -68,6 +68,20 @@ there is **no truncation protection** — set `strict_context_guard = true` to f
 instead. Rotation, its telemetry, the probe cost, and migration are documented in
 [`docs/ollama-backend.md`](docs/ollama-backend.md).
 
+**New in v5.0.2 — the scaffold shows every knob:** `--ollama-init` now writes all nine
+rotation / context-window settings as active keys at their defaults (top-level, before
+`[models]`), so the tuning surface — and the `max_rotations = 0` kill-switch — is visible
+and editable without reading the docs. In plain terms: **`max_attempts_per_model`** = how
+many times a mage retries the same model before rotating; **`max_rotations`** = how many
+fallbacks it may try (`0` turns rotation off); **`output_headroom_tokens`** = context space
+reserved for the model's reply so it is never cut off; **`input_margin_pct`** = safety
+cushion when estimating whether the input fits a model's window; **`strict_context_guard`**
+= refuse a model whose window cannot be measured (instead of estimating);
+**`retry_backoff_seconds`** = wait between connection retries; **`preflight_timeout_seconds`**
+/ **`probe_timeout_seconds`** = timeouts for the metadata calls and the context probe. An
+untouched scaffold behaves exactly as the built-in defaults. Full table in
+[`docs/ollama-backend.md`](docs/ollama-backend.md).
+
 > **`--ollama` runs the gate Claude-free, end-to-end.** The consensus verdict and the
 > output banner are produced by **deterministic local Python** (`consensus.determine_consensus`
 > + `reporting.format_report`), not by any LLM — so with `--ollama` the *entire* cycle
