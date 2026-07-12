@@ -209,3 +209,117 @@ def test_model_spec_is_frozen():
     # also pass on an AttributeError from a typo in the test itself.
     with pytest.raises(dataclasses.FrozenInstanceError):
         ModelSpec(model="a", lineage="b").model = "c"  # type: ignore[misc]
+
+
+# ----------------------------------------------------------------------------
+# Task 2: [[fallback]] array + rotation config scalars (R4/R6/R12/R14/NR3)
+# ----------------------------------------------------------------------------
+
+# Scalars MUST precede [models]: TOML binds bare keys to the current table, so a
+# scalar written after [models] would nest under [models] (top-level resolution
+# would then never see it). The plan's fixture had this bug; corrected here.
+FALLBACK_TOML = """
+base_url = "http://localhost:11434/v1"
+max_attempts_per_model = 3
+max_rotations = 1
+strict_context_guard = true
+
+[models]
+melchior  = { model = "qwen3.5:397b-cloud",   lineage = "alibaba" }
+balthasar = { model = "kimi-k2.6:cloud",      lineage = "moonshot" }
+caspar    = { model = "deepseek-v4-pro:cloud", lineage = "deepseek" }
+
+[[fallback]]
+model = "glm-5.2:cloud"
+lineage = "zhipu"
+
+[[fallback]]
+model = "gpt-oss:120b-cloud"
+lineage = "openai"
+"""
+
+
+def test_fallback_list_is_ordered_sequence_of_model_specs(tmp_path):
+    cfg = resolve_config(repo_path=_write_toml(tmp_path, FALLBACK_TOML), global_path=None, env={})
+    assert [f.model for f in cfg.fallback] == ["glm-5.2:cloud", "gpt-oss:120b-cloud"]
+    assert cfg.fallback[0].lineage == "zhipu"
+
+
+def test_rotation_scalars_are_read_and_defaulted(tmp_path):
+    cfg = resolve_config(repo_path=_write_toml(tmp_path, FALLBACK_TOML), global_path=None, env={})
+    assert cfg.max_attempts_per_model == 3  # from file
+    assert cfg.max_rotations == 1  # from file
+    assert cfg.strict_context_guard is True  # from file
+    assert cfg.output_headroom_tokens == 8192  # built-in default
+    assert cfg.input_margin_pct == 40  # built-in default
+    assert cfg.max_probe_attempts == 3  # built-in default
+    assert cfg.retry_backoff_seconds == 2.0  # built-in default
+    assert cfg.preflight_timeout_seconds == 30  # built-in default
+    assert cfg.probe_timeout_seconds == 120  # built-in default
+
+
+def test_missing_fallback_section_disables_rotation(tmp_path):
+    """R4: absent or empty [[fallback]] => the feature is INACTIVE (v4 behaviour).
+
+    NOT a fall-through to the built-in list: a hand-written v5 config that omits
+    [[fallback]] omitted it on purpose; silently rotating anyway would be MAGI
+    substituting a judge the operator never declared.
+    """
+    cfg = resolve_config(repo_path=_write_toml(tmp_path, NEW_TOML), global_path=None, env={})
+    assert cfg.fallback == ()  # empty => no rotation, whatever max_rotations says
+
+
+def test_ollama_init_template_ships_the_default_fallback_list(tmp_path):
+    """The built-in list reaches the user through the TEMPLATE (decision #65).
+
+    DEVIATION from plan line 726: the plan hardcoded the PRE-swap lineages
+    ["deepseek", ...]; after the deepseek->Caspar swap, deepseek is a TRIO lineage
+    and cannot be a fallback (R11.4 dead entry). The authoritative DEFAULT_FALLBACK
+    and spec §10 ship glm-5.2 (zhipu) as #1. Corrected to match.
+    """
+    from ollama_init import render_template
+
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(render_template(), encoding="utf-8")
+    cfg = resolve_config(repo_path=str(path), global_path=None, env={})
+    assert [f.lineage for f in cfg.fallback] == [
+        "zhipu",
+        "openai",
+        "minimax",
+        "nvidia",
+        "google",
+    ]
+
+
+@pytest.mark.parametrize(
+    "key,bad",
+    [
+        ("max_attempts_per_model", "0"),
+        ("max_rotations", "-1"),
+        ("max_probe_attempts", "0"),
+        ("input_margin_pct", "-5"),
+    ],
+)
+def test_invalid_scalar_raises_never_silently_defaults(tmp_path, key, bad):
+    # Prepend (not append): the scalar must be top-level, i.e. BEFORE [models].
+    toml = f"{key} = {bad}\n" + NEW_TOML
+    with pytest.raises(OllamaConfigError):
+        resolve_config(repo_path=_write_toml(tmp_path, toml), global_path=None, env={})
+
+
+@pytest.mark.parametrize("bad", ["2.7", "true", '"three"'])
+def test_non_integer_scalars_are_rejected_never_coerced(tmp_path, bad):
+    # int(2.7) == 2 and isinstance(True, int) is True: both would SILENTLY
+    # accept a config the user got wrong. Prepend so the scalar is top-level.
+    toml = f"max_rotations = {bad}\n" + NEW_TOML
+    with pytest.raises(OllamaConfigError):
+        resolve_config(repo_path=_write_toml(tmp_path, toml), global_path=None, env={})
+
+
+def test_env_overrides_file_for_kill_switch(tmp_path):
+    cfg = resolve_config(
+        repo_path=_write_toml(tmp_path, FALLBACK_TOML),
+        global_path=None,
+        env={"MAGI_OLLAMA_MAX_ROTATIONS": "0"},
+    )
+    assert cfg.max_rotations == 0  # kill-switch (R17)
