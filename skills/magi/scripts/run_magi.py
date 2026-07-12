@@ -801,9 +801,12 @@ async def _record_failure(
         exc: The exhausted-attempts failure.
 
     Raises:
-        RuntimeError: When this registration crosses the endpoint-down threshold
+        _EndpointDown: When this registration crosses the endpoint-down threshold
             (>= 2 distinct lineages refusing the connection). Rotating is pointless
-            if what died is the server.
+            if what died is the server. It also SETS ``ctx.endpoint_down`` so the
+            siblings stop before burning their own budgets on the same dead server;
+            a bare ``RuntimeError`` would be captured by ``gather`` and the abort
+            would never fire (R15 -- Caspar, Checkpoint 2: the fast-fail was mute).
     """
     if exc.kind == _FAIL_SCHEMA:
         state.failed_lineages.add(spec.lineage)
@@ -812,7 +815,8 @@ async def _record_failure(
         spec.lineage, connection=(exc.kind == _FAIL_CONNECTION)
     )
     if endpoint_down:
-        raise RuntimeError(
+        ctx.endpoint_down.set()  # tell the siblings to stop, NOW
+        raise _EndpointDown(
             f"endpoint down: {ENDPOINT_DOWN_LINEAGE_THRESHOLD} distinct lineages "
             f"refused the connection ({exc.detail}). Rotating cannot help when the "
             f"server itself is unreachable."
@@ -1312,6 +1316,13 @@ async def run_orchestrator(
         finally:
             if display is not None:
                 await display.stop()
+
+    # Fast-fail (R15) must WIN over degraded-mode: if the endpoint is dead, two
+    # "surviving" mages are two mages that never ran. ``gather(return_exceptions=True)``
+    # captured the _EndpointDown as a result, so re-raise it here, before synthesis.
+    for result in results:
+        if isinstance(result, _EndpointDown):
+            raise result
 
     for name, result in zip(tasks.keys(), results):
         if isinstance(result, BaseException):
