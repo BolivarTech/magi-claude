@@ -381,8 +381,16 @@ make typecheck   # mypy
 ### Dev Dependencies
 
 ```bash
-pip install pytest pytest-asyncio ruff mypy
+uv sync          # installs the toolchain pinned in uv.lock
+make verify      # lockcheck + tests + ruff check + ruff format --check + mypy
 ```
+
+**`uv` is required for every `make` target** (each one runs through `uv run`). That is
+deliberate: with a bare `pip install`, the toolchain you get depends on which venv is
+active, and two unpinned toolchains gave *opposite verdicts on the same code* — `mypy`
+1.x reports a `no-any-return` that 2.x does not. A gate that answers differently
+depending on which shell you are in is not a gate. `uv sync` also brings in `hypothesis`,
+which the property-based tests need.
 
 ---
 
