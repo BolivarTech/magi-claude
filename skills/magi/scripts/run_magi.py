@@ -40,8 +40,16 @@ _SCRIPT_DIR = str(Path(__file__).parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from model_context import MAX_ERROR_CHARS, ProbeTokensFn, make_probe  # noqa: E402
+from model_context import (  # noqa: E402
+    MAX_ERROR_CHARS,
+    ProbeTokensFn,
+    compute_required_tokens,
+    make_probe,
+)
 from fallback_policy import (  # noqa: E402
+    ENDPOINT_DOWN_LINEAGE_THRESHOLD,
+    REJECT_TOO_SMALL,
+    REJECT_UNMEASURABLE,
     AgentRotationState,
     LineageRegistry,
     RotationPolicy,
@@ -77,7 +85,7 @@ from temp_dirs import (  # noqa: E402
 )
 from review_context import enrich_code_review_context, resolve_diff  # noqa: E402
 from cost import aggregate_cost  # noqa: E402
-from input_size import WARN_INPUT_TOKENS, check_input_size  # noqa: E402
+from input_size import WARN_INPUT_TOKENS, check_input_size, estimate_tokens  # noqa: E402
 from finding_validation import parse_diff_ranges, validate_findings  # noqa: E402
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
 
@@ -688,18 +696,89 @@ async def _attempt_model(
     ) from last
 
 
-async def _rotate(
-    name: str, state: AgentRotationState, ctx: RotationContext, prompt: str
-) -> ModelSpec | None:
-    """LOUD stub: RAISES so a forgotten Task 10 fails in the open, not silently.
+# R13's telemetry enum for fallback_reason.kind -- the ONLY values that may reach the
+# report (NR6b: no magic strings). The internal connection/http split from _classify (T9)
+# normalizes here: both are "transport". Keeping the split out of telemetry is the point of
+# Balthasar's Checkpoint-2 finding -- R13 restricts kind to three values.
+_KIND_TRANSPORT = "transport"
+_KIND_SCHEMA = "schema"
+_KIND_TIMEOUT = "timeout"
+_KIND_NO_FITTING_CANDIDATE = "no_fitting_candidate"  # the mage DIED: not a live-rotation kind
 
-    A ``return None`` here would make an executor who ships T9 and forgets T10 look
-    fine -- rotation would just always report "no candidate" and every run would
-    silently degrade. Raising turns that oversight into an immediate, obvious
-    failure. Real propose-verify-commit lands in Task 10.
+#: internal _FAIL_* label (T9) -> R13 telemetry enum value.
+_KIND_BY_FAIL = {
+    _FAIL_CONNECTION: _KIND_TRANSPORT,
+    _FAIL_HTTP: _KIND_TRANSPORT,
+    _FAIL_SCHEMA: _KIND_SCHEMA,
+    _FAIL_TIMEOUT: _KIND_TIMEOUT,
+}
+
+
+def _reason(
+    old: ModelSpec,
+    new: ModelSpec | None,
+    exc: _AttemptsExhausted,
+    state: AgentRotationState,
+) -> dict[str, Any]:
+    """Build R13's STRUCTURED fallback_reason -- queryable, not greppable.
+
+    Answers the question that makes anyone open the telemetry: *which model is failing,
+    and why?* A prose string cannot answer it at scale.
+
+    Args:
+        old: The model that failed.
+        new: The model rotated to, or None when the mage died with no candidate.
+        exc: The exhausted-attempts failure.
+        state: The mage's rotation state (for the rotation count).
+
+    Returns:
+        The structured reason dict written verbatim into the report. ``kind`` is
+        normalized to R13's telemetry enum ({transport, schema, timeout}) when the mage
+        rotated -- the internal connection/http distinction NEVER leaks -- and is
+        ``no_fitting_candidate`` when the mage died with no candidate.
     """
-    raise NotImplementedError(
-        "real impl lands in Task 10 (propose-verify-commit / failure routing)"
+    kind = (
+        _KIND_BY_FAIL.get(exc.kind, exc.kind)  # normalize connection/http -> transport
+        if new is not None
+        else _KIND_NO_FITTING_CANDIDATE
+    )
+    return {
+        "kind": kind,
+        "from_model": old.model,
+        "from_lineage": old.lineage,
+        "to_model": new.model if new is not None else None,
+        "to_lineage": new.lineage if new is not None else None,
+        "detail": exc.detail,  # already redacted at construction
+        "http_status": exc.http_status,
+        "attempts": exc.attempts,
+        "rotations_done": state.rotations_done,
+    }
+
+
+def _announce_rotation(
+    name: str,
+    old: ModelSpec,
+    new: ModelSpec,
+    exc: _AttemptsExhausted,
+    ctx: RotationContext,
+) -> None:
+    """Say out loud that a mage changed model, and WHY. Never silent (R9).
+
+    A silent fallback is the one failure mode this feature must not have: whoever reads
+    the verdict has to know that the mage was not the judge they configured.
+
+    Args:
+        name: The rotating mage.
+        old: The model that failed.
+        new: The model it rotates to.
+        exc: The exhausted-attempts failure (kind + ALREADY-redacted detail).
+        ctx: Rotation context (for the attempt count).
+    """
+    print(
+        f"[!] {name}: {old.model} failed "
+        f"{ctx.config.max_attempts_per_model}x ({exc.kind}: {exc.detail}) "
+        f"-> rotating to {new.model} ({new.lineage})",
+        file=sys.stderr,
     )
 
 
@@ -709,14 +788,125 @@ async def _record_failure(
     spec: ModelSpec,
     exc: _AttemptsExhausted,
 ) -> None:
-    """LOUD stub: RAISES so a forgotten Task 10 fails in the open, not silently.
+    """Route a spent model's failure to the right scope, by its NATURE.
 
-    Real per-scope routing (schema local / transport run-wide) + the fast-fail land
-    in Task 10 / Task 11.
+    Schema failures stay LOCAL: the model answered -- it just could not satisfy THIS
+    mage's contract, and may serve another mage. Transport failures go RUN-WIDE: the
+    model is down for everyone, so no other mage should burn attempts against it.
+
+    Args:
+        state: The mage's rotation state (schema failures accumulate here).
+        ctx: Registry + config.
+        spec: The model that exhausted its attempts.
+        exc: The exhausted-attempts failure.
+
+    Raises:
+        RuntimeError: When this registration crosses the endpoint-down threshold
+            (>= 2 distinct lineages refusing the connection). Rotating is pointless
+            if what died is the server.
     """
-    raise NotImplementedError(
-        "real impl lands in Task 10 (propose-verify-commit / failure routing)"
+    if exc.kind == _FAIL_SCHEMA:
+        state.failed_lineages.add(spec.lineage)
+        return
+    endpoint_down = await ctx.registry.register_transport_failure(
+        spec.lineage, connection=(exc.kind == _FAIL_CONNECTION)
     )
+    if endpoint_down:
+        raise RuntimeError(
+            f"endpoint down: {ENDPOINT_DOWN_LINEAGE_THRESHOLD} distinct lineages "
+            f"refused the connection ({exc.detail}). Rotating cannot help when the "
+            f"server itself is unreachable."
+        )
+
+
+async def _rotate(
+    name: str,
+    state: AgentRotationState,
+    ctx: RotationContext,
+    prompt: str,
+) -> ModelSpec | None:
+    """Propose a candidate under the lock, VERIFY it with a probe outside it, commit.
+
+    The probe is what makes the guard real: the cached window says a model *should* fit,
+    but only the model's own tokenizer knows whether the payload actually does (chars/4
+    underestimates by 15-20%). A candidate that would truncate is rejected and the next
+    proposed -- never run "and hope", because a truncated verdict is indistinguishable
+    from a legitimate one.
+
+    I/O NEVER happens inside the registry lock: claim_next returns, the lock is released,
+    and only then do we probe. Holding the lock across a network call would serialize the
+    three mages and be a deadlock waiting for a future second lock.
+
+    Args:
+        name: The rotating mage.
+        state: Its local rotation state (mutated: window_rejected).
+        ctx: Registry + policy + runtime config + probe.
+        prompt: The exact payload the agent will receive (what we measure).
+
+    Returns:
+        The committed ModelSpec, or None if no candidate fits within
+        ``max_probe_attempts`` -- in which case the mage dies and the run degrades.
+
+    Raises:
+        _EndpointDown: Another agent already proved the endpoint dead.
+    """
+    for _ in range(ctx.config.max_probe_attempts):
+        if ctx.endpoint_down.is_set():
+            raise _EndpointDown("endpoint down (detected by another agent)")
+        candidate = await ctx.registry.claim_next(name, ctx.policy, state)
+        if candidate is None:
+            return None  # nothing eligible left
+
+        try:
+            exact = await ctx.probe(candidate.model, prompt, ctx.config.probe_timeout_seconds)
+        except Exception as exc:  # noqa: BLE001 -- a probe is never fatal (R18)
+            # An injected or future probe that raises must not kill a mage over a
+            # measurement (R18). Treat as unmeasurable.
+            print(
+                f"WARNING: probe raised for {candidate.model} "
+                f"({redact_secrets(str(exc), ctx.config.api_key)}); treating as unmeasurable",
+                file=sys.stderr,
+            )
+            exact = None
+        window = ctx.policy.window_of(candidate.model)
+
+        # THREE epistemic states, never collapsed. Folding "unknown" into a number makes
+        # every unknown-window candidate look infinitely too small, so on any endpoint
+        # without window data NOTHING is eligible and every mage dies -- the guard becomes
+        # the outage.
+        if ctx.config.strict_context_guard and (exact is None or window is None):
+            state.window_rejected[candidate.model] = REJECT_UNMEASURABLE
+            continue
+
+        if window is None:
+            # Nothing to compare against: no check is possible. Non-strict => accept,
+            # loudly (guard="estimated").
+            return candidate
+
+        # The window IS known. Even without an exact count we check against the ESTIMATE,
+        # and reject if it does not fit even then (decision #96: degrading ACCURACY must
+        # not degrade PRUDENCE -- accepting blindly re-opens silent truncation, the very
+        # failure R5b exists to prevent).
+        measured = exact is not None
+        # Narrow on ``exact`` directly (not via ``measured``): mypy does not track that
+        # ``measured`` implies ``exact is not None``, so ``exact if measured else ...``
+        # would leave payload typed ``int | None``.
+        payload = exact if exact is not None else estimate_tokens(prompt)
+        required = compute_required_tokens(
+            payload,
+            output_headroom_tokens=ctx.config.output_headroom_tokens,
+            input_margin_pct=ctx.config.input_margin_pct,
+            exact=measured,  # unmeasured => apply the margin
+        )
+        if required > window:
+            state.window_rejected[candidate.model] = (
+                REJECT_TOO_SMALL if measured else REJECT_UNMEASURABLE
+            )
+            continue
+
+        return candidate  # fits: proven, or estimated + margin
+
+    return None  # probe budget spent
 
 
 def _load_input_content(input_arg: str) -> tuple[str, str]:
@@ -941,6 +1131,10 @@ async def run_orchestrator(
     # cohorts: ``retried - failed`` is "retry recovered",
     # ``retried & failed`` is "retry also failed".
     retried: set[str] = set()
+    # Rotation telemetry (T10): agent -> its final AgentRotationState. Registered
+    # up-front in the rotation path so even a mage that DIES appears, giving Task 13 a
+    # defined source for model_configured / model_used / fallback_reason.
+    rotation_telemetry: dict[str, AgentRotationState] = {}
 
     # Fresh log gate per run so the first display failure is always
     # surfaced, even in hosts that reuse the module across orchestrator
@@ -1043,6 +1237,7 @@ async def run_orchestrator(
         """
         spec = agent_models[name]
         state = AgentRotationState(model_configured=spec, model_used=spec, used={spec.model})
+        rotation_telemetry[name] = state  # up-front: even a mage that DIES must appear
         env = LaunchEnv(agents_dir, output_dir, timeout, backend, ctx.config.api_key)
 
         def on_retry() -> None:
@@ -1056,36 +1251,36 @@ async def run_orchestrator(
                 try:
                     result = await _attempt_model(name, spec, ctx, env, prompt, on_retry)
                 except _AttemptsExhausted as exc:
-                    # The model spent its whole budget. Route the failure by scope
-                    # (T10/T11) and ask the policy for the next model (T10). Both are
-                    # LOUD stubs until T10, so a mage that exhausts its budget here
-                    # fails obviously rather than silently degrading.
-                    await _record_failure(state, ctx, spec, exc)
+                    # The model spent its budget. Route the failure by scope (schema
+                    # local / transport run-wide) then propose the next model.
+                    await _record_failure(state, ctx, spec, exc)  # may raise (endpoint down)
+                    _safe_display_update(display, name, "rotating", log_gate)
                     next_spec = await _rotate(name, state, ctx, prompt)
                     if next_spec is None:
+                        state.fallback_reason = _reason(spec, None, exc, state)
                         _safe_display_update(display, name, "failed", log_gate)
-                        raise RuntimeError(
-                            f"Agent '{name}' exhausted its models with no eligible "
-                            f"fallback ({exc.detail})"
-                        ) from exc
-                    _safe_display_update(display, name, "rotating", log_gate)
+                        raise  # mage dies with no candidate -> degraded mode (R7)
+                    _announce_rotation(name, spec, next_spec, exc, ctx)  # R9: never silent
+                    state.fallback_reason = _reason(spec, next_spec, exc, state)
                     spec = next_spec
+                    state.rotations_done += 1
+                    state.used.add(spec.model)
+                    state.model_used = spec  # what the verdict is ACTUALLY judged with
                     continue
                 except _EndpointDown:
                     # A sibling proved the endpoint dead; rotating cannot help. (A raw
-                    # TimeoutError never reaches here -- _attempt_model classifies it
-                    # and folds it into _AttemptsExhausted, so there is no separate
-                    # "timeout" terminal on the rotation path.)
+                    # TimeoutError never reaches here -- _attempt_model classifies it and
+                    # folds it into _AttemptsExhausted, so there is no separate "timeout"
+                    # terminal on the rotation path.)
                     _safe_display_update(display, name, "failed", log_gate)
                     raise
                 except BaseException:
                     _safe_display_update(display, name, "failed", log_gate)
                     raise
-                # A valid verdict exists NOW. Commit the lineage BEFORE any teardown
-                # (the display update) that could throw -- a late failure must not be
-                # able to de-emit this verdict or free its lineage (spec 6.3.1).
+                # A valid verdict EXISTS. Commit the lineage FIRST (succeeded=True), before
+                # any teardown -- from here agent_slot keys on `succeeded`, so the lineage
+                # is conserved no matter what teardown does (spec 6.2.1).
                 slot.succeeded = True
-                state.model_used = spec
                 _safe_display_update(display, name, "success", log_gate)
                 return result
 
