@@ -228,6 +228,22 @@ class LineageRegistry:
         """
         return set(self._run_failed)
 
+    def _in_play_excluding(self, exclude: str | None) -> set[str]:
+        """Lineages held by agents other than *exclude*. Caller MUST hold the lock.
+
+        Deliberately NON-async and non-locking: it reads shared state, so it is
+        only correct inside an ``async with self._lock`` block. Re-acquiring the
+        (non-reentrant) lock here would deadlock -- hence a plain helper the two
+        lock-holding callers share (DRY), not a public coroutine.
+
+        Args:
+            exclude: Agent name to omit, or None to include all.
+
+        Returns:
+            The distinct lineages currently reserved by every other agent.
+        """
+        return {spec.lineage for name, spec in self._active.items() if name != exclude}
+
     async def lineages_in_play(self, exclude: str | None) -> set[str]:
         """Return the set of lineages currently held by live mages.
 
@@ -238,7 +254,7 @@ class LineageRegistry:
             The distinct lineages reserved by every agent other than ``exclude``.
         """
         async with self._lock:
-            return {spec.lineage for name, spec in self._active.items() if name != exclude}
+            return self._in_play_excluding(exclude)
 
     async def register_transport_failure(self, lineage: str, *, connection: bool) -> bool:
         """Condemn *lineage* run-wide (R5a) and decide the endpoint-down fast-fail.
@@ -307,7 +323,7 @@ class LineageRegistry:
               current lineage is the caller's job, via ``agent_slot``'s finally.
         """
         async with self._lock:
-            in_play = {spec.lineage for name, spec in self._active.items() if name != agent}
+            in_play = self._in_play_excluding(agent)
             chosen = policy.next_model(
                 agent=agent,
                 failed_lineages=state.failed_lineages,
