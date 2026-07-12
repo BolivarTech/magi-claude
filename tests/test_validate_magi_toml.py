@@ -17,7 +17,9 @@ perspectives. So the validator reports and never rewrites.
 import pytest
 
 import validate_magi_toml
+from ollama_config import resolve_config
 from ollama_init import render_template
+from ollama_preflight import OllamaPreflightError, check_config_offline
 
 
 def test_validator_accepts_a_v5_config(tmp_path, monkeypatch):
@@ -62,6 +64,40 @@ def test_validator_rejects_a_trio_that_shares_a_lineage(tmp_path, monkeypatch, c
 
     assert validate_magi_toml.main() == 1
     assert "lineage" in capsys.readouterr().err
+
+
+def test_validator_rejects_every_config_the_preflight_rejects(tmp_path, monkeypatch):
+    """A pre-run check that green-lights what the product refuses to run is worthless.
+
+    Two ``[[fallback]]`` entries of one lineage are fail-closed at preflight (R11.3:
+    only the first is ever reachable, so the second is a config error attacking the
+    central invariant). The validator used to re-derive ONE of preflight's checks by
+    hand and therefore said OK to exactly that config. Both now go through
+    ``check_config_offline``, so they cannot drift apart again.
+    """
+    dup_fallback = (
+        'base_url = "http://localhost:11434/v1"\n'
+        "[models]\n"
+        'melchior  = { model = "qwen3.5:397b-cloud", lineage = "alibaba" }\n'
+        'balthasar = { model = "kimi-k2.6:cloud", lineage = "moonshot" }\n'
+        'caspar    = { model = "deepseek-v4-pro:cloud", lineage = "deepseek" }\n'
+        "[[fallback]]\n"
+        'model = "glm-5.2:cloud"\n'
+        'lineage = "zhipu"\n'
+        "[[fallback]]\n"
+        'model = "glm-5:cloud"\n'
+        'lineage = "zhipu"\n'
+    )
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(dup_fallback, encoding="utf-8")
+
+    # The product's own verdict on this config, as the guard the validator must mirror.
+    config = resolve_config(repo_path=str(path), global_path="", env={})
+    with pytest.raises(OllamaPreflightError):
+        check_config_offline(config)
+
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+    assert validate_magi_toml.main() == 1
 
 
 def test_validator_ignores_the_users_global_config(tmp_path, monkeypatch):
