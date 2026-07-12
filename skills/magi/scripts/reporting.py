@@ -220,7 +220,13 @@ def _format_finding_line(finding: dict[str, Any]) -> str:
     )
 
 
-def format_report(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> str:
+def format_report(
+    agents: list[dict[str, Any]],
+    consensus: dict[str, Any],
+    *,
+    context_guard: str | None = None,
+    lineage_warnings: list[str] | None = None,
+) -> str:
     """Generate the full human-readable report.
 
     The report enforces the canonical MAGI output format:
@@ -237,11 +243,21 @@ def format_report(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> st
     Args:
         agents: List of validated agent output dictionaries.
         consensus: Consensus dictionary produced by ``determine_consensus``.
+        context_guard: The run's ``context_guard`` ("enforced"|"estimated"), forwarded
+            to the banner so an ESTIMATED guard renders where the reader looks (R16).
+            ``None`` (the Claude path / pre-v5 callers) renders the classic box.
+        lineage_warnings: Declared-lineage warnings (R21), forwarded to the banner
+            (decision #102: a guard that warns where nobody looks is decorative).
 
     Returns:
         Multi-line markdown string.
     """
-    sections: list[str] = [format_banner({"agents": agents, "consensus": consensus}), ""]
+    banner_report: dict[str, Any] = {"agents": agents, "consensus": consensus}
+    if context_guard is not None:
+        banner_report["context_guard"] = context_guard
+    if lineage_warnings:
+        banner_report["lineage_warnings"] = lineage_warnings
+    sections: list[str] = [format_banner(banner_report), ""]
 
     if consensus["findings"]:
         sections.append("## Key Findings")

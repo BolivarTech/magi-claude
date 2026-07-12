@@ -115,7 +115,24 @@ def _read_window(payload: Mapping[str, Any]) -> int | None:
 
     Returns:
         Positive integer context window, or ``None`` if not present/valid.
+
+    Note:
+        Real Ollama ``/api/show`` nests the window under ``model_info`` with an
+        ARCHITECTURE-PREFIXED key (e.g. ``model_info["qwen3.5.context_length"]``)
+        -- there is no top-level ``context_length``. Reading only the top level
+        left the window unknown on the DEFAULT Ollama path, which silently
+        disabled the R5b guard (context-guard review, 2026-07-12). So check
+        ``model_info`` FIRST, then fall back to a top-level key.
     """
+    info = payload.get("model_info")
+    if isinstance(info, Mapping):
+        for key, value in info.items():
+            if not (key == "context_length" or key.endswith(".context_length")):
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            if value > 0:
+                return value
     for key in _WINDOW_KEYS:
         value = payload.get(key)
         if isinstance(value, bool) or not isinstance(value, int):

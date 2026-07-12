@@ -341,7 +341,16 @@ async def preflight(config: OllamaConfig, prompt: str) -> PreflightResult:
             exact=exact,
         )
 
-    if len(measured) == len(config.models):  # every trio model measured
+    # ENFORCED requires BOTH: the payload was measured AND every window is known.
+    # Payload-measurability alone is NOT enough -- invariant #3 ("no mage runs a model
+    # whose payload would not fit its window") cannot be PROVEN when the window is
+    # unknown, so labelling that run "enforced" lies about protection, and worse,
+    # ``strict_context_guard`` would fail OPEN (the too_small check below skips unknown
+    # windows). Context-guard review, 2026-07-12.
+    payload_measured = len(measured) == len(config.models)
+    windows_known = all(caps[spec.model].window is not None for spec in config.models.values())
+
+    if payload_measured and windows_known:
         guard = CONTEXT_GUARD_ENFORCED
         # R5c is PER MODEL: each trio model against ITS OWN exact count, never a
         # global max -- a model that tokenises efficiently must not be aborted over
@@ -352,21 +361,34 @@ async def preflight(config: OllamaConfig, prompt: str) -> PreflightResult:
         }
         payload, exact_flag = max(measured.values()), True
     else:
-        if config.strict_context_guard:  # R18: strict is strict
+        reason = (
+            "the payload could not be measured for every trio model"
+            if not payload_measured
+            else "the context window is unknown for some trio model (no /api/show data)"
+        )
+        if config.strict_context_guard:  # R18: strict is strict -- cannot prove the fit
             raise OllamaPreflightError(
-                "could not measure the payload for every trio model and "
+                f"cannot enforce the context guard: {reason}, and "
                 "strict_context_guard is enabled."
             )
         print(
-            "WARNING: the payload could not be measured for every trio model; falling back "
-            "to the estimator. NOTE: on an endpoint without /api/show there is NO truncation "
-            "protection at all.",
+            f"WARNING: {reason}; falling back to the estimator. NOTE: without measured "
+            "payloads AND known windows there is NO reliable truncation protection.",
             file=sys.stderr,
         )
         guard = CONTEXT_GUARD_ESTIMATED
-        est = _required(estimate, exact=False)
-        needs = {spec.model: est for spec in config.models.values()}
-        payload, exact_flag = estimate, False
+        # Use each model's EXACT count where it was measured (decision #96: degrading
+        # accuracy must not degrade prudence), the estimate only where it was not.
+        needs = {
+            spec.model: (
+                _required(measured[spec.model], exact=True)
+                if spec.model in measured
+                else _required(estimate, exact=False)
+            )
+            for spec in config.models.values()
+        }
+        payload = max(measured.values()) if payload_measured else estimate
+        exact_flag = payload_measured
 
     # 5. A trio model that cannot hold ITS OWN payload count does not run at all (R5b/R5c).
     too_small = [

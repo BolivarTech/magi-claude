@@ -2521,18 +2521,8 @@ def test_format_report_forwards_context_guard_and_warnings_to_the_banner():
     actually looks at (decision #102: a guard that warns where nobody looks is decorative)."""
     from reporting import format_report
 
-    agents = [
-        {
-            "agent": "melchior",
-            "verdict": "approve",
-            "confidence": 0.9,
-            "summary": "s",
-            "reasoning": "r",
-            "findings": [],
-            "recommendation": "ok",
-        }
-    ]
-    consensus = {"consensus": "GO", "findings": []}
+    agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+    consensus = determine_consensus(agents)
     out = format_report(
         agents,
         consensus,

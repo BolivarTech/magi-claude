@@ -1788,7 +1788,14 @@ def main() -> None:
     if len(report["agents"]) >= 2:
         report["consensus"] = determine_consensus(report["agents"])
 
-    print(format_report(report["agents"], report["consensus"]))
+    print(
+        format_report(
+            report["agents"],
+            report["consensus"],
+            context_guard=report.get("context_guard"),
+            lineage_warnings=report.get("lineage_warnings"),
+        )
+    )
 
     # A1: aggregate per-run cost into the report BEFORE it is serialized so the
     # saved magi-report.json carries the ``cost`` block. Aggregate over all
