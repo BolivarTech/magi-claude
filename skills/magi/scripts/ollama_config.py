@@ -353,6 +353,12 @@ def _require_bool(value: Any, *, key: str, path: str) -> bool:
     """
     if isinstance(value, bool):
         return value
+    # A TOML integer literal ``key = 1`` / ``key = 0`` is an int, not a bool or str, so
+    # it fell through to the raise -- while the error message lists "1/0" as accepted, so
+    # a migrating user who followed the message still failed (MAGI gate, Balthasar). Accept
+    # the two unambiguous integers; anything else (2, -1, ...) still fails closed.
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
     if isinstance(value, str):
         text = value.strip().lower()
         if text in _TRUE:

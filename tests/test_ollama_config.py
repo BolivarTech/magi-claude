@@ -334,3 +334,15 @@ def test_require_float_rejects_non_finite_values():
     for bad in ("inf", "-inf", "nan"):
         with pytest.raises(OllamaConfigError):
             _require_float(bad, key="retry_backoff_seconds", minimum=0.0, path="t.toml")
+
+
+def test_require_bool_accepts_integer_1_and_0_but_not_other_ints():
+    """MAGI gate (Balthasar): the error text promises '1/0', so a TOML integer literal
+    (strict_context_guard = 1) must be accepted; other integers still fail closed."""
+    from ollama_config import OllamaConfigError, _require_bool
+
+    assert _require_bool(1, key="strict_context_guard", path="t.toml") is True
+    assert _require_bool(0, key="strict_context_guard", path="t.toml") is False
+    for bad in (2, -1, 42):
+        with pytest.raises(OllamaConfigError):
+            _require_bool(bad, key="strict_context_guard", path="t.toml")

@@ -68,7 +68,11 @@ from synthesize import (  # noqa: E402
 )
 from backend import AgentBackend  # noqa: E402
 from claude_backend import ClaudeBackend  # noqa: E402
-from ollama_backend import OllamaBackend  # noqa: E402
+from ollama_backend import (  # noqa: E402
+    TRANSPORT_CONNECTION_MARKERS,
+    TRANSPORT_HTTP_PATTERN,
+    OllamaBackend,
+)
 from ollama_config import ModelSpec, OllamaConfig, OllamaConfigError, resolve_config  # noqa: E402
 from ollama_init import write_template  # noqa: E402
 from ollama_preflight import (  # noqa: E402
@@ -398,13 +402,12 @@ _FAIL_CONNECTION = "connection"
 _FAIL_TIMEOUT = "timeout"
 _FAIL_UNEXPECTED = "unexpected"
 
-#: Signatures of the transport RuntimeErrors ``ollama_backend._call`` raises. A
-#: RuntimeError has no type to inspect, so its SCOPE is read from the message.
-#: ``HTTP <digit>`` -- NOT bare "HTTP", which also matches "no HTTP status" in a
-#: coding-bug message -- plus the chat-time 404. These MUST stay coupled to the
-#: backend's templates -- pinned by test_classify_matches_the_real_ollama_backend_messages.
-_HTTP_MESSAGE_RE = re.compile(r"HTTP \d|at chat-time")
-_CONNECTION_MESSAGE_MARKERS = ("Cannot reach Ollama",)
+#: The transport-message contract is OWNED by ``ollama_backend`` (the module that raises
+#: the messages); ``_classify`` imports the marker constants from there rather than
+#: duplicating the strings, so the two cannot drift (MAGI gate, Balthasar -- single source
+#: of truth). ``test_classify_matches_the_real_ollama_backend_messages`` pins the coupling.
+_HTTP_MESSAGE_RE = re.compile(TRANSPORT_HTTP_PATTERN)
+_CONNECTION_MESSAGE_MARKERS = TRANSPORT_CONNECTION_MARKERS
 
 
 def _classify(exc: BaseException) -> str:
