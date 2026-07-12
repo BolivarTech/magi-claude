@@ -15,12 +15,21 @@ from unittest.mock import patch
 
 import pytest
 
+from ollama_config import ModelSpec
+from rotation_harness import _rotation, _run, _valid
 from validate import ValidationError
 
 
 async def _preflight_ok(config, prompt=""):
-    """Async no-op preflight for tests that patch out the network guard (T8)."""
-    return None
+    """Async PreflightResult stand-in for tests that patch out the network guard.
+
+    T9: ``select_backend`` now reads ``result.fallback`` / ``.min_window_tokens`` /
+    ``.capabilities``, so a bare ``None`` no longer satisfies it. Return a minimal
+    real ``PreflightResult`` (the trio's lineages are distinct, windows big enough).
+    """
+    from rotation_harness import _preflight_result
+
+    return _preflight_result()
 
 
 class TestParseArgs:
@@ -5100,3 +5109,195 @@ def test_classify_matches_the_real_ollama_backend_messages():
     assert _classify(chat_time_404) == _FAIL_HTTP
     assert _classify(unreachable) == _FAIL_CONNECTION
     assert _classify(timed_out) == _FAIL_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# Task 9: two-level attempt loop (R1/R2/R12) -- attempts, retry scope, backoff
+# ---------------------------------------------------------------------------
+
+
+class TestAttemptsPerModel:
+    """R1/R2/R12: attempts, retry scope and backoff for ONE active model."""
+
+    @pytest.mark.asyncio
+    async def test_transport_failure_is_now_retried(self, tmp_path):
+        """v4 never retried transport -- a 503 killed the mage. R2 changes that."""
+        calls = {"caspar": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            calls["caspar"] += 1
+            if calls["caspar"] == 1:
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert calls["caspar"] == 2, "a transport failure must be retried, not fatal"
+        assert result.get("degraded") is not True
+        assert len(result["agents"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_timeout_on_first_attempt_is_retried_not_terminal(self, tmp_path):
+        """BDD-20 (integration): a timeout was TERMINAL in v4. R2 makes it a failed
+        ATTEMPT, so the SAME model gets its retry."""
+        calls = {"melchior": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "melchior":
+                return _valid(agent_name)
+            calls["melchior"] += 1
+            if calls["melchior"] == 1:
+                raise TimeoutError("Ollama request timed out")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert calls["melchior"] == 2, (
+            "a timeout must be RETRIED on the same model, not terminate the mage -- "
+            "if this is 1, timeouts went terminal again (the v4 regression)"
+        )
+        assert result.get("degraded") is not True
+        assert len(result["agents"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_schema_retry_carries_feedback_but_transport_retry_does_not(self, tmp_path):
+        """BDD-4: the model that ANSWERED needs correction; the one that never
+        answered needs a pause, not a lecture."""
+        prompts = {"caspar": [], "melchior": []}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "balthasar":
+                return _valid(agent_name)
+            prompts[agent_name].append(prompt)
+            if len(prompts[agent_name]) == 1:
+                if agent_name == "caspar":
+                    raise ValidationError("missing keys: ['recommendation']")
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert "---RETRY-FEEDBACK---" in prompts["caspar"][1], "schema retry must correct"
+        assert "recommendation" in prompts["caspar"][1], "it must cite the actual defect"
+        assert "---RETRY-FEEDBACK---" not in prompts["melchior"][1], (
+            "a transport retry must resend the ORIGINAL prompt: the model never "
+            "answered, so there is nothing to correct"
+        )
+
+    @pytest.mark.asyncio
+    async def test_backoff_waits_between_transport_attempts_only(self, tmp_path, monkeypatch):
+        """BDD-35: waiting helps a rate-limited server; it does not help a model
+        that produced malformed JSON -- there, the feedback is the fix."""
+        import run_magi
+
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(run_magi.asyncio, "sleep", fake_sleep)
+
+        calls = {"caspar": 0, "melchior": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "balthasar":
+                return _valid(agent_name)
+            calls[agent_name] += 1
+            if calls[agent_name] == 1:
+                if agent_name == "caspar":
+                    raise RuntimeError("HTTP 429 Too Many Requests")
+                raise ValidationError("bad json")
+            return _valid(agent_name)
+
+        await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert sleeps == [2.0], (
+            "exactly one backoff: the transport retry (caspar). The schema retry "
+            f"(melchior) must not sleep. Got {sleeps}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_launch_agent_receives_a_ModelSpec_not_a_bare_tag(self, tmp_path):
+        """The signature change, pinned (finding by Melchior, Checkpoint 2). The
+        rotation path condemns a LINEAGE on failure, so it must reach the call site."""
+        seen = []
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            seen.append(spec)
+            return _valid(agent_name)
+
+        await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert all(isinstance(s, ModelSpec) for s in seen), f"got {[type(s) for s in seen]}"
+        assert {s.lineage for s in seen} == {"alibaba", "moonshot", "deepseek"}
+
+    @pytest.mark.asyncio
+    async def test_local_model_tags_get_no_special_treatment(self, tmp_path):
+        """BDD-21: a local tag is just a tag. The declared lineage governs the skip;
+        there is NO branch anywhere that asks "is this cloud or local?"."""
+        local_trio = {
+            "melchior": ModelSpec("qwen3:14b", "alibaba"),
+            "balthasar": ModelSpec("gpt-oss:20b", "openai"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
+        }
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            return _valid(agent_name)
+
+        from run_magi import run_orchestrator
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="t",
+                output_dir=str(tmp_path),
+                timeout=300,
+                agent_models=local_trio,
+                rotation=_rotation(),
+                show_status=False,
+            )
+        assert len(result["agents"]) == 3
+        assert result.get("degraded") is not True
+
+    @pytest.mark.asyncio
+    async def test_claude_path_without_rotation_keeps_v4_behaviour(self, tmp_path):
+        """BDD-19: rotation=None => single-shot schema retry, transport still fatal."""
+        calls = {"caspar": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            calls["caspar"] += 1
+            raise RuntimeError("HTTP 503 Service Unavailable")
+
+        from run_magi import run_orchestrator
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="t",
+                output_dir=str(tmp_path),
+                timeout=300,
+                model="opus",
+                show_status=False,
+            )
+
+        assert calls["caspar"] == 1, "v4 contract: transport failures are NOT retried"
+        assert result["degraded"] is True
+        assert len(result["agents"]) == 2
