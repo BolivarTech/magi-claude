@@ -3,10 +3,18 @@
 # Date: 2026-07-11
 """Tests for the pure fallback rotation policy (Task 3, R5/R5a/R6/R24)."""
 
+import asyncio
+
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from fallback_policy import ModelCapability, RotationPolicy
+from fallback_policy import (
+    AgentRotationState,
+    LineageRegistry,
+    ModelCapability,
+    RotationPolicy,
+)
 from ollama_config import ModelSpec
 
 GLM = ModelSpec("glm-5.2:cloud", "zhipu")
@@ -158,3 +166,92 @@ def test_property_none_iff_no_candidate_is_eligible(in_play, failed, condemned):
     )
     eligible = [s for s in SPECS if s.lineage not in (in_play | failed | condemned)]
     assert (got is None) == (not eligible)  # None iff nothing qualifies
+
+
+# ----------------------------------------------------------------------------
+# Task 4: LineageRegistry -- the single lock and the state machine (BDD-23..55).
+# ----------------------------------------------------------------------------
+
+TRIO = {
+    "melchior": ModelSpec("qwen3.5:397b-cloud", "alibaba"),
+    "balthasar": ModelSpec("kimi-k2.6:cloud", "moonshot"),
+    "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
+}
+
+
+async def test_claim_next_reserves_the_new_lineage_and_frees_the_old():
+    reg = LineageRegistry(TRIO)
+    state = AgentRotationState(used={TRIO["caspar"].model})
+    got = await reg.claim_next("caspar", _policy(), state)
+    assert got == GLM
+    assert "deepseek" not in await reg.lineages_in_play(exclude=None)  # old freed
+    assert "zhipu" in await reg.lineages_in_play(exclude=None)  # new reserved
+
+
+async def test_claim_next_returning_none_leaves_the_registry_unchanged():
+    # BDD-34: postcondition of the None branch.
+    reg = LineageRegistry(TRIO)
+    before = await reg.lineages_in_play(exclude=None)
+    state = AgentRotationState(rotations_done=99)
+    assert await reg.claim_next("caspar", _policy(), state) is None
+    assert await reg.lineages_in_play(exclude=None) == before
+
+
+async def test_two_mages_failing_concurrently_never_claim_the_same_lineage():
+    # BDD-23: the TOCTOU the gate found in cycle 1.
+    reg = LineageRegistry(TRIO)
+    policy = _policy()
+    s1, s2 = AgentRotationState(), AgentRotationState()
+    got = await asyncio.gather(
+        reg.claim_next("melchior", policy, s1),
+        reg.claim_next("balthasar", policy, s2),
+    )
+    assert got[0] is not None and got[1] is not None
+    assert got[0].lineage != got[1].lineage
+
+
+async def test_dead_mage_frees_its_lineage():
+    # BDD-24
+    reg = LineageRegistry(TRIO)
+    await reg.release("caspar")
+    assert "deepseek" not in await reg.lineages_in_play(exclude=None)
+
+
+async def test_successful_mage_retains_its_lineage():
+    # BDD-25 / BDD-50: success CONSERVES; only death releases.
+    reg = LineageRegistry(TRIO)
+    state = AgentRotationState()
+    async with reg.agent_slot("caspar", state):
+        state.succeeded = True
+    assert "deepseek" in await reg.lineages_in_play(exclude=None)
+
+
+async def test_late_exception_after_success_does_not_leak_the_lineage():
+    # [CRITICAL] from cycle 17: succeeded is the SOLE determinant of the exit path.
+    reg = LineageRegistry(TRIO)
+    state = AgentRotationState()
+    with pytest.raises(RuntimeError):
+        async with reg.agent_slot("caspar", state):
+            state.succeeded = True  # verdict emitted
+            raise RuntimeError("telemetry blew up AFTER the verdict")
+    assert "deepseek" in await reg.lineages_in_play(exclude=None)  # still in play
+
+
+async def test_exception_before_success_releases_the_lineage():
+    reg = LineageRegistry(TRIO)
+    state = AgentRotationState()
+    with pytest.raises(RuntimeError):
+        async with reg.agent_slot("caspar", state):
+            raise RuntimeError("died before any verdict")
+    assert "deepseek" not in await reg.lineages_in_play(exclude=None)
+
+
+async def test_transport_failure_condemns_the_lineage_run_wide():
+    # BDD-38 / R5a. connection=False here: this checks run-wide condemnation, not
+    # the endpoint-down fast-fail (which is driven by connection-level failures).
+    reg = LineageRegistry(TRIO)
+    await asyncio.gather(
+        reg.register_transport_failure("deepseek", connection=False),
+        reg.register_transport_failure("openai", connection=False),
+    )
+    assert reg.run_failed_lineages == {"deepseek", "openai"}  # no lost update
