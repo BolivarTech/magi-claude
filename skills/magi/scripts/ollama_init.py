@@ -56,7 +56,8 @@ def render_template() -> str:
         "# Each mage declares its lineage explicitly (v5.0.0); it is never inferred.\n"
         + model_lines
         + "\n# Fallback rotation list (R4). max_rotations = 0 (or MAGI_OLLAMA_MAX_ROTATIONS=0)\n"
-        "# disables rotation entirely (kill-switch).\n" + fallback_lines
+        "# disables rotation entirely (kill-switch). Each fallback tag needs\n"
+        "# `ollama pull <tag>` first (manifest only, no weights downloaded).\n" + fallback_lines
     )
 
 
