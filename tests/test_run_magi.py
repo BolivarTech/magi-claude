@@ -4336,6 +4336,53 @@ class TestInputSizeWiring:
 
         return created, buf
 
+    def test_out_flag_redirects_the_report_to_a_file_and_suppresses_stdout(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """-o/--out REDIRECTS the report to a file AND removes it from stdout -- a
+        remote/phone client that cannot capture stdout gets the verdict in the file."""
+        out = tmp_path / "verdict.txt"
+        self._patch_main(tmp_path, monkeypatch, extra_argv=["-o", str(out)])
+        assert "REPORT" in out.read_text(encoding="utf-8"), "the file must hold the report"
+        assert "REPORT" not in capsys.readouterr().out, "with -o the report is off stdout"
+
+    def test_out_flag_write_failure_warns_and_falls_back_to_stdout(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A write failure must NEVER lose the verdict: warn loudly and fall back to
+        stdout. A directory as the -o target makes ``open(..., 'w')`` raise OSError."""
+        _created, buf = self._patch_main(tmp_path, monkeypatch, extra_argv=["-o", str(tmp_path)])
+        assert "REPORT" in capsys.readouterr().out, "on write failure, fall back to stdout"
+        assert "could not write report" in buf.getvalue(), "and warn loudly on stderr"
+
+    def test_out_flag_write_is_atomic_no_partial_file_on_failure(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Atomicity: a failure AFTER the temp file is fully written (here os.replace
+        fails) must leave NO file at the target path -- a truncated verdict on disk is
+        the output-side of the project's worst-case 'indistinguishable from legitimate'
+        failure. The temp is cleaned up; the verdict still falls back to stdout."""
+        import run_magi
+
+        out = tmp_path / "verdict.txt"
+
+        def boom_replace(src, dst):
+            raise OSError("simulated rename failure after a full temp write")
+
+        monkeypatch.setattr(run_magi.os, "replace", boom_replace)
+        _created, buf = self._patch_main(tmp_path, monkeypatch, extra_argv=["-o", str(out)])
+
+        assert not out.exists(), "no partial file may remain at the target on failure"
+        assert not list(tmp_path.glob("verdict.txt*.tmp")), "the temp file must be cleaned up"
+        assert "REPORT" in capsys.readouterr().out, "the verdict falls back to stdout"
+        assert "could not write report" in buf.getvalue(), "and warns loudly"
+
+    def test_no_out_flag_prints_to_stdout_and_writes_no_file(self, tmp_path, monkeypatch, capsys):
+        """Without -o, the report goes to stdout (normal v4 behaviour) and no file is made."""
+        self._patch_main(tmp_path, monkeypatch)
+        assert "REPORT" in capsys.readouterr().out
+        assert not (tmp_path / "verdict.txt").exists()
+
     def test_input_size_block_in_saved_report(self, tmp_path, monkeypatch):
         """Telemetry: magi-report.json on disk carries an input_size block with
         chars and est_tokens fields."""
@@ -6110,3 +6157,49 @@ class TestContextGuardDowngradeOnRotation:
 
         assert result.get("degraded") is not True
         assert result["context_guard"] == "enforced", "glm was exactly measured and fits"
+
+
+def test_parse_args_recognizes_the_out_flag():
+    """-o and --out both map to args.out; absent => None (opt-in)."""
+    from run_magi import parse_args
+
+    assert parse_args(["design", "x", "-o", "r.txt"]).out == "r.txt"
+    assert parse_args(["design", "x", "--out", "r.txt"]).out == "r.txt"
+    assert parse_args(["design", "x"]).out is None
+
+
+def test_write_report_file_writes_utf8_atomically(tmp_path):
+    """_write_report_file writes the text (utf-8) and leaves no temp behind."""
+    from run_magi import _write_report_file
+
+    out = tmp_path / "r.txt"
+    _write_report_file("hello ✓ world", str(out))
+    assert out.read_text(encoding="utf-8") == "hello ✓ world\n"
+    assert not list(tmp_path.glob("r.txt*.tmp")), "no temp file left after success"
+
+
+def test_write_report_file_survives_a_lone_surrogate(tmp_path):
+    """MAGI gate (Balthasar): a lone surrogate (json.loads decodes an escaped unpaired
+    surrogate in a model's output to one) must NOT raise UnicodeEncodeError and crash
+    after the verdict is computed -- the write escapes it instead so it stays total."""
+    from run_magi import _write_report_file
+
+    out = tmp_path / "r.txt"
+    text = "banner " + chr(0xD800) + " tail"  # a LONE surrogate, built at runtime
+    _write_report_file(text, str(out))  # must NOT raise UnicodeEncodeError
+    assert out.exists()
+    assert "tail" in out.read_text(encoding="utf-8"), "the report is written, surrogate escaped"
+
+
+def test_write_report_file_cleans_temp_and_raises_on_failure(tmp_path, monkeypatch):
+    """A failure after the temp is written (os.replace fails) removes the temp, leaves the
+    target untouched, and re-raises OSError for the caller's stdout fallback."""
+    import run_magi
+    from run_magi import _write_report_file
+
+    out = tmp_path / "r.txt"
+    monkeypatch.setattr(run_magi.os, "replace", lambda s, d: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError):
+        _write_report_file("verdict", str(out))
+    assert not out.exists(), "target untouched on failure"
+    assert not list(tmp_path.glob("r.txt*.tmp")), "temp cleaned up on failure"

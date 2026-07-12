@@ -154,6 +154,7 @@ python skills/magi/scripts/run_magi.py <mode> <file_or_text> [--model opus] [--t
 | `--ollama-init` | — | Scaffold `./.claude/magi-ollama.toml` from defaults and exit |
 | `--timeout` | `300` | Per-agent timeout in seconds |
 | `--output-dir` | auto | Directory for agent outputs (default: temp dir) |
+| `-o`, `--out` | — | Redirect the human-readable verdict report to a file (suppressing it on stdout); on a write failure it warns and falls back to stdout so the verdict is never lost |
 
 ---
 

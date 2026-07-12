@@ -146,6 +146,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", help="Directory for agent outputs")
     parser.add_argument(
+        "-o",
+        "--out",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Redirect the human-readable verdict report (the banner + findings) to "
+            "FILE, SUPPRESSING it on stdout -- useful when stdout is not captured "
+            "(e.g. a remote/phone client). The write is atomic; on a write failure it "
+            "warns and falls back to stdout so the verdict is never lost. The "
+            "structured per-agent JSON still goes to --output-dir."
+        ),
+    )
+    parser.add_argument(
         "--model",
         choices=VALID_MODELS,
         default=None,
@@ -1640,6 +1653,42 @@ def _resolve_project_root() -> str:
     return os.path.realpath(os.getcwd())
 
 
+def _write_report_file(report_text: str, out_path: str) -> None:
+    """Atomically write the human-readable *report_text* to *out_path* (for -o/--out).
+
+    Atomic (temp file + ``os.replace``): a failure mid-write never leaves a TRUNCATED
+    report at *out_path* -- a partial verdict there is indistinguishable from a whole
+    one to a file-only consumer (the project's worst-case, on the output side). The
+    temp file carries the PID so two concurrent runs writing the same target never
+    clobber each other's temp (MAGI gate, Balthasar).
+
+    ``errors="backslashreplace"`` is load-bearing: ``report_text`` can contain a LONE
+    SURROGATE (``json.loads`` decodes a ``\\uD800``-style escape in a model's output to
+    one), and a plain utf-8 write would then raise ``UnicodeEncodeError`` -- NOT an
+    ``OSError`` -- crashing the process AFTER the verdict was computed and bypassing the
+    caller's stdout fallback (MAGI gate, Balthasar). Escaping keeps the write total.
+
+    Args:
+        report_text: The rendered report (banner + findings).
+        out_path: The target file path.
+
+    Raises:
+        OSError: On a real filesystem failure. The partial temp is removed first, so
+            *out_path* is left untouched; the caller then falls back to stdout.
+    """
+    tmp = f"{out_path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", errors="backslashreplace") as out_file:
+            out_file.write(report_text + "\n")
+        os.replace(tmp, out_path)
+    except OSError:
+        try:
+            os.unlink(tmp)  # drop any partial temp; the target is untouched
+        except OSError:
+            pass
+        raise
+
+
 def main() -> None:
     """CLI entry point for MAGI orchestrator."""
     # Must run BEFORE any ``print`` or ``sys.exit`` — every output
@@ -1828,14 +1877,27 @@ def main() -> None:
     if len(report["agents"]) >= 2:
         report["consensus"] = determine_consensus(report["agents"])
 
-    print(
-        format_report(
-            report["agents"],
-            report["consensus"],
-            context_guard=report.get("context_guard"),
-            lineage_warnings=report.get("lineage_warnings"),
-        )
+    report_text = format_report(
+        report["agents"],
+        report["consensus"],
+        context_guard=report.get("context_guard"),
+        lineage_warnings=report.get("lineage_warnings"),
     )
+    # -o/--out REDIRECTS the report to a file and SUPPRESSES it on stdout. A write
+    # failure is not allowed to lose the verdict: it warns LOUDLY on stderr and falls
+    # back to printing the report on stdout.
+    if args.out:
+        try:
+            _write_report_file(report_text, args.out)
+        except OSError as exc:
+            print(
+                f"WARNING: could not write report to {args.out} ({exc}); "
+                "printing it to stdout instead so the verdict is not lost",
+                file=sys.stderr,
+            )
+            print(report_text)
+    else:
+        print(report_text)
 
     # A1: aggregate per-run cost into the report BEFORE it is serialized so the
     # saved magi-report.json carries the ``cost`` block. Aggregate over all
