@@ -341,3 +341,25 @@ async def probe_prompt_tokens(
         )
         return None
     return tokens
+
+
+def make_probe(config: OllamaConfig) -> ProbeTokensFn:
+    """Bind *config* into a probe callable the orchestrator can call blind.
+
+    The orchestrator holds a :data:`ProbeTokensFn` -- a ``(model, prompt, timeout)``
+    coroutine -- so it never carries the config or knows how the payload is
+    measured. That keeps :class:`~fallback_policy.RotationPolicy` pure and the
+    rotation path free of the endpoint/auth details.
+
+    Args:
+        config: Resolved config (endpoint, auth, probe timeout).
+
+    Returns:
+        An async ``(model, prompt, timeout) -> int | None`` -- exact prompt
+        tokens, or ``None`` when the payload could not be measured.
+    """
+
+    async def _probe(model: str, prompt: str, timeout: int) -> int | None:
+        return await probe_prompt_tokens(config, model, prompt, timeout=timeout)
+
+    return _probe

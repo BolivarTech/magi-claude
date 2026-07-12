@@ -30,6 +30,15 @@ exclude = ['^scripts/']
 module = "_pytest.*"
 follow_imports = "skip"
 
+# tests/rotation_harness.py is a sibling test-helper module. pytest's prepend
+# import mode puts tests/ on sys.path so ``from rotation_harness import ...``
+# resolves at runtime, but mypy indexes tests as the ``tests.*`` package and
+# adding tests/ to mypy_path would duplicate the two ``conftest`` modules. Treat
+# the bare import as untyped; the module itself is still checked under tests.*.
+[[tool.mypy.overrides]]
+module = "rotation_harness"
+ignore_missing_imports = true
+
 [[tool.mypy.overrides]]
 module = ["tests.*", "conftest"]
 disallow_untyped_defs = false

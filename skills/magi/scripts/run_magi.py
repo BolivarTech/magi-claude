@@ -26,8 +26,9 @@ import shutil
 import subprocess
 import sys
 import urllib.error
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Bootstrap: make sibling modules importable under invocations that do NOT
 # auto-inject this directory into sys.path (e.g. ``python -m
@@ -39,7 +40,13 @@ _SCRIPT_DIR = str(Path(__file__).parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from model_context import MAX_ERROR_CHARS  # noqa: E402
+from model_context import MAX_ERROR_CHARS, ProbeTokensFn, make_probe  # noqa: E402
+from fallback_policy import (  # noqa: E402
+    AgentRotationState,
+    LineageRegistry,
+    RotationPolicy,
+)
+from redaction import redact_secrets  # noqa: E402
 from models import MODE_DEFAULT_MODELS, MODEL_IDS, VALID_MODELS, resolve_model  # noqa: E402
 from parse_agent_output import parse_agent_output as parse_raw_output  # noqa: E402
 from sanitize import InvalidInputError, build_user_prompt  # noqa: E402
@@ -53,9 +60,13 @@ from synthesize import (  # noqa: E402
 from backend import AgentBackend  # noqa: E402
 from claude_backend import ClaudeBackend  # noqa: E402
 from ollama_backend import OllamaBackend  # noqa: E402
-from ollama_config import OllamaConfigError, resolve_config  # noqa: E402
+from ollama_config import ModelSpec, OllamaConfig, OllamaConfigError, resolve_config  # noqa: E402
 from ollama_init import write_template  # noqa: E402
-from ollama_preflight import OllamaPreflightError, preflight  # noqa: E402
+from ollama_preflight import (  # noqa: E402
+    OllamaPreflightError,
+    PreflightResult,
+    preflight,
+)
 from run_lock import remove_lock, staleness_bound_for_timeout, write_lock  # noqa: E402
 from temp_dirs import (  # noqa: E402
     MAGI_DIR_PREFIX,
@@ -222,7 +233,7 @@ async def launch_agent(
     prompt: str,
     output_dir: str,
     timeout: int,
-    model: str = "opus",
+    spec: ModelSpec = ModelSpec("opus", "anthropic"),
     backend: AgentBackend | None = None,
 ) -> dict[str, Any]:
     """Launch one agent via *backend* and return validated output.
@@ -237,7 +248,10 @@ async def launch_agent(
         prompt: The prompt payload to send to the agent.
         output_dir: Directory for raw and parsed output files.
         timeout: Timeout in seconds per agent.
-        model: Model short name ('opus', 'sonnet', 'haiku').
+        spec: The model to run, as a :class:`ModelSpec` (tag + lineage). The
+            lineage is carried so the rotation path can condemn it on failure;
+            only ``spec.model`` (the bare tag) reaches ``backend.run``. Defaults
+            to the opus spec so the ~40 legacy call sites keep 3.x behavior.
         backend: Transport backend to use. Defaults to ClaudeBackend.
 
     Returns:
@@ -279,7 +293,9 @@ async def launch_agent(
     with open(prompt_file, "w", encoding="utf-8") as f:
         f.write(prompt)
 
-    stdout = await backend.run(agent_name, system_prompt_file, prompt, model, timeout, output_dir)
+    stdout = await backend.run(
+        agent_name, system_prompt_file, prompt, spec.model, timeout, output_dir
+    )
 
     with open(raw_file, "wb") as f:
         f.write(stdout)
@@ -458,6 +474,251 @@ def _build_retry_prompt(original_prompt: str, error: ValidationError | json.JSON
     )
 
 
+@dataclass(frozen=True)
+class RotationRuntimeConfig:
+    """The rotation knobs the orchestrator needs at runtime (a slice of OllamaConfig).
+
+    Kept separate from :class:`OllamaConfig` so the orchestrator does not depend on
+    the whole config object (low coupling) and tests can build one in a line. It
+    carries EVERY field the rotation path reads -- including the two the context
+    guard needs (``output_headroom_tokens``, ``input_margin_pct``): a slice that
+    lacked them and was handed to ``compute_required_tokens`` would be a type error
+    under mypy --strict (finding by Balthasar, Checkpoint 2).
+    """
+
+    max_attempts_per_model: int
+    max_probe_attempts: int
+    retry_backoff_seconds: float
+    strict_context_guard: bool
+    output_headroom_tokens: int
+    input_margin_pct: int
+    probe_timeout_seconds: int
+    api_key: str | None  # for redact_secrets at the rotation boundaries
+
+    @classmethod
+    def from_config(cls, config: OllamaConfig) -> "RotationRuntimeConfig":
+        """Derive the runtime slice from the resolved config. The ONLY constructor.
+
+        Config drift (preflight validating one value while the orchestrator runs
+        another) is impossible if exactly one place copies the fields (finding by
+        Caspar, Checkpoint 2). Hand-building this object anywhere else re-opens that
+        door -- tests included, which is why the fixtures go through
+        ``dataclasses.replace`` on a real one.
+
+        Args:
+            config: The resolved OllamaConfig (built once, in select_backend).
+
+        Returns:
+            The runtime slice the rotation path reads.
+        """
+        return cls(
+            max_attempts_per_model=config.max_attempts_per_model,
+            max_probe_attempts=config.max_probe_attempts,
+            retry_backoff_seconds=config.retry_backoff_seconds,
+            strict_context_guard=config.strict_context_guard,
+            output_headroom_tokens=config.output_headroom_tokens,
+            input_margin_pct=config.input_margin_pct,
+            probe_timeout_seconds=config.probe_timeout_seconds,
+            api_key=config.api_key,
+        )
+
+
+@dataclass(frozen=True)
+class LaunchEnv:
+    """Everything :func:`_attempt_model` needs to actually launch an agent.
+
+    ``tracked_launch`` is a closure inside :func:`run_orchestrator` and reads these
+    from the enclosing scope. :func:`_attempt_model` is a MODULE-LEVEL function, so
+    it cannot: it must receive them explicitly. Passing them as one frozen value
+    object keeps the signature honest without an implicit dependency on the
+    orchestrator's locals (findings by Balthasar and Caspar, Checkpoint 2).
+    """
+
+    agents_dir: str
+    output_dir: str
+    timeout: int
+    backend: AgentBackend
+    api_key: str | None
+
+
+@dataclass(frozen=True)
+class RotationContext:
+    """The whole rotation apparatus, in ONE optional parameter.
+
+    Bundling it keeps :func:`run_orchestrator`'s signature back-compatible: the ~40
+    existing call sites pass nothing and get exactly the v4 behaviour
+    (``rotation=None`` => single-shot schema retry, no rotation).
+    """
+
+    registry: LineageRegistry
+    policy: RotationPolicy
+    config: RotationRuntimeConfig
+    probe: ProbeTokensFn
+    #: Everything the preflight MEASURED. Carried here so Phase 4 has a defined
+    #: source for context_guard / lineage_warnings / token_estimate_delta instead
+    #: of inventing them (finding by Balthasar, Checkpoint 2).
+    preflight: PreflightResult
+    #: Set the moment the endpoint is declared dead. Every mage checks it before
+    #: each attempt and each rotation, so the abort is actually FAST. Without it,
+    #: "fast-fail" only aborts after the siblings finish burning their own budgets
+    #: against the same dead server (finding by Balthasar, Checkpoint 2).
+    endpoint_down: asyncio.Event = field(default_factory=asyncio.Event, compare=False, repr=False)
+
+
+class _EndpointDown(RuntimeError):
+    """The endpoint itself is unreachable -- rotating cannot help.
+
+    A dedicated type, not a bare RuntimeError: ``gather(return_exceptions=True)``
+    turns every exception into a value, so the orchestrator must be able to pick
+    THIS one out of the results and re-raise it. A string match would be fragile;
+    a type is not.
+    """
+
+
+class _AttemptsExhausted(Exception):
+    """A model spent its whole attempt budget. Carries WHY, so the caller can decide
+    whether the failure is local (schema) or run-wide (transport).
+
+    Attributes:
+        kind: "schema" | "connection" | "http" | "timeout" (see :func:`_classify`).
+        detail: Redacted, human-readable cause, for telemetry and stderr.
+        http_status: The HTTP status when the failure was an HTTPError, else None.
+            R13's structured fallback_reason needs it, and re-parsing it out of the
+            message string later would be the stringly-typed fragility that field
+            exists to remove.
+        attempts: How many attempts the model consumed before giving up.
+    """
+
+    def __init__(
+        self, kind: str, detail: str, *, http_status: int | None = None, attempts: int = 0
+    ) -> None:
+        super().__init__(detail)
+        self.kind = kind
+        self.detail = detail
+        self.http_status = http_status
+        self.attempts = attempts
+
+
+async def _attempt_model(
+    name: str,
+    spec: ModelSpec,
+    ctx: RotationContext,
+    env: LaunchEnv,
+    prompt: str,
+    on_retry: Callable[[], None],
+) -> dict[str, Any]:
+    """Run ONE model until it succeeds or spends its attempt budget.
+
+    A schema failure gets the corrective feedback (the model answered: it needs to
+    be told what was wrong). A transport failure gets a backoff and the ORIGINAL
+    prompt (the model never answered: there is nothing to correct, and hammering a
+    rate-limited server instantly just burns the budget).
+
+    Every dependency is EXPLICIT: this is a module-level function, so it cannot read
+    the orchestrator's closure. ``on_retry`` is injected instead of touching the
+    display directly -- the attempt loop must not know a status display exists.
+
+    Args:
+        name: Mage name.
+        spec: The model to run.
+        ctx: Rotation context (attempt budget, backoff).
+        env: Launch environment (agents dir, output dir, timeout, backend, api key).
+        prompt: The original user prompt.
+        on_retry: Called once per retry, for the "retrying" display state.
+
+    Returns:
+        The validated agent output.
+
+    Raises:
+        _AttemptsExhausted: Every attempt failed. Carries the LAST failure's kind
+            and its REDACTED detail, so the caller can scope it (local vs run-wide).
+        _EndpointDown: A sibling already proved the endpoint is dead.
+        asyncio.CancelledError: Propagated untouched -- a shutdown is not a failure.
+        KeyboardInterrupt, SystemExit: Propagated untouched.
+    """
+    attempt_prompt = prompt
+    last: Exception | None = None
+    for attempt in range(ctx.config.max_attempts_per_model):
+        if ctx.endpoint_down.is_set():
+            # A sibling already proved the endpoint is dead. Do not spend an attempt
+            # (and up to --timeout seconds) discovering it again.
+            raise _EndpointDown("endpoint down (detected by another agent)")
+        try:
+            return await launch_agent(
+                name,
+                env.agents_dir,
+                attempt_prompt,
+                env.output_dir,
+                env.timeout,
+                spec,
+                backend=env.backend,
+            )
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise  # shutdown: never retried, never swallowed
+        except Exception as exc:  # noqa: BLE001 -- classified and re-raised
+            if _classify(exc) == _FAIL_UNEXPECTED:
+                # A TypeError/AttributeError from OUR code is not an endpoint failure.
+                # Retrying it would burn attempts, rotate the mage, and BURY the bug
+                # behind a degraded run (Balthasar, Checkpoint 2). Fail loud.
+                raise
+            last = exc
+            if attempt + 1 >= ctx.config.max_attempts_per_model:
+                break
+            # isinstance (not ``_classify(exc) == _FAIL_SCHEMA``) so mypy narrows exc to
+            # the type _build_retry_prompt accepts -- the two are equivalent by
+            # construction (_classify returns schema iff it is one of these).
+            if isinstance(exc, (ValidationError, json.JSONDecodeError)):
+                attempt_prompt = _build_retry_prompt(prompt, exc)  # the model needs correcting
+            else:
+                attempt_prompt = prompt  # nothing to correct
+                await asyncio.sleep(ctx.config.retry_backoff_seconds)
+            on_retry()
+    if last is None:
+        # NOT an assert: ``python -O`` strips asserts, and this would then fall
+        # through to a NameError in production (finding by Balthasar, Checkpoint 2).
+        raise RuntimeError(
+            f"_attempt_model exited its loop without a failure for {name} -- "
+            f"max_attempts_per_model must be >= 1 (got {ctx.config.max_attempts_per_model})"
+        )
+    raise _AttemptsExhausted(
+        _classify(last),
+        redact_secrets(str(last), env.api_key),
+        http_status=getattr(last, "code", None),
+        attempts=ctx.config.max_attempts_per_model,
+    ) from last
+
+
+async def _rotate(
+    name: str, state: AgentRotationState, ctx: RotationContext, prompt: str
+) -> ModelSpec | None:
+    """LOUD stub: RAISES so a forgotten Task 10 fails in the open, not silently.
+
+    A ``return None`` here would make an executor who ships T9 and forgets T10 look
+    fine -- rotation would just always report "no candidate" and every run would
+    silently degrade. Raising turns that oversight into an immediate, obvious
+    failure. Real propose-verify-commit lands in Task 10.
+    """
+    raise NotImplementedError(
+        "real impl lands in Task 10 (propose-verify-commit / failure routing)"
+    )
+
+
+async def _record_failure(
+    state: AgentRotationState,
+    ctx: RotationContext,
+    spec: ModelSpec,
+    exc: _AttemptsExhausted,
+) -> None:
+    """LOUD stub: RAISES so a forgotten Task 10 fails in the open, not silently.
+
+    Real per-scope routing (schema local / transport run-wide) + the fast-fail land
+    in Task 10 / Task 11.
+    """
+    raise NotImplementedError(
+        "real impl lands in Task 10 (propose-verify-commit / failure routing)"
+    )
+
+
 def _load_input_content(input_arg: str) -> tuple[str, str]:
     """Resolve the CLI ``input`` argument to (content, label).
 
@@ -568,38 +829,54 @@ def _maybe_enrich(
         return content, f"enrichment skipped (boundary error: {exc!r})"
 
 
-def select_backend(
+async def select_backend(
     args: argparse.Namespace,
     prompt: str,
-) -> tuple[AgentBackend, dict[str, str]]:
-    """Return (backend, per-agent model map) for the chosen mode.
+) -> tuple[AgentBackend, dict[str, ModelSpec], RotationContext | None]:
+    """Return (backend, per-agent models, rotation context) for the chosen mode.
 
-    Ollama path: resolve config once + preflight, return OllamaBackend with
-    the trio from config. Claude path: ClaudeBackend with the single --model
-    for all three agents.
+    Ollama path: resolve config once, run the preflight (which MEASURES the payload
+    and enforces the lineage/capability/window guards), and assemble the whole
+    :class:`RotationContext` -- registry, pure policy, measured preflight result and
+    a config-bound probe -- once, at setup. Claude path: :class:`ClaudeBackend` with
+    the single ``--model`` for all three agents and ``rotation=None`` (no fallback
+    list, so v4 single-shot retry is kept untouched).
 
-    F-M invariant: resolve_config is called exactly once here (setup time),
-    never inside tracked_launch/retry — OllamaConfigError must not be swallowed
-    by the (ValidationError, json.JSONDecodeError) retry guard.
+    F-M invariant (#6 of v4.0.0): ``resolve_config`` is called exactly once here
+    (setup time), never inside tracked_launch/retry -- an ``OllamaConfigError`` must
+    not be swallowed by the ``(ValidationError, json.JSONDecodeError)`` retry guard.
 
     Args:
         args: Parsed CLI namespace (requires .ollama and .model attributes).
-        prompt: The built user prompt; the Ollama preflight MEASURES it to size
-            the context guard, so it must be the exact payload the agents receive.
+        prompt: The built user prompt; the Ollama preflight MEASURES it (R5c) to
+            size the context guard, so it must be the exact payload the agents get.
 
     Returns:
-        Tuple of (backend instance, dict mapping agent name to model string).
+        Tuple of (backend instance, per-agent :class:`ModelSpec` map, rotation
+        context or ``None`` for the Claude path).
     """
-    if args.ollama:
-        config = resolve_config()
-        # v5.0.0 (T8): preflight is now async (it MEASURES the payload) and enforces
-        # the lineage/capability/window guards. Run it once here, before any agent
-        # launches; a violated guard raises OllamaPreflightError. Its measured result
-        # is threaded into the rotation path by Phase 3.
-        asyncio.run(preflight(config, prompt))
-        # config.models is dict[str, ModelSpec]; map to bare tags for the orchestrator.
-        return OllamaBackend(config), {name: spec.model for name, spec in config.models.items()}
-    return ClaudeBackend(), {name: args.model for name in AGENTS}
+    if not args.ollama:
+        return ClaudeBackend(), {n: ModelSpec(args.model, "anthropic") for n in AGENTS}, None
+
+    config = resolve_config()  # EXACTLY once (invariant #6)
+    result = await preflight(config, prompt)  # measures, validates, caches
+    policy = RotationPolicy(
+        fallback=result.fallback,  # absent fallbacks already dropped (R11.1)
+        max_rotations=config.max_rotations,
+        min_window_tokens=result.min_window_tokens,  # RAW payload -- pre-filter only (C2-1)
+        capabilities=result.capabilities,
+        strict_context_guard=config.strict_context_guard,
+    )
+    rotation = RotationContext(
+        registry=LineageRegistry(config.models),
+        policy=policy,
+        preflight=result,
+        # from_config is the ONLY constructor -- hand-building the slice here is what
+        # from_config exists to prevent (finding by Balthasar, Checkpoint 2).
+        config=RotationRuntimeConfig.from_config(config),
+        probe=make_probe(config),  # binds config -> (model, prompt, timeout)
+    )
+    return OllamaBackend(config), dict(config.models), rotation
 
 
 async def run_orchestrator(
@@ -609,8 +886,9 @@ async def run_orchestrator(
     timeout: int,
     model: str = "opus",
     *,
-    agent_models: dict[str, str] | None = None,
+    agent_models: dict[str, ModelSpec] | None = None,
     backend: AgentBackend | None = None,
+    rotation: RotationContext | None = None,
     show_status: bool = True,
 ) -> dict[str, Any]:
     """Run all three agents concurrently and synthesize results.
@@ -648,9 +926,11 @@ async def run_orchestrator(
     """
     # Back-compat (BDD-30): KEEP `model` so the ~40 existing call sites in
     # tests keep working untouched; derive agent_models from it when not
-    # supplied. New callers (select_backend) pass agent_models + backend.
+    # supplied. Values are ModelSpec now (launch_agent takes a spec); the
+    # legacy Claude path has no lineage of interest, so tag it "anthropic".
+    # New callers (select_backend) pass agent_models + backend.
     if agent_models is None:
-        agent_models = {name: model for name in AGENTS}
+        agent_models = {name: ModelSpec(model, "anthropic") for name in AGENTS}
     if backend is None:
         backend = ClaudeBackend()
     successful: list[dict[str, Any]] = []
@@ -680,8 +960,12 @@ async def run_orchestrator(
         StatusDisplay(list(AGENTS), stream=sys.stderr) if show_status else None
     )
 
-    async def tracked_launch(name: str) -> dict[str, Any]:
-        """Launch an agent with live status updates and one retry on schema fail.
+    async def _legacy_tracked_launch(name: str) -> dict[str, Any]:
+        """The v4 path (``rotation=None``): running + single-shot schema retry.
+
+        Extracted verbatim so ``rotation=None`` keeps EXACTLY the v4 behaviour; the
+        one adaptation is that ``agent_models[name]`` is now a :class:`ModelSpec`
+        (``launch_agent`` takes a spec), passed as the object, not ``spec.model``.
 
         State machine emitted to the live display:
 
@@ -748,6 +1032,67 @@ async def run_orchestrator(
             raise
         _safe_display_update(display, name, "success", log_gate)
         return result
+
+    async def _rotating_tracked_launch(name: str, ctx: RotationContext) -> dict[str, Any]:
+        """The Ollama path (R1/R2/R12): attempts-per-model, then rotate on exhaustion.
+
+        State machine ``running -> retrying -> rotating -> terminal`` with the
+        ``LineageRegistry`` mutations of spec 6.3.1. Lineage cleanup is STRUCTURAL:
+        ``agent_slot`` releases the mage's lineage on death and conserves it on
+        success, keyed SOLELY on ``state.succeeded``.
+        """
+        spec = agent_models[name]
+        state = AgentRotationState(model_configured=spec, model_used=spec, used={spec.model})
+        env = LaunchEnv(agents_dir, output_dir, timeout, backend, ctx.config.api_key)
+
+        def on_retry() -> None:
+            """Surface a retry (schema or transport) in the live status tree."""
+            retried.add(name)
+            _safe_display_update(display, name, "retrying", log_gate)
+
+        _safe_display_update(display, name, "running", log_gate)
+        async with ctx.registry.agent_slot(name, state) as slot:
+            while True:
+                try:
+                    result = await _attempt_model(name, spec, ctx, env, prompt, on_retry)
+                except _AttemptsExhausted as exc:
+                    # The model spent its whole budget. Route the failure by scope
+                    # (T10/T11) and ask the policy for the next model (T10). Both are
+                    # LOUD stubs until T10, so a mage that exhausts its budget here
+                    # fails obviously rather than silently degrading.
+                    await _record_failure(state, ctx, spec, exc)
+                    next_spec = await _rotate(name, state, ctx, prompt)
+                    if next_spec is None:
+                        _safe_display_update(display, name, "failed", log_gate)
+                        raise RuntimeError(
+                            f"Agent '{name}' exhausted its models with no eligible "
+                            f"fallback ({exc.detail})"
+                        ) from exc
+                    _safe_display_update(display, name, "rotating", log_gate)
+                    spec = next_spec
+                    continue
+                except (asyncio.TimeoutError, TimeoutError):
+                    _safe_display_update(display, name, "timeout", log_gate)
+                    raise
+                except _EndpointDown:
+                    _safe_display_update(display, name, "failed", log_gate)
+                    raise
+                except BaseException:
+                    _safe_display_update(display, name, "failed", log_gate)
+                    raise
+                # A valid verdict exists NOW. Commit the lineage BEFORE any teardown
+                # (the display update) that could throw -- a late failure must not be
+                # able to de-emit this verdict or free its lineage (spec 6.3.1).
+                slot.succeeded = True
+                state.model_used = spec
+                _safe_display_update(display, name, "success", log_gate)
+                return result
+
+    async def tracked_launch(name: str) -> dict[str, Any]:
+        """Dispatch to the v4 path (``rotation is None``) or the rotation path."""
+        if rotation is None:
+            return await _legacy_tracked_launch(name)
+        return await _rotating_tracked_launch(name, rotation)
 
     tasks = {name: tracked_launch(name) for name in AGENTS}
 
@@ -1075,7 +1420,13 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        backend, agent_models = select_backend(args, prompt)
+        # select_backend is async now (T9): the Ollama preflight MEASURES the
+        # payload. Its own asyncio.run runs here, BEFORE the output dir is created,
+        # so a config/preflight error exits without leaking a temp run dir -- the
+        # exact ordering of the v4 sync call it replaces. The rotation's asyncio.Event
+        # is only constructed (never awaited) in this loop, so it binds lazily to the
+        # run_orchestrator loop on its first wait().
+        backend, agent_models, rotation = asyncio.run(select_backend(args, prompt))
     except (OllamaConfigError, OllamaPreflightError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -1106,7 +1457,7 @@ def main() -> None:
     if enrich_note is not None:
         print(f"|  Context: {enrich_note}")
     if args.ollama:
-        model_label = "ollama/" + "/".join(sorted(set(agent_models.values())))
+        model_label = "ollama/" + "/".join(sorted({s.model for s in agent_models.values()}))
         print(f"|  Model: {model_label}")
     else:
         print(f"|  Model: {args.model} ({MODEL_IDS[args.model]})")
@@ -1129,6 +1480,7 @@ def main() -> None:
                 args.timeout,
                 agent_models=agent_models,
                 backend=backend,
+                rotation=rotation,
                 show_status=args.show_status,
             )
         )

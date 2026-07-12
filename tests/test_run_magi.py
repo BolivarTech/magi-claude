@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import urllib.error
+from email.message import Message
 from typing import Any
 from unittest.mock import patch
 
@@ -400,15 +401,15 @@ class TestRunOrchestrator:
 
     @pytest.mark.asyncio
     async def test_model_passed_to_launch_agent(self, tmp_path):
-        """Verify that the model parameter propagates to launch_agent."""
+        """Verify that the model propagates to launch_agent as a ModelSpec (T9)."""
         from run_magi import run_orchestrator
 
-        captured_models: list[str] = []
+        captured: list[Any] = []
 
         async def mock_launch(
-            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
         ):
-            captured_models.append(model)
+            captured.append(spec)
             return {
                 "agent": agent_name,
                 "verdict": "approve",
@@ -427,8 +428,8 @@ class TestRunOrchestrator:
                 timeout=300,
                 model="sonnet",
             )
-            assert all(m == "sonnet" for m in captured_models)
-            assert len(captured_models) == 3
+            assert all(isinstance(s, ModelSpec) and s.model == "sonnet" for s in captured)
+            assert len(captured) == 3
 
     @pytest.mark.asyncio
     async def test_two_fail_one_succeeds_raises(self, tmp_path):
@@ -845,7 +846,7 @@ class TestLaunchAgentValidation:
                 prompt="test",
                 output_dir=str(tmp_path),
                 timeout=300,
-                model="gpt4",
+                spec=ModelSpec("gpt4", "anthropic"),
             )
 
 
@@ -4057,17 +4058,20 @@ class TestFindingGuardWiring:
         cfg = OllamaConfig(
             base_url="http://h:11434/v1",
             api_key=None,
-            models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+            models={
+                "melchior": ModelSpec("m", "la"),
+                "balthasar": ModelSpec("b", "lb"),
+                "caspar": ModelSpec("c", "lc"),
+            },
         )
         ollama_backend = OllamaBackend(cfg)
-        monkeypatch.setattr(
-            run_magi,
-            "select_backend",
-            lambda args, prompt: (
-                ollama_backend,
-                {"melchior": "m", "balthasar": "b", "caspar": "c"},
-            ),
-        )
+
+        # select_backend is async now (T9) and returns a 3-tuple; run_orchestrator is
+        # faked below, so rotation=None is fine (the banner only reads .model).
+        async def fake_select(args, prompt):
+            return ollama_backend, dict(cfg.models), None
+
+        monkeypatch.setattr(run_magi, "select_backend", fake_select)
 
         def fake_create(output_dir: object, run_root: object = None) -> str:
             d = tmp_path / "magi-run-ollama-cost"
@@ -4838,9 +4842,10 @@ def test_select_backend_claude_default():
     from claude_backend import ClaudeBackend
 
     args = parse_args(["design", "x"])
-    backend, agent_models = select_backend(args, "payload")
+    backend, agent_models, rotation = asyncio.run(select_backend(args, "payload"))
     assert isinstance(backend, ClaudeBackend)
-    assert set(agent_models.values()) == {"opus"}
+    assert {s.model for s in agent_models.values()} == {"opus"}
+    assert rotation is None  # Claude path keeps v4 single-shot retry, no rotation
 
 
 def test_select_backend_ollama_uses_trio(monkeypatch):
@@ -4848,6 +4853,7 @@ def test_select_backend_ollama_uses_trio(monkeypatch):
     import run_magi
     from ollama_backend import OllamaBackend
     from ollama_config import ModelSpec, OllamaConfig
+    from run_magi import RotationContext
 
     cfg = OllamaConfig(
         base_url="http://h/v1",
@@ -4861,9 +4867,14 @@ def test_select_backend_ollama_uses_trio(monkeypatch):
     monkeypatch.setattr(run_magi, "resolve_config", lambda **k: cfg)
     monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
     args = parse_args(["design", "x", "--ollama"])
-    backend, agent_models = select_backend(args, "payload")
+    backend, agent_models, rotation = asyncio.run(select_backend(args, "payload"))
     assert isinstance(backend, OllamaBackend)
-    assert agent_models == {"melchior": "m", "balthasar": "b", "caspar": "c"}
+    assert agent_models == {
+        "melchior": ModelSpec("m", "la"),
+        "balthasar": ModelSpec("b", "lb"),
+        "caspar": ModelSpec("c", "lc"),
+    }
+    assert isinstance(rotation, RotationContext)  # Ollama path carries the apparatus
 
 
 def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
@@ -4900,7 +4911,11 @@ def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
             "P",
             str(tmp_path),
             900,
-            agent_models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+            agent_models={
+                "melchior": ModelSpec("m", "la"),
+                "balthasar": ModelSpec("b", "lb"),
+                "caspar": ModelSpec("c", "lc"),
+            },
             backend=FakeBackend(),
             show_status=False,
         )
@@ -4932,7 +4947,7 @@ def test_resolve_config_called_once_in_select_backend(monkeypatch):
     monkeypatch.setattr(run_magi, "resolve_config", counting_resolve)
     monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
     args = parse_args(["design", "x", "--ollama"])
-    select_backend(args, "payload")
+    asyncio.run(select_backend(args, "payload"))
     assert call_count == 1
 
 
@@ -5050,8 +5065,8 @@ def test_retry_feedback_bound_holds_for_NON_ASCII_errors():
         (TimeoutError(), "timeout"),
         (asyncio.TimeoutError(), "timeout"),
         # HTTPError IS a subclass of URLError -- check it FIRST.
-        (urllib.error.HTTPError("u", 500, "err", {}, None), "http"),
-        (urllib.error.HTTPError("u", 429, "rate limited", {}, None), "http"),
+        (urllib.error.HTTPError("u", 500, "err", Message(), None), "http"),
+        (urllib.error.HTTPError("u", 429, "rate limited", Message(), None), "http"),
         # A socket timeout arrives WRAPPED: URLError(TimeoutError()).
         (urllib.error.URLError(TimeoutError()), "timeout"),
         (urllib.error.URLError(ConnectionRefusedError()), "connection"),

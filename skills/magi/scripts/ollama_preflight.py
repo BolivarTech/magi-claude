@@ -146,7 +146,11 @@ async def _list_models(config: OllamaConfig) -> set[str]:
             f"Cannot reach Ollama at {config.base_url}: {exc}. "
             "Is it running? Try `ollama signin` for cloud."
         ) from None
-    return {m.get("id") for m in payload.get("data", []) if isinstance(m, dict)}
+    return {
+        mid
+        for m in payload.get("data", [])
+        if isinstance(m, dict) and isinstance((mid := m.get("id")), str)
+    }
 
 
 def _check_trio_lineages_are_distinct(models: Mapping[str, ModelSpec]) -> None:
