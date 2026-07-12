@@ -235,3 +235,31 @@ async def test_suspicious_lineage_label_warns_without_overriding_the_user(
     result = await preflight(cfg, "payload")
     assert any("acme" in w for w in result.lineage_warnings)
     assert result.fallback[0].lineage == "acme"  # the declaration STANDS
+
+
+async def test_no_preflight_error_path_ever_leaks_the_api_key(
+    config_factory, preflight_env, capsys
+):
+    """NR3b: a scattered redaction is a forgotten redaction. Prove there is none."""
+    cfg = config_factory(api_key="sk-supersecret-do-not-leak")
+    preflight_env["probe"] = None  # force the estimated/warning path
+    result = await preflight(cfg, "payload")
+    captured = capsys.readouterr()
+    blob = captured.out + captured.err + json.dumps(result.lineage_warnings)
+    assert "sk-supersecret-do-not-leak" not in blob
+
+
+async def test_the_list_models_abort_path_redacts_the_api_key(config_factory, monkeypatch):
+    """NR3b: the _list_models 401/unreachable path echoes the URL + Authorization
+    header; the preflight call boundary must redact it."""
+    cfg = config_factory(api_key="sk-supersecret-do-not-leak")
+
+    async def failing_list(config):
+        raise OllamaPreflightError(
+            f"GET {config.base_url}/models -> 401 (Authorization: Bearer {config.api_key})"
+        )
+
+    monkeypatch.setattr("ollama_preflight._list_models", failing_list)
+    with pytest.raises(OllamaPreflightError) as ei:
+        await preflight(cfg, "payload")
+    assert "sk-supersecret-do-not-leak" not in str(ei.value)

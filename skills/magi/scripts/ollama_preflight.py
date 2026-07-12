@@ -237,6 +237,39 @@ def _check_lineage_patterns(
     return warnings
 
 
+async def _measure_payload(
+    config: OllamaConfig, prompt: str
+) -> tuple[dict[str, int], list[dict[str, Any]], int]:
+    """Probe each trio model's OWN tokenizer count for *prompt* (R5c).
+
+    Args:
+        config: The resolved configuration.
+        prompt: The exact payload the agents will receive.
+
+    Returns:
+        ``(measured, deltas, estimate)``: *measured* maps model id -> exact token
+        count for every trio model that could be probed; *deltas* is the per-agent
+        estimate/actual/error telemetry; *estimate* is the heuristic fallback count.
+    """
+    estimate = estimate_tokens(prompt)
+    measured: dict[str, int] = {}
+    deltas: list[dict[str, Any]] = []
+    for agent, spec in config.models.items():
+        exact = await probe_prompt_tokens(config, spec.model, prompt)
+        if exact is None:
+            continue
+        measured[spec.model] = exact
+        deltas.append(
+            {
+                "agent": agent,
+                "estimated": estimate,
+                "actual": exact,
+                "error_pct": round((estimate - exact) / exact * 100, 1),
+            }
+        )
+    return measured, deltas, estimate
+
+
 async def preflight(config: OllamaConfig, prompt: str) -> PreflightResult:
     """Validate and MEASURE everything before a single agent is launched.
 
@@ -294,22 +327,7 @@ async def preflight(config: OllamaConfig, prompt: str) -> PreflightResult:
         )
 
     # 4. MEASURE the payload with each trio model's OWN tokenizer (R5c).
-    estimate = estimate_tokens(prompt)
-    measured: dict[str, int] = {}
-    deltas: list[dict[str, Any]] = []
-    for agent, spec in config.models.items():
-        exact = await probe_prompt_tokens(config, spec.model, prompt)
-        if exact is None:
-            continue
-        measured[spec.model] = exact
-        deltas.append(
-            {
-                "agent": agent,
-                "estimated": estimate,
-                "actual": exact,
-                "error_pct": round((estimate - exact) / exact * 100, 1),
-            }
-        )
+    measured, deltas, estimate = await _measure_payload(config, prompt)
 
     def _required(payload_tokens: int, *, exact: bool) -> int:
         return compute_required_tokens(
