@@ -131,7 +131,7 @@ wheels = [
 
 [[package]]
 name = "magi"
-version = "5.0.1"
+version = "5.0.2"
 source = { virtual = "." }
 
 [package.optional-dependencies]
