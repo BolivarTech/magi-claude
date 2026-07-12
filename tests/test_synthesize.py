@@ -1184,7 +1184,7 @@ class TestFormatBanner:
         """Every line of the banner must have the same character width."""
         agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
         consensus = determine_consensus(agents)
-        banner = format_banner(agents, consensus)
+        banner = format_banner({"agents": agents, "consensus": consensus})
         lines = banner.split("\n")
         widths = {len(line) for line in lines}
         assert len(widths) == 1, f"Inconsistent widths: {widths}"
@@ -1193,7 +1193,7 @@ class TestFormatBanner:
         """Banner must be exactly 52 characters wide on every row."""
         agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
         consensus = determine_consensus(agents)
-        banner = format_banner(agents, consensus)
+        banner = format_banner({"agents": agents, "consensus": consensus})
         for line in banner.split("\n"):
             assert len(line) == 52
 
@@ -1201,7 +1201,7 @@ class TestFormatBanner:
         """Banner should display each agent's name and verdict."""
         agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
         consensus = determine_consensus(agents)
-        banner = format_banner(agents, consensus)
+        banner = format_banner({"agents": agents, "consensus": consensus})
         assert "Melchior" in banner
         assert "APPROVE" in banner
 
@@ -1213,7 +1213,7 @@ class TestFormatBanner:
         agents[1]["verdict"] = "conditional"
         agents[2]["verdict"] = "reject"
         consensus = determine_consensus(agents)
-        banner = format_banner(agents, consensus)
+        banner = format_banner({"agents": agents, "consensus": consensus})
         lines = banner.split("\n")
         # Agent rows are lines 3, 4, 5 (0-indexed) of the banner.
         columns = [
@@ -1229,7 +1229,7 @@ class TestFormatBanner:
         for agent in agents:
             agent["confidence"] = 0.9
         consensus = determine_consensus(agents)
-        banner = format_banner(agents, consensus)
+        banner = format_banner({"agents": agents, "consensus": consensus})
         assert "(90%)" in banner
         assert "(0.9)" not in banner
 
@@ -1237,14 +1237,14 @@ class TestFormatBanner:
         """Banner must contain the canonical title line."""
         agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
         consensus = determine_consensus(agents)
-        banner = format_banner(agents, consensus)
+        banner = format_banner({"agents": agents, "consensus": consensus})
         assert "MAGI SYSTEM -- VERDICT" in banner
 
     def test_banner_consensus_line_present(self):
         """Banner must contain the CONSENSUS row."""
         agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
         consensus = determine_consensus(agents)
-        banner = format_banner(agents, consensus)
+        banner = format_banner({"agents": agents, "consensus": consensus})
         assert "CONSENSUS:" in banner
 
     def test_banner_width_guard_truncates_overlong_label(self):
@@ -1268,7 +1268,7 @@ class TestFormatBanner:
             )
             agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
             consensus = determine_consensus(agents)
-            banner = format_banner(agents, consensus)
+            banner = format_banner({"agents": agents, "consensus": consensus})
             lines = banner.split("\n")
             # Every row must still be exactly 52 characters — the width
             # invariant the rest of the banner tests assert on.
@@ -1309,7 +1309,7 @@ class TestFormatBanner:
             agents[0]["verdict"] = "approve"
             agents[0]["confidence"] = 0.85
             consensus = determine_consensus(agents)
-            banner = format_banner(agents, consensus)
+            banner = format_banner({"agents": agents, "consensus": consensus})
             lines = banner.split("\n")
             # Width invariant: every line must remain exactly 52 chars.
             for line in lines:
@@ -1342,7 +1342,7 @@ class TestFormatBanner:
         # Simulate a pathologically long consensus label (future custom
         # formats, operator-supplied overrides, etc.).
         consensus["consensus"] = "SOME_EXTREMELY_LONG_CONSENSUS_LABEL_" * 3
-        banner = format_banner(agents, consensus)
+        banner = format_banner({"agents": agents, "consensus": consensus})
         for line in banner.split("\n"):
             assert len(line) == 52
         cons_line = [ln for ln in banner.split("\n") if "CONSENSUS:" in ln][0]
@@ -1473,7 +1473,7 @@ class TestSkillMdTemplateParity:
 
         agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
         consensus = determine_consensus(agents)
-        banner = format_banner(agents, consensus)
+        banner = format_banner({"agents": agents, "consensus": consensus})
         generated_border = banner.split("\n")[0]
 
         assert len(template_border) == len(generated_border)
@@ -1491,7 +1491,7 @@ class TestSkillMdTemplateParity:
             _valid_agent("caspar", verdict="reject", confidence=0.78),
         ]
         consensus = determine_consensus(agents)
-        banner = format_banner(agents, consensus)
+        banner = format_banner({"agents": agents, "consensus": consensus})
         gen_line = next(line for line in banner.split("\n") if "Melchior" in line)
 
         assert tmpl_line.index("APPROVE") == gen_line.index("APPROVE")

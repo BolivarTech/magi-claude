@@ -1390,6 +1390,31 @@ async def run_orchestrator(
     if retried:
         report["retried_agents"] = sorted(retried)
 
+    # T13 telemetry (R9/R13/R16): fold each mage's rotation state + the preflight's
+    # measured fields into the report. Additive and fail-soft -- absent on the Claude
+    # path (rotation is None), so 2.x consumers that ignore unknown keys are unaffected.
+    if rotation is not None:
+        for agent in successful:
+            st = rotation_telemetry.get(agent["agent"])
+            if st is None or st.model_configured is None or st.model_used is None:
+                continue
+            # Serialise the TAG, not the ModelSpec: a dataclass is not JSON-serialisable,
+            # so json.dump would die at the LAST step of a successful run (Caspar, C2).
+            agent["model_configured"] = st.model_configured.model
+            agent["model_used"] = st.model_used.model
+            agent["rotations"] = st.rotations_done
+            agent["fallback_reason"] = st.fallback_reason
+        report["fallback_agents"] = sorted(
+            name
+            for name, st in rotation_telemetry.items()
+            if st.model_configured is not None
+            and st.model_used is not None
+            and st.model_used.model != st.model_configured.model
+        )
+        report["context_guard"] = rotation.preflight.context_guard
+        report["lineage_warnings"] = list(rotation.preflight.lineage_warnings)
+        report["token_estimate_delta"] = list(rotation.preflight.token_estimate_delta)
+
     return report
 
 
