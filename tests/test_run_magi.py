@@ -6060,3 +6060,53 @@ def test_classify_unwraps_socket_timeout_wrapped_in_urlerror():
     from run_magi import _FAIL_TIMEOUT, _classify
 
     assert _classify(urllib.error.URLError(socket.timeout())) == _FAIL_TIMEOUT
+
+
+class TestContextGuardDowngradeOnRotation:
+    """MAGI gate (Loop 1 pass 2): the run-level context_guard must not claim 'enforced'
+    when a rotated mage ran on an estimated/unknown window -- R16 honesty on the
+    highest-risk path."""
+
+    @pytest.mark.asyncio
+    async def test_guard_downgrades_when_a_rotated_mage_runs_unmeasured(self, tmp_path):
+        async def probe(model, prompt, timeout):
+            # glm's window is known (harness default), but its payload is UNMEASURABLE
+            # (endpoint returned no usage) -> _rotate accepts it on the estimate.
+            return None if model == "glm-5.2:cloud" else REQUIRED
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation(probe=probe))
+
+        assert result.get("degraded") is not True, "the fallback still produced a verdict"
+        assert result["context_guard"] == "estimated", (
+            "caspar ran glm on an estimate -> the run was NOT fully enforced; the label "
+            "must not keep claiming 'enforced' (preflight computed it from the trio only)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard_stays_enforced_when_the_rotated_mage_is_exactly_measured(self, tmp_path):
+        """The downgrade is conditional: a rotation to an EXACTLY measured model keeps
+        'enforced' -- the label must not over-report estimation either."""
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        # default probe returns REQUIRED (an exact, fitting measurement) for glm too
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert result.get("degraded") is not True
+        assert result["context_guard"] == "enforced", "glm was exactly measured and fits"

@@ -72,6 +72,8 @@ from ollama_backend import OllamaBackend  # noqa: E402
 from ollama_config import ModelSpec, OllamaConfig, OllamaConfigError, resolve_config  # noqa: E402
 from ollama_init import write_template  # noqa: E402
 from ollama_preflight import (  # noqa: E402
+    CONTEXT_GUARD_ENFORCED,
+    CONTEXT_GUARD_ESTIMATED,
     OllamaPreflightError,
     PreflightResult,
     preflight,
@@ -903,7 +905,9 @@ async def _rotate(
 
         if window is None:
             # Nothing to compare against: no check is possible. Non-strict => accept,
-            # loudly (guard="estimated").
+            # loudly. This mage runs UNMEASURED, so the run-level context_guard must be
+            # downgraded to "estimated" (R16 -- MAGI gate Loop 1 pass 2).
+            state.ran_unmeasured = True
             return candidate
 
         # The window IS known. Even without an exact count we check against the ESTIMATE,
@@ -927,6 +931,10 @@ async def _rotate(
             )
             continue
 
+        # Record whether this mage's committed model was EXACTLY measured: an
+        # estimate-based accept means the run-level context_guard must read "estimated",
+        # not "enforced" (R16 honesty -- MAGI gate Loop 1 pass 2).
+        state.ran_unmeasured = not measured
         return candidate  # fits: proven, or estimated + margin
 
     return None  # probe budget spent
@@ -1430,7 +1438,17 @@ async def run_orchestrator(
             and st.model_used is not None
             and st.model_used.model != st.model_configured.model
         )
-        report["context_guard"] = rotation.preflight.context_guard
+        # The preflight computed context_guard from the TRIO. If any SURVIVING mage
+        # rotated to a model accepted on an estimate/unknown window, the run was NOT
+        # fully enforced -- downgrade the run-level label so it never claims a guarantee
+        # the rotation path did not keep (R16 honesty -- MAGI gate Loop 1 pass 2).
+        guard = rotation.preflight.context_guard
+        if guard == CONTEXT_GUARD_ENFORCED and any(
+            (st := rotation_telemetry.get(a["agent"])) is not None and st.ran_unmeasured
+            for a in successful
+        ):
+            guard = CONTEXT_GUARD_ESTIMATED
+        report["context_guard"] = guard
         report["lineage_warnings"] = list(rotation.preflight.lineage_warnings)
         report["token_estimate_delta"] = list(rotation.preflight.token_estimate_delta)
 

@@ -79,6 +79,11 @@ class AgentRotationState:
     window_rejected: dict[str, str] = field(default_factory=dict)
     rotations_done: int = 0
     succeeded: bool = False
+    #: True when the mage's COMMITTED (final) model was accepted on an estimated or
+    #: unknown window rather than an exact probe. The run-level ``context_guard`` must
+    #: read "estimated" if any surviving mage ran unmeasured (R16 honesty on the
+    #: rotation path -- the highest-risk path per R5b).
+    ran_unmeasured: bool = False
 
 
 class RotationPolicy:
