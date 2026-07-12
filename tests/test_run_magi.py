@@ -5536,3 +5536,98 @@ class TestRotationProposeVerifyCommit:
         assert len(probed) == 3, f"bounded by max_probe_attempts, got {len(probed)}"
         assert result["degraded"] is True, "no fitting candidate -> the mage dies"
         assert len(result["agents"]) == 2, "degraded mode still synthesizes with 2"
+
+
+# ---------------------------------------------------------------------------
+# Task 11: failure semantics (R5a) + fast-fail on a dead endpoint (R15)
+# ---------------------------------------------------------------------------
+
+
+class TestFailureSemanticsAndFastFail:
+    """R5a: a failure is global or local by its NATURE, not by who suffered it."""
+
+    @pytest.mark.asyncio
+    async def test_transport_failure_condemns_the_lineage_for_every_mage(self, tmp_path):
+        """BDD-30: if the glm-5.2 (zhipu) fallback is down for Melchior, it is down
+        for Balthasar too -- never handed a lineage already condemned run-wide."""
+        ctx = _rotation()
+        used: dict[str, list[str]] = {"melchior": [], "balthasar": [], "caspar": []}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            used[agent_name].append(spec.model)
+            if agent_name == "caspar":
+                return _valid(agent_name)
+            if spec.lineage in ("alibaba", "moonshot", "zhipu"):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert "zhipu" in ctx.registry.run_failed_lineages
+        assert used["balthasar"].count("glm-5.2:cloud") <= 2, (
+            "balthasar may have raced melchior into zhipu at most once; it must "
+            "never be handed a lineage already condemned run-wide"
+        )
+        assert any(m == "gpt-oss:120b-cloud" for m in used["balthasar"])
+        assert result.get("degraded") is not True
+
+    @pytest.mark.asyncio
+    async def test_schema_failure_stays_local_to_the_mage(self, tmp_path):
+        """BDD-31: the model was ALIVE and answered -- condemning the lineage run-wide
+        would throw away a model that works fine for the other two."""
+        ctx = _rotation()
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and spec.lineage == "deepseek":
+                raise ValidationError("missing keys: ['findings']")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert ctx.registry.run_failed_lineages == set(), (
+            "a schema failure must NEVER be globalized"
+        )
+        assert result.get("degraded") is not True
+
+    @pytest.mark.asyncio
+    async def test_two_connection_refused_lineages_abort_the_run_at_once(self, tmp_path):
+        """BDD-40: rotating is pointless if what died is the SERVER."""
+        attempts = {"n": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            attempts["n"] += 1
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+
+        with pytest.raises(RuntimeError, match="endpoint"):
+            await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert attempts["n"] <= 6, (
+            "the abort must be FAST: once 2 distinct lineages refuse the connection, "
+            "the shared endpoint_down Event stops the siblings before they spend "
+            f"their own budgets on the same dead server (got {attempts['n']} attempts; "
+            "without the Event this would be 18)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_http_500_storm_does_NOT_trigger_the_fast_fail(self, tmp_path):
+        """BDD-41: a 500 means SOMEONE answered -- the endpoint is alive and the next
+        attempt may succeed. Aborting would kill healthy runs a backoff would save."""
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if spec.lineage in ("alibaba", "moonshot", "deepseek"):
+                raise RuntimeError("HTTP 500 Internal Server Error")
+            return _valid(agent_name)  # every fallback works
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert result["consensus"] is not None, "the run must continue and rotate"
+        assert result.get("degraded") is not True
+        assert len(result["agents"]) == 3
