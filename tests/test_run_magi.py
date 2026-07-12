@@ -18,7 +18,7 @@ import pytest
 
 from fallback_policy import AgentRotationState
 from ollama_config import ModelSpec
-from rotation_harness import REQUIRED, TRIO, _rotation, _run, _valid
+from rotation_harness import FALLBACK, REQUIRED, TRIO, _rotation, _run, _valid
 from validate import ValidationError
 
 
@@ -5843,3 +5843,196 @@ class TestRotationFaultInjection:
         await _run(tmp_path, mock_launch, rotation=_rotation())
 
         assert in_flight["max"] <= 3, f"opened {in_flight['max']} concurrent requests"
+
+
+# ---------------------------------------------------------------------------
+# Task 13: noisy telemetry (R9/R13/R16/NR3b) -- no silent fallback ever
+# ---------------------------------------------------------------------------
+
+
+def _preflight(context_guard, *, deltas=(), warnings=()):
+    """A PreflightResult carrying the telemetry the report reads from it (T8)."""
+    from ollama_preflight import PreflightResult
+
+    return PreflightResult(
+        capabilities={},
+        min_window_tokens=REQUIRED,
+        required_tokens=REQUIRED,
+        context_guard=context_guard,
+        lineage_warnings=list(warnings),
+        fallback=tuple(FALLBACK),
+        token_estimate_delta=list(deltas),
+    )
+
+
+async def _rotated_report(tmp_path, *, preflight=None, api_key=None, secret_in_error=False):
+    """Drive a REAL caspar rotation (deepseek-v4-pro -> glm-5.2) and return the report."""
+    from dataclasses import replace
+
+    async def mock_launch(
+        agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+    ):
+        if agent_name != "caspar":
+            return _valid(agent_name)
+        if spec.model == "deepseek-v4-pro:cloud":
+            msg = "HTTP 503 Service Unavailable"
+            if secret_in_error:
+                msg += " (backend echoed auth token=sk-supersecret into the body)"
+            raise RuntimeError(msg)
+        return _valid(agent_name)
+
+    rotation = _rotation()
+    if preflight is not None:
+        rotation = replace(rotation, preflight=preflight)
+    if api_key is not None:
+        rotation = replace(rotation, config=replace(rotation.config, api_key=api_key))
+    return await _run(tmp_path, mock_launch, rotation=rotation)
+
+
+def _caspar(report):
+    """The rotated mage's agent entry -- located by NAME, never by list position."""
+    return next(a for a in report["agents"] if a["agent"] == "caspar")
+
+
+class TestTelemetrySurfaces:
+    """R9/R13/R16: every rotation is visible on stderr, in the banner, and in the report."""
+
+    @pytest.mark.asyncio
+    async def test_rotation_is_announced_on_stderr_with_its_cause(self, tmp_path, capsys):
+        """R9/BDD-12: a fallback is NEVER silent -- stderr names the new model."""
+        await _rotated_report(tmp_path)
+        assert "rotating to glm-5.2:cloud" in capsys.readouterr().err
+
+    @pytest.mark.asyncio
+    async def test_report_carries_model_configured_used_rotations_and_reason(self, tmp_path):
+        """R13/BDD-12: the rotated mage's telemetry is complete AND correctly scoped."""
+        report = await _rotated_report(tmp_path)
+
+        caspar = _caspar(report)
+        assert caspar["model_configured"] == "deepseek-v4-pro:cloud"
+        assert caspar["model_used"] == "glm-5.2:cloud"
+        assert caspar["rotations"] == 1
+        assert caspar["fallback_reason"]["kind"] == "transport"
+        assert caspar["fallback_reason"]["from_model"] == "deepseek-v4-pro:cloud"
+        assert caspar["fallback_reason"]["to_model"] == "glm-5.2:cloud"
+
+        melchior = next(a for a in report["agents"] if a["agent"] == "melchior")
+        assert melchior["model_configured"] == melchior["model_used"], "no rotation => equal"
+        assert melchior["rotations"] == 0
+        assert melchior["fallback_reason"] is None
+
+    @pytest.mark.asyncio
+    async def test_model_used_is_the_tag_string_not_a_serialized_ModelSpec(self, tmp_path):
+        """R13 (a): the report stores the .model TAG, not the ModelSpec (not JSON-serialisable)."""
+        caspar = _caspar(await _rotated_report(tmp_path))
+        assert isinstance(caspar["model_used"], str)
+        assert isinstance(caspar["model_configured"], str)
+        assert not isinstance(caspar["model_used"], ModelSpec)
+        assert caspar["model_used"] == "glm-5.2:cloud"
+
+    @pytest.mark.asyncio
+    async def test_fallback_agents_lists_exactly_the_rotated_mages(self, tmp_path):
+        """R9 (b): the run-level roll-up names every mage that rotated -- and no other."""
+        report = await _rotated_report(tmp_path)
+        assert report["fallback_agents"] == ["caspar"]
+
+    @pytest.mark.asyncio
+    async def test_banner_marks_the_rotated_mage(self, tmp_path):
+        """R9: the banner -- where the verdict's reader actually looks -- flags the swap."""
+        from reporting import format_banner
+
+        report = await _rotated_report(tmp_path)
+        assert "[fallback: glm-5.2:cloud]" in format_banner(report)
+
+    @pytest.mark.asyncio
+    async def test_banner_renders_the_estimated_guard_and_lineage_warnings(self, tmp_path):
+        """R16/R102: an ESTIMATED guard and any lineage warning must RENDER in the banner."""
+        from reporting import format_banner
+
+        warning = "deepseek-v4-pro declares 'deepseek' but no known pattern confirms it"
+        report = await _rotated_report(
+            tmp_path,
+            preflight=_preflight("estimated", warnings=[warning]),
+        )
+        banner = format_banner(report)
+        assert "estimated" in banner, "the reader must SEE the guard was not enforced (R16)"
+        assert warning in banner, "the lineage warning must reach the banner (R102)"
+
+    @pytest.mark.asyncio
+    async def test_fallback_reason_is_the_structured_R13_dict_with_kind_in_the_enum(self, tmp_path):
+        """R13 (d): fallback_reason is a STRUCTURED dict and its kind is an R13 enum member."""
+        from run_magi import _KIND_SCHEMA, _KIND_TIMEOUT, _KIND_TRANSPORT
+
+        reason = _caspar(await _rotated_report(tmp_path))["fallback_reason"]
+        assert isinstance(reason, dict)
+        assert {
+            "kind",
+            "from_model",
+            "from_lineage",
+            "to_model",
+            "to_lineage",
+            "detail",
+            "http_status",
+            "attempts",
+        } <= set(reason)
+        assert reason["kind"] in (_KIND_TRANSPORT, _KIND_SCHEMA, _KIND_TIMEOUT)
+        assert reason["kind"] == _KIND_TRANSPORT, "a 503 is transport, not http/connection"
+
+    @pytest.mark.asyncio
+    async def test_context_guard_has_exactly_two_values(self, tmp_path):
+        """R16/BDD-42: the field's domain is exactly {enforced, estimated}."""
+        report = await _rotated_report(tmp_path)
+        assert report["context_guard"] in ("enforced", "estimated")
+
+    @pytest.mark.asyncio
+    async def test_context_guard_is_enforced_when_measured_and_estimated_otherwise(self, tmp_path):
+        """R16/R18 (c): the field's SEMANTICS -- enforced only when MEASURED, else estimated."""
+        from ollama_preflight import CONTEXT_GUARD_ENFORCED, CONTEXT_GUARD_ESTIMATED
+
+        enforced_report = await _rotated_report(
+            tmp_path, preflight=_preflight(CONTEXT_GUARD_ENFORCED)
+        )
+        estimated_report = await _rotated_report(
+            tmp_path, preflight=_preflight(CONTEXT_GUARD_ESTIMATED)
+        )
+
+        assert enforced_report["context_guard"] == "enforced"
+        assert estimated_report["context_guard"] == "estimated"
+
+    @pytest.mark.asyncio
+    async def test_token_estimate_delta_is_reported(self, tmp_path):
+        """R16/BDD-46: the estimate-vs-measured delta reaches the report per trio model."""
+        from ollama_preflight import CONTEXT_GUARD_ENFORCED
+
+        delta = {"agent": "melchior", "estimated": 13_827, "actual": 16_232, "error_pct": -14.8}
+        report = await _rotated_report(
+            tmp_path, preflight=_preflight(CONTEXT_GUARD_ENFORCED, deltas=[delta])
+        )
+
+        d = report["token_estimate_delta"][0]
+        assert {"agent", "estimated", "actual", "error_pct"} <= set(d)
+        assert d["actual"] == 16_232
+
+    @pytest.mark.asyncio
+    async def test_the_whole_report_round_trips_through_json_dumps(self, tmp_path):
+        """R13 (e): the WHOLE report must be JSON-serialisable (no raw ModelSpec leaked)."""
+        from ollama_preflight import CONTEXT_GUARD_ESTIMATED
+
+        report = await _rotated_report(
+            tmp_path,
+            preflight=_preflight(
+                CONTEXT_GUARD_ESTIMATED,
+                deltas=[{"agent": "melchior", "estimated": 1, "actual": 2, "error_pct": 100.0}],
+                warnings=["two mages look like the same lab"],
+            ),
+        )
+        json.dumps(report)  # must NOT raise: no dataclass leaked into the report tree
+
+    @pytest.mark.asyncio
+    async def test_api_key_never_appears_in_any_error_surface(self, tmp_path, capsys):
+        """NR3b: the api_key is redacted at the single boundary -- absent from BOTH the
+        report JSON (fallback_reason detail) and stderr (the rotation notice)."""
+        report = await _rotated_report(tmp_path, api_key="sk-supersecret", secret_in_error=True)
+
+        blob = json.dumps(report) + capsys.readouterr().err
+        assert "sk-supersecret" not in blob
