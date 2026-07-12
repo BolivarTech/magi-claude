@@ -41,6 +41,12 @@ experiments/
 /scripts/claude_usage.py
 /scripts/sleep_signal.py
 /scripts/graphify_ollama.py
+# v5.0.0 migration + release tooling (network-bound, excluded from make verify).
+# The smoke tests import them, so they are dev-local too: a fresh checkout without
+# scripts/ simply never collects tests/test_release_tooling.py.
+/scripts/validate_magi_toml.py
+/scripts/verify_fallback_tags.py
+/tests/test_release_tooling.py
 
 # Review-gate artifacts: bundles handed to MAGI (spec + plan + standards) and
 # usage-gate snapshots. Local to a gate run, never part of the shipped plugin.
