@@ -368,8 +368,7 @@ async def preflight(config: OllamaConfig, prompt: str) -> PreflightResult:
         )
         if config.strict_context_guard:  # R18: strict is strict -- cannot prove the fit
             raise OllamaPreflightError(
-                f"cannot enforce the context guard: {reason}, and "
-                "strict_context_guard is enabled."
+                f"cannot enforce the context guard: {reason}, and strict_context_guard is enabled."
             )
         print(
             f"WARNING: {reason}; falling back to the estimator. NOTE: without measured "
