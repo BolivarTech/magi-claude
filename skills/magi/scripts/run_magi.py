@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import urllib.error
@@ -424,8 +425,15 @@ def _classify(exc: BaseException) -> str:
     if isinstance(exc, urllib.error.HTTPError):
         return _FAIL_HTTP
     if isinstance(exc, urllib.error.URLError):
-        # A socket timeout arrives WRAPPED: URLError(TimeoutError()).
-        return _FAIL_TIMEOUT if isinstance(exc.reason, TimeoutError) else _FAIL_CONNECTION
+        # A socket timeout arrives WRAPPED: URLError(socket.timeout()). ``socket.timeout``
+        # IS an alias of ``TimeoutError`` on 3.10+ (the project floor is 3.12), so the
+        # first check already covers it -- ``socket.timeout`` is named explicitly for a
+        # self-documenting predicate that does not rely on the reader knowing the alias
+        # (MAGI gate, Caspar). Not classifying it as a timeout would feed a slow-but-alive
+        # endpoint into the endpoint-down fast-fail (decisions #50/#98).
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            return _FAIL_TIMEOUT
+        return _FAIL_CONNECTION
     if isinstance(exc, TimeoutError):  # asyncio.TimeoutError is an alias since 3.11
         return _FAIL_TIMEOUT
     if isinstance(exc, ConnectionError):
@@ -440,7 +448,12 @@ def _classify(exc: BaseException) -> str:
     return _FAIL_UNEXPECTED
 
 
-def _build_retry_prompt(original_prompt: str, error: ValidationError | json.JSONDecodeError) -> str:
+def _build_retry_prompt(
+    original_prompt: str,
+    error: ValidationError | json.JSONDecodeError,
+    *,
+    api_key: str | None = None,
+) -> str:
     """Return the retry prompt with corrective feedback appended.
 
     When :func:`launch_agent` raises :class:`ValidationError` (schema
@@ -460,13 +473,18 @@ def _build_retry_prompt(original_prompt: str, error: ValidationError | json.JSON
         error: The exception that triggered the retry. Currently either
             :class:`ValidationError` (schema mismatch) or
             :class:`json.JSONDecodeError` (output not parseable as JSON).
+        api_key: The Ollama api_key, if any. The error is REDACTED against it
+            before being embedded -- the retry prompt is written to
+            ``{agent}.prompt.txt``, and NR3b requires the key to appear on no
+            surface (MAG gate, Caspar): the error is redacted at every other
+            boundary, so this one must not be the exception.
 
     Returns:
         A new prompt string that concatenates the original prompt with a
         feedback block describing the failure and restating the schema
         contract.
     """
-    detail = str(error)
+    detail = redact_secrets(str(error), api_key)
     if len(detail) > MAX_ERROR_CHARS:
         detail = detail[:MAX_ERROR_CHARS] + "..."
     return (
@@ -676,7 +694,8 @@ async def _attempt_model(
             # the type _build_retry_prompt accepts -- the two are equivalent by
             # construction (_classify returns schema iff it is one of these).
             if isinstance(exc, (ValidationError, json.JSONDecodeError)):
-                attempt_prompt = _build_retry_prompt(prompt, exc)  # the model needs correcting
+                # the model needs correcting; redact the api_key from the embedded error
+                attempt_prompt = _build_retry_prompt(prompt, exc, api_key=env.api_key)
             else:
                 attempt_prompt = prompt  # nothing to correct
                 await asyncio.sleep(ctx.config.retry_backoff_seconds)

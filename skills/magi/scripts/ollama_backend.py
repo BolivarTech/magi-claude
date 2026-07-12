@@ -72,6 +72,13 @@ class OllamaBackend(AgentBackend):
         return text.replace(key, _REDACTED) if key else text
 
     def _call(self, req: urllib.request.Request, timeout: int) -> bytes:
+        # CONTRACT (MAGI gate, Balthasar): the RuntimeError message FORMATS below --
+        # "Ollama HTTP {code}", "Ollama 404 at chat-time", "Cannot reach Ollama at ..." --
+        # are matched by ``run_magi._classify`` (via ``_HTTP_MESSAGE_RE`` /
+        # ``_CONNECTION_MESSAGE_MARKERS``) to tell a transport failure from a coding bug.
+        # Reword a message here and you MUST update those markers + the pinning test
+        # ``test_classify_matches_the_real_ollama_backend_messages``, or a real transport
+        # error silently becomes "unexpected" and the mage dies on its first attempt.
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return cast(bytes, resp.read())

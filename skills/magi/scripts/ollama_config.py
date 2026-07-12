@@ -10,6 +10,7 @@ with OLLAMA_HOST / OLLAMA_API_KEY as generic env fallbacks BELOW files.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
@@ -317,6 +318,11 @@ def _require_float(value: Any, *, key: str, minimum: float, path: str) -> float:
             raise OllamaConfigError(f"{key} must be a number (got {value!r})", path) from exc
     else:
         raise OllamaConfigError(f"{key} must be a number (got {value!r})", path)
+    # Reject inf/nan BEFORE the range check: ``nan >= minimum`` and ``nan < minimum``
+    # are BOTH False, so a NaN slips through, and ``inf`` passes any lower bound --
+    # either would reach ``asyncio.sleep`` and hang the orchestrator (MAGI gate, Caspar).
+    if not math.isfinite(parsed):
+        raise OllamaConfigError(f"{key} must be a finite number (got {parsed})", path)
     if parsed < minimum:
         raise OllamaConfigError(f"{key} must be >= {minimum} (got {parsed})", path)
     return parsed
