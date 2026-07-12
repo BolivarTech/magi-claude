@@ -26,6 +26,7 @@ Exit codes:
 
 import argparse
 import sys
+import tomllib
 from pathlib import Path
 
 from ollama_config import OllamaConfigError, resolve_config
@@ -47,20 +48,35 @@ def main() -> int:
     """Validate the TOML at the given path and report the first problem found.
 
     Returns:
-        ``0`` if the config is a valid v5 config, ``1`` if it is not.
+        ``0`` if the config is a valid v5 config, ``1`` if it is not (bad TOML syntax,
+        or a schema/lineage rejection).
 
     Raises:
-        SystemExit: with code ``2`` on CLI misuse -- including a path that does not
-            exist. Resolving a missing file would silently fall through to the built-in
-            defaults and report ``OK``, telling the user their config is fine when it
-            was never read: a fail-open in the one tool whose job is to say otherwise.
+        SystemExit: with code ``2`` on CLI misuse -- a path that is missing, is not a
+            file, or cannot be read. A missing path must never be a silent ``OK``:
+            resolving it would fall through to the built-in defaults and validate
+            THOSE, reporting that a config it never read is fine.
     """
     parser = argparse.ArgumentParser(description="Validate a magi-ollama.toml against v5.")
     parser.add_argument("path", nargs="?", default=DEFAULT_CONFIG_PATH)
     args = parser.parse_args()
 
-    if not Path(args.path).is_file():
+    path = Path(args.path)
+    if not path.exists():
         parser.error(f"no such config file: {args.path}")
+    if not path.is_file():
+        parser.error(f"not a file: {args.path}")
+
+    # Parse the syntax ourselves so a broken bracket is not answered with a lecture about
+    # lineages, and so an unreadable file leaves as a message rather than a stack trace.
+    try:
+        with open(path, "rb") as handle:
+            tomllib.load(handle)
+    except OSError as exc:
+        parser.error(f"cannot read {args.path}: {exc.strerror or exc}")
+    except tomllib.TOMLDecodeError as exc:
+        print(f"INVALID: {args.path} is not valid TOML: {exc}", file=sys.stderr)
+        return 1
 
     try:
         # global_path="" (falsy), NOT None: None is resolve_config's sentinel for "use
@@ -82,7 +98,12 @@ def main() -> int:
         print(V5_SHAPE_HINT, file=sys.stderr)
         return 1
 
-    print(f"OK: {args.path} is a valid v5 config ({len(config.fallback)} fallback(s))")
+    # Echo what was accepted: an empty file also resolves to a valid config (the built-in
+    # defaults), so a bare "OK" cannot be told apart from an endorsement of YOUR trio.
+    print(f"OK: {args.path} is a valid v5 config")
+    for agent, spec in config.models.items():
+        print(f"  {agent:<9} = {spec.model} [{spec.lineage}]")
+    print(f"  fallback  = {len(config.fallback)} model(s)")
     return 0
 
 
