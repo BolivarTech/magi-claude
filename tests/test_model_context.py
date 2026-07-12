@@ -6,7 +6,12 @@
 import pytest
 
 from fallback_policy import ModelCapability
-from model_context import fetch_capabilities
+from model_context import (
+    MAX_RETRY_FEEDBACK_TOKENS,
+    compute_required_tokens,
+    fetch_capabilities,
+    probe_prompt_tokens,
+)
 from ollama_config import ModelSpec, OllamaConfig
 
 
@@ -89,3 +94,43 @@ async def test_one_model_failing_does_not_discard_the_others(ollama_config):
     caps = await fetch_capabilities(ollama_config, ["a", "b"], _show=show)
     assert caps["a"].window is None
     assert caps["b"].window == 2000  # useful result NOT thrown away
+
+
+async def test_probe_returns_the_exact_tokenizer_count(ollama_config):
+    async def fake_post(model, prompt, timeout):
+        return {"usage": {"prompt_tokens": 16_232}}
+
+    assert await probe_prompt_tokens(ollama_config, "m", "x", _post=fake_post) == 16_232
+
+
+async def test_probe_without_usage_is_unmeasurable_not_zero(ollama_config):
+    # BDD-48: never assume "it fits" without evidence.
+    async def fake_post(model, prompt, timeout):
+        return {"choices": [{"message": {"content": "hi"}}]}
+
+    assert await probe_prompt_tokens(ollama_config, "m", "x", _post=fake_post) is None
+
+
+async def test_probe_that_raises_is_unmeasurable_and_does_not_kill_the_run(ollama_config):
+    # BDD-51
+    import urllib.error
+
+    async def boom(model, prompt, timeout):
+        raise urllib.error.HTTPError("u", 500, "err", {}, None)
+
+    assert await probe_prompt_tokens(ollama_config, "m", "x", _post=boom) is None
+
+
+def test_required_tokens_covers_the_WORST_attempt_not_the_first():
+    # BDD-33 + BDD-37 + the cycle-17 CRITICAL: the retry prompt is BIGGER than the original.
+    got = compute_required_tokens(
+        100_000, output_headroom_tokens=8192, input_margin_pct=40, exact=True
+    )
+    assert got == 100_000 + MAX_RETRY_FEEDBACK_TOKENS + 8192
+
+
+def test_required_tokens_applies_the_margin_when_only_an_estimate_exists():
+    got = compute_required_tokens(
+        100_000, output_headroom_tokens=8192, input_margin_pct=40, exact=False
+    )
+    assert got == 140_000 + MAX_RETRY_FEEDBACK_TOKENS + 8192

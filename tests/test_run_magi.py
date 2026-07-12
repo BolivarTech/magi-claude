@@ -4993,3 +4993,29 @@ def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
     from ollama_backend import OllamaBackend
 
     assert isinstance(captured["backend"], OllamaBackend)
+
+
+def test_retry_feedback_truncates_a_huge_error():
+    # BDD-45: the error is bounded so the retry prompt cannot grow without limit.
+    from model_context import MAX_ERROR_CHARS
+    from run_magi import _build_retry_prompt
+    from validate import ValidationError
+
+    err = ValidationError("x" * 10_000)
+    out = _build_retry_prompt("PROMPT", err)
+    assert len(out) < len("PROMPT") + MAX_ERROR_CHARS + 600
+    assert "..." in out
+
+
+def test_retry_feedback_bound_holds_for_NON_ASCII_errors():
+    # Truncating CHARS does not bound TOKENS. Exercise the TRUE worst case: an emoji
+    # is 4 UTF-8 bytes, and a byte-level BPE emits up to one token per byte (C2-3).
+    from model_context import MAX_RETRY_FEEDBACK_TOKENS
+    from run_magi import _build_retry_prompt
+    from validate import ValidationError
+
+    err = ValidationError("\U0001f525" * 10_000)
+    block = _build_retry_prompt("", err)
+    # UTF-8 byte count is a strict upper bound on tokens for any byte-level BPE.
+    worst_case_tokens = len(block.encode("utf-8"))
+    assert worst_case_tokens <= MAX_RETRY_FEEDBACK_TOKENS
