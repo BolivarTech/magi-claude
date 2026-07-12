@@ -122,7 +122,9 @@ def test_validator_ignores_the_users_global_config(tmp_path, monkeypatch):
     assert validate_magi_toml.main() == 0
 
 
-def test_validator_echoes_the_resolved_trio_so_you_can_see_it_was_read(tmp_path, monkeypatch, capsys):
+def test_validator_echoes_the_resolved_trio_so_you_can_see_it_was_read(
+    tmp_path, monkeypatch, capsys
+):
     """``OK`` must show WHAT was accepted, not just that something was.
 
     A bare "OK: valid v5 config" is what an EMPTY file printed too (MAGI falls back to
@@ -142,7 +144,9 @@ def test_validator_echoes_the_resolved_trio_so_you_can_see_it_was_read(tmp_path,
     assert "alibaba" in out
 
 
-def test_validator_rejects_malformed_toml_without_the_lineage_lecture(tmp_path, monkeypatch, capsys):
+def test_validator_rejects_malformed_toml_without_the_lineage_lecture(
+    tmp_path, monkeypatch, capsys
+):
     """A syntax error is not a schema error: do not answer it with the lineage hint."""
     path = tmp_path / "magi-ollama.toml"
     path.write_text('base_url = "http\n', encoding="utf-8")
