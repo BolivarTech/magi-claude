@@ -151,10 +151,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         metavar="FILE",
         help=(
-            "Also write the human-readable verdict report (the banner + findings) to "
-            "FILE, in addition to stdout. Useful when stdout is not captured (e.g. a "
-            "remote/phone client). The structured per-agent JSON still goes to "
-            "--output-dir."
+            "Redirect the human-readable verdict report (the banner + findings) to "
+            "FILE, SUPPRESSING it on stdout -- useful when stdout is not captured "
+            "(e.g. a remote/phone client). The write is atomic; on a write failure it "
+            "warns and falls back to stdout so the verdict is never lost. The "
+            "structured per-agent JSON still goes to --output-dir."
         ),
     )
     parser.add_argument(
@@ -1846,14 +1847,23 @@ def main() -> None:
         context_guard=report.get("context_guard"),
         lineage_warnings=report.get("lineage_warnings"),
     )
-    # -o/--out REDIRECTS the report to a file and SUPPRESSES it on stdout. A write
-    # failure is not allowed to lose the verdict: it warns LOUDLY on stderr and falls
-    # back to printing the report on stdout.
+    # -o/--out REDIRECTS the report to a file and SUPPRESSES it on stdout. The write is
+    # ATOMIC (temp file + os.replace) so a failure mid-write never leaves a TRUNCATED
+    # report at the target path -- a partial verdict there would be indistinguishable
+    # from a whole one to a file-only consumer (the project's worst-case failure, on the
+    # output side). A write failure is not allowed to lose the verdict either: it warns
+    # LOUDLY on stderr and falls back to printing the report on stdout.
     if args.out:
+        tmp_path_out = args.out + ".tmp"
         try:
-            with open(args.out, "w", encoding="utf-8") as out_file:
+            with open(tmp_path_out, "w", encoding="utf-8") as out_file:
                 out_file.write(report_text + "\n")
+            os.replace(tmp_path_out, args.out)
         except OSError as exc:
+            try:
+                os.unlink(tmp_path_out)  # drop any partial temp; the target is untouched
+            except OSError:
+                pass
             print(
                 f"WARNING: could not write report to {args.out} ({exc}); "
                 "printing it to stdout instead so the verdict is not lost",

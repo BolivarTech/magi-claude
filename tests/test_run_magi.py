@@ -4355,6 +4355,28 @@ class TestInputSizeWiring:
         assert "REPORT" in capsys.readouterr().out, "on write failure, fall back to stdout"
         assert "could not write report" in buf.getvalue(), "and warn loudly on stderr"
 
+    def test_out_flag_write_is_atomic_no_partial_file_on_failure(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Atomicity: a failure AFTER the temp file is fully written (here os.replace
+        fails) must leave NO file at the target path -- a truncated verdict on disk is
+        the output-side of the project's worst-case 'indistinguishable from legitimate'
+        failure. The temp is cleaned up; the verdict still falls back to stdout."""
+        import run_magi
+
+        out = tmp_path / "verdict.txt"
+
+        def boom_replace(src, dst):
+            raise OSError("simulated rename failure after a full temp write")
+
+        monkeypatch.setattr(run_magi.os, "replace", boom_replace)
+        _created, buf = self._patch_main(tmp_path, monkeypatch, extra_argv=["-o", str(out)])
+
+        assert not out.exists(), "no partial file may remain at the target on failure"
+        assert not (tmp_path / "verdict.txt.tmp").exists(), "the temp file must be cleaned up"
+        assert "REPORT" in capsys.readouterr().out, "the verdict falls back to stdout"
+        assert "could not write report" in buf.getvalue(), "and warns loudly"
+
     def test_no_out_flag_prints_to_stdout_and_writes_no_file(self, tmp_path, monkeypatch, capsys):
         """Without -o, the report goes to stdout (normal v4 behaviour) and no file is made."""
         self._patch_main(tmp_path, monkeypatch)
