@@ -1071,10 +1071,11 @@ async def run_orchestrator(
                     _safe_display_update(display, name, "rotating", log_gate)
                     spec = next_spec
                     continue
-                except (asyncio.TimeoutError, TimeoutError):
-                    _safe_display_update(display, name, "timeout", log_gate)
-                    raise
                 except _EndpointDown:
+                    # A sibling proved the endpoint dead; rotating cannot help. (A raw
+                    # TimeoutError never reaches here -- _attempt_model classifies it
+                    # and folds it into _AttemptsExhausted, so there is no separate
+                    # "timeout" terminal on the rotation path.)
                     _safe_display_update(display, name, "failed", log_gate)
                     raise
                 except BaseException:
