@@ -77,6 +77,8 @@ def test_template_emits_rotation_tunables_as_keys_before_models():
         "input_margin_pct",
         "strict_context_guard",
         "retry_backoff_seconds",
+        "preflight_timeout_seconds",
+        "probe_timeout_seconds",
     ):
         # An ACTIVE top-level key: start of line, key, optional alignment spaces, '='.
         match = re.search(rf"(?m)^{key} *=", text)
@@ -93,6 +95,8 @@ def test_template_rotation_tunables_reparse_to_the_defaults(tmp_path):
         DEFAULT_MAX_ROTATIONS,
         DEFAULT_OUTPUT_HEADROOM_TOKENS,
         DEFAULT_INPUT_MARGIN_PCT,
+        DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
+        DEFAULT_PROBE_TIMEOUT_SECONDS,
         DEFAULT_RETRY_BACKOFF_SECONDS,
         DEFAULT_STRICT_CONTEXT_GUARD,
     )
@@ -107,3 +111,5 @@ def test_template_rotation_tunables_reparse_to_the_defaults(tmp_path):
     assert cfg.input_margin_pct == DEFAULT_INPUT_MARGIN_PCT
     assert cfg.strict_context_guard == DEFAULT_STRICT_CONTEXT_GUARD
     assert cfg.retry_backoff_seconds == DEFAULT_RETRY_BACKOFF_SECONDS
+    assert cfg.preflight_timeout_seconds == DEFAULT_PREFLIGHT_TIMEOUT_SECONDS
+    assert cfg.probe_timeout_seconds == DEFAULT_PROBE_TIMEOUT_SECONDS
