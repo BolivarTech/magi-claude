@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sys
 import urllib.request
 from typing import Any, Awaitable, Callable, Mapping, Sequence
@@ -228,3 +229,115 @@ def _default_probe(config: OllamaConfig) -> ProbeFn:
         return await asyncio.to_thread(_call)
 
     return _post
+
+
+MAX_ERROR_CHARS = 400
+#: Fixed block ~355 chars (~90 tok) + 400 error chars priced at the TRUE worst ratio.
+#: That ratio is 4 TOKENS PER CHARACTER, not 1 and not 3: an EMOJI is 4 UTF-8 bytes,
+#: and a byte-level BPE that fails to merge them emits one token per byte. This bound
+#: has now been wrong twice (1 tok/char, then 3) -- each time by assuming a comfortable
+#: ratio instead of the worst one that actually exists. 400 * 4 + 90 + reserve = 2048.
+#: Bounding CHARS does not bound TOKENS.
+MAX_RETRY_FEEDBACK_TOKENS = 2048
+
+#: Percent-to-fraction base for the input-margin sizing (no bare ``100`` in the body).
+#: ``(_PERCENT + input_margin_pct) / _PERCENT`` == ``1 + margin%``.
+_PERCENT = 100
+
+#: The probe adapter's shape -- the callable a later task stores and returns from
+#: ``make_probe``: (model, prompt, timeout) -> exact tokens or None.
+ProbeTokensFn = Callable[[str, str, int], Awaitable[int | None]]
+
+
+def compute_required_tokens(
+    payload_tokens: int,
+    *,
+    output_headroom_tokens: int,
+    input_margin_pct: int,
+    exact: bool = True,
+) -> int:
+    """Tokens a model's window must hold for the WORST attempt of this run.
+
+    The retry prompt carries a corrective feedback block, so it is BIGGER than the
+    first attempt. Sizing the guard against the first attempt would leave a hole
+    through which the very failure it prevents (silent truncation) could walk in on
+    the retry.
+
+    Takes plain ints, NOT a config object: both ``OllamaConfig`` (preflight) and the
+    orchestrator's runtime config call it, and coupling it to either one would force
+    the other to fake it (a type error under mypy --strict). Low coupling is what
+    lets one function serve both callers.
+
+    Args:
+        payload_tokens: Exact count (probe) or heuristic estimate.
+        output_headroom_tokens: Room reserved for the verdict AND the model's
+            thinking tokens, which never appear in the report but do consume window.
+        input_margin_pct: Cushion applied ONLY to an estimate. It is a pre-filter,
+            never a guarantee: the exact probe makes the real decision.
+        exact: False when *payload_tokens* is an estimate, so the margin applies.
+
+    Returns:
+        The minimum window size, in tokens, a model must have to be eligible.
+    """
+    base = payload_tokens
+    if not exact:
+        base = math.ceil(payload_tokens * (_PERCENT + input_margin_pct) / _PERCENT)
+    return base + MAX_RETRY_FEEDBACK_TOKENS + output_headroom_tokens
+
+
+async def probe_prompt_tokens(
+    config: OllamaConfig,
+    model: str,
+    prompt: str,
+    *,
+    timeout: int | None = None,
+    _post: ProbeFn | None = None,
+) -> int | None:
+    """Measure the payload with the MODEL'S OWN tokenizer.
+
+    Sends the real prompt with ``max_tokens=1`` and reads ``usage.prompt_tokens`` --
+    part of the OpenAI standard, so this works against ANY compatible endpoint
+    (unlike /api/show). The chars/4 heuristic underestimates real tokenizers by
+    14.8%-19.8% (measured 2026-07-11), which is exactly the error that produces
+    silent truncation.
+
+    Every failure is REPORTED, never swallowed (R18): a degraded guard the reader
+    cannot see is worse than no guard, because the report would imply a protection
+    that never happened.
+
+    Args:
+        config: Resolved config (endpoint, auth, probe timeout).
+        model: Model whose tokenizer should count the payload.
+        prompt: The exact prompt the agent will receive.
+        timeout: Override for the probe timeout, in seconds.
+        _post: Injected chat-completions caller (tests).
+
+    Returns:
+        The exact prompt token count, or None when it could not be measured (the
+        response omitted ``usage``, or the probe itself failed). NEVER a guess: the
+        caller decides what to do with "unmeasurable" via ``strict_context_guard``.
+    """
+    post = _post or _default_probe(config)
+    try:
+        data = await post(model, prompt, timeout or config.probe_timeout_seconds)
+    except Exception as exc:  # noqa: BLE001 -- accuracy optimisation, never fatal
+        # Deliberate broad catch: ANY probe failure degrades to the estimator.
+        # It is NOT silent -- the warning is the whole point (R18).
+        print(
+            f"WARNING: token probe failed for {model} "
+            f"({redact_secrets(str(exc), config.api_key)}); "
+            f"falling back to the estimator (context_guard=estimated)",
+            file=sys.stderr,
+        )
+        return None
+    usage = data.get("usage") if isinstance(data, dict) else None
+    tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    if isinstance(tokens, bool) or not isinstance(tokens, int):
+        # ``isinstance(True, int)`` is True in Python -- reject bools explicitly.
+        print(
+            f"WARNING: endpoint returned no usage.prompt_tokens for {model}; "
+            f"falling back to the estimator (context_guard=estimated)",
+            file=sys.stderr,
+        )
+        return None
+    return tokens

@@ -37,6 +37,7 @@ _SCRIPT_DIR = str(Path(__file__).parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from model_context import MAX_ERROR_CHARS  # noqa: E402
 from models import MODE_DEFAULT_MODELS, MODEL_IDS, VALID_MODELS, resolve_model  # noqa: E402
 from parse_agent_output import parse_agent_output as parse_raw_output  # noqa: E402
 from sanitize import InvalidInputError, build_user_prompt  # noqa: E402
@@ -388,11 +389,14 @@ def _build_retry_prompt(original_prompt: str, error: ValidationError | json.JSON
         feedback block describing the failure and restating the schema
         contract.
     """
+    detail = str(error)
+    if len(detail) > MAX_ERROR_CHARS:
+        detail = detail[:MAX_ERROR_CHARS] + "..."
     return (
         f"{original_prompt}\n\n"
         f"---RETRY-FEEDBACK---\n"
         f"Your previous response was rejected by the parsing pipeline:\n"
-        f"{error}\n\n"
+        f"{detail}\n\n"
         f"Re-emit your response as a complete, syntactically valid JSON "
         f"object containing ALL seven required top-level keys: agent, "
         f"verdict, confidence, summary, reasoning, findings, "
