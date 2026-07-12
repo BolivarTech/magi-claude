@@ -4373,7 +4373,7 @@ class TestInputSizeWiring:
         _created, buf = self._patch_main(tmp_path, monkeypatch, extra_argv=["-o", str(out)])
 
         assert not out.exists(), "no partial file may remain at the target on failure"
-        assert not (tmp_path / "verdict.txt.tmp").exists(), "the temp file must be cleaned up"
+        assert not list(tmp_path.glob("verdict.txt*.tmp")), "the temp file must be cleaned up"
         assert "REPORT" in capsys.readouterr().out, "the verdict falls back to stdout"
         assert "could not write report" in buf.getvalue(), "and warns loudly"
 
@@ -6166,3 +6166,40 @@ def test_parse_args_recognizes_the_out_flag():
     assert parse_args(["design", "x", "-o", "r.txt"]).out == "r.txt"
     assert parse_args(["design", "x", "--out", "r.txt"]).out == "r.txt"
     assert parse_args(["design", "x"]).out is None
+
+
+def test_write_report_file_writes_utf8_atomically(tmp_path):
+    """_write_report_file writes the text (utf-8) and leaves no temp behind."""
+    from run_magi import _write_report_file
+
+    out = tmp_path / "r.txt"
+    _write_report_file("hello ✓ world", str(out))
+    assert out.read_text(encoding="utf-8") == "hello ✓ world\n"
+    assert not list(tmp_path.glob("r.txt*.tmp")), "no temp file left after success"
+
+
+def test_write_report_file_survives_a_lone_surrogate(tmp_path):
+    """MAGI gate (Balthasar): a lone surrogate (json.loads decodes an escaped unpaired
+    surrogate in a model's output to one) must NOT raise UnicodeEncodeError and crash
+    after the verdict is computed -- the write escapes it instead so it stays total."""
+    from run_magi import _write_report_file
+
+    out = tmp_path / "r.txt"
+    text = "banner " + chr(0xD800) + " tail"  # a LONE surrogate, built at runtime
+    _write_report_file(text, str(out))  # must NOT raise UnicodeEncodeError
+    assert out.exists()
+    assert "tail" in out.read_text(encoding="utf-8"), "the report is written, surrogate escaped"
+
+
+def test_write_report_file_cleans_temp_and_raises_on_failure(tmp_path, monkeypatch):
+    """A failure after the temp is written (os.replace fails) removes the temp, leaves the
+    target untouched, and re-raises OSError for the caller's stdout fallback."""
+    import run_magi
+    from run_magi import _write_report_file
+
+    out = tmp_path / "r.txt"
+    monkeypatch.setattr(run_magi.os, "replace", lambda s, d: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError):
+        _write_report_file("verdict", str(out))
+    assert not out.exists(), "target untouched on failure"
+    assert not list(tmp_path.glob("r.txt*.tmp")), "temp cleaned up on failure"

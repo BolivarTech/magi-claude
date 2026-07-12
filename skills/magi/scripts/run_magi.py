@@ -1653,6 +1653,42 @@ def _resolve_project_root() -> str:
     return os.path.realpath(os.getcwd())
 
 
+def _write_report_file(report_text: str, out_path: str) -> None:
+    """Atomically write the human-readable *report_text* to *out_path* (for -o/--out).
+
+    Atomic (temp file + ``os.replace``): a failure mid-write never leaves a TRUNCATED
+    report at *out_path* -- a partial verdict there is indistinguishable from a whole
+    one to a file-only consumer (the project's worst-case, on the output side). The
+    temp file carries the PID so two concurrent runs writing the same target never
+    clobber each other's temp (MAGI gate, Balthasar).
+
+    ``errors="backslashreplace"`` is load-bearing: ``report_text`` can contain a LONE
+    SURROGATE (``json.loads`` decodes a ``\\uD800``-style escape in a model's output to
+    one), and a plain utf-8 write would then raise ``UnicodeEncodeError`` -- NOT an
+    ``OSError`` -- crashing the process AFTER the verdict was computed and bypassing the
+    caller's stdout fallback (MAGI gate, Balthasar). Escaping keeps the write total.
+
+    Args:
+        report_text: The rendered report (banner + findings).
+        out_path: The target file path.
+
+    Raises:
+        OSError: On a real filesystem failure. The partial temp is removed first, so
+            *out_path* is left untouched; the caller then falls back to stdout.
+    """
+    tmp = f"{out_path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", errors="backslashreplace") as out_file:
+            out_file.write(report_text + "\n")
+        os.replace(tmp, out_path)
+    except OSError:
+        try:
+            os.unlink(tmp)  # drop any partial temp; the target is untouched
+        except OSError:
+            pass
+        raise
+
+
 def main() -> None:
     """CLI entry point for MAGI orchestrator."""
     # Must run BEFORE any ``print`` or ``sys.exit`` — every output
@@ -1847,23 +1883,13 @@ def main() -> None:
         context_guard=report.get("context_guard"),
         lineage_warnings=report.get("lineage_warnings"),
     )
-    # -o/--out REDIRECTS the report to a file and SUPPRESSES it on stdout. The write is
-    # ATOMIC (temp file + os.replace) so a failure mid-write never leaves a TRUNCATED
-    # report at the target path -- a partial verdict there would be indistinguishable
-    # from a whole one to a file-only consumer (the project's worst-case failure, on the
-    # output side). A write failure is not allowed to lose the verdict either: it warns
-    # LOUDLY on stderr and falls back to printing the report on stdout.
+    # -o/--out REDIRECTS the report to a file and SUPPRESSES it on stdout. A write
+    # failure is not allowed to lose the verdict: it warns LOUDLY on stderr and falls
+    # back to printing the report on stdout.
     if args.out:
-        tmp_path_out = args.out + ".tmp"
         try:
-            with open(tmp_path_out, "w", encoding="utf-8") as out_file:
-                out_file.write(report_text + "\n")
-            os.replace(tmp_path_out, args.out)
+            _write_report_file(report_text, args.out)
         except OSError as exc:
-            try:
-                os.unlink(tmp_path_out)  # drop any partial temp; the target is untouched
-            except OSError:
-                pass
             print(
                 f"WARNING: could not write report to {args.out} ({exc}); "
                 "printing it to stdout instead so the verdict is not lost",
