@@ -1285,7 +1285,19 @@ async def run_orchestrator(
                 # any teardown -- from here agent_slot keys on `succeeded`, so the lineage
                 # is conserved no matter what teardown does (spec 6.2.1).
                 slot.succeeded = True
-                _safe_display_update(display, name, "success", log_gate)
+                # BEST-EFFORT teardown (the 4th broad catch): the post-verdict "success"
+                # display update must NEVER cost a verdict that already exists, so a display
+                # glitch here is SWALLOWED. This is DISTINCT from a GENUINE late teardown
+                # bug, which propagates -- but `succeeded=True` conserves the lineage in
+                # either case (spec 6.2.1). T12 pins both sides.
+                try:
+                    _safe_display_update(display, name, "success", log_gate)
+                except Exception as exc:  # noqa: BLE001 -- a display glitch must not cost a verdict
+                    print(
+                        f"WARNING: post-verdict status-display update failed for {name} "
+                        f"({exc}); the verdict stands",
+                        file=sys.stderr,
+                    )
                 return result
 
     async def tracked_launch(name: str) -> dict[str, Any]:
@@ -1320,8 +1332,16 @@ async def run_orchestrator(
     # Fast-fail (R15) must WIN over degraded-mode: if the endpoint is dead, two
     # "surviving" mages are two mages that never ran. ``gather(return_exceptions=True)``
     # captured the _EndpointDown as a result, so re-raise it here, before synthesis.
+    #
+    # A CancelledError is likewise re-raised on the ROTATION path: a cancelled mage means
+    # the run is being torn down (timeout, Ctrl-C), and completing with partial results
+    # would hide that. The legacy path keeps v4 back-compat (a cancelled sub-agent is a
+    # degraded failure, pinned by test_cancelled_error_marks_display_failed) -- gather
+    # has already captured it as a result either way, so the choice is local to here.
     for result in results:
         if isinstance(result, _EndpointDown):
+            raise result
+        if rotation is not None and isinstance(result, asyncio.CancelledError):
             raise result
 
     for name, result in zip(tasks.keys(), results):
