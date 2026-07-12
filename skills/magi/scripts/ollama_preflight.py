@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 
 from ollama_config import OllamaConfig
+from redaction import redact_secrets
 from validate import ValidationError
 
 PREFLIGHT_TIMEOUT = 10
@@ -39,10 +40,6 @@ def _is_cloud_tag(tag: str) -> bool:
     return tag.endswith((":cloud", "-cloud"))
 
 
-def _redact(text: str, api_key: str | None) -> str:
-    return text.replace(api_key, "***") if api_key else text
-
-
 def preflight(config: OllamaConfig) -> None:
     """Verify host reachable and trio models available; abort otherwise.
 
@@ -62,7 +59,7 @@ def preflight(config: OllamaConfig) -> None:
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             raise OllamaPreflightError(
-                _redact(
+                redact_secrets(
                     f"Auth failed ({exc.code}) for {config.base_url}; "
                     "check api_key / `ollama signin`.",
                     config.api_key,
@@ -76,7 +73,7 @@ def preflight(config: OllamaConfig) -> None:
             )
             return
         raise OllamaPreflightError(
-            _redact(f"Preflight HTTP {exc.code} at {url}.", config.api_key)
+            redact_secrets(f"Preflight HTTP {exc.code} at {url}.", config.api_key)
         ) from None
     except (socket.timeout, TimeoutError, urllib.error.URLError) as exc:
         raise OllamaPreflightError(
