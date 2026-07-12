@@ -8,7 +8,18 @@ from __future__ import annotations
 
 import os
 
-from ollama_config import DEFAULT_BASE_URL, DEFAULT_FALLBACK, DEFAULT_MODELS
+from ollama_config import (
+    DEFAULT_BASE_URL,
+    DEFAULT_FALLBACK,
+    DEFAULT_INPUT_MARGIN_PCT,
+    DEFAULT_MAX_ATTEMPTS_PER_MODEL,
+    DEFAULT_MAX_PROBE_ATTEMPTS,
+    DEFAULT_MAX_ROTATIONS,
+    DEFAULT_MODELS,
+    DEFAULT_OUTPUT_HEADROOM_TOKENS,
+    DEFAULT_RETRY_BACKOFF_SECONDS,
+    DEFAULT_STRICT_CONTEXT_GUARD,
+)
 
 REPO_CONFIG_RELPATH = os.path.join(".claude", "magi-ollama.toml")
 
@@ -34,6 +45,23 @@ def render_template() -> str:
         f'\n[[fallback]]\nmodel = "{spec.model}"\nlineage = "{spec.lineage}"\n'
         for spec in DEFAULT_FALLBACK
     )
+    # v5.0.0 (R12/R17): the rotation/context-guard tunables are top-level scalars
+    # (they apply to ALL mages), so TOML requires them BEFORE any [table] header.
+    # Emitted as active keys at their built-in defaults from the DEFAULT_* constants
+    # -- one source of truth with the resolver -- so an untouched scaffold round-trips
+    # to the defaults while every knob (and the kill-switch) is visible and editable.
+    strict_literal = "true" if DEFAULT_STRICT_CONTEXT_GUARD else "false"
+    tunables_lines = (
+        "# Rotation and context-window settings (apply to ALL mages; see docs/ollama-backend.md).\n"
+        "# Kill-switch: max_rotations = 0 (or env MAGI_OLLAMA_MAX_ROTATIONS=0) disables rotation.\n"
+        f"max_attempts_per_model = {DEFAULT_MAX_ATTEMPTS_PER_MODEL}  # tries per model before rotating to a fallback (>= 1)\n"
+        f"max_rotations          = {DEFAULT_MAX_ROTATIONS}  # fallback models a mage may rotate through (0 disables rotation)\n"
+        f"max_probe_attempts     = {DEFAULT_MAX_PROBE_ATTEMPTS}  # fallback candidates to size-check before a mage gives up (>= 1)\n"
+        f"output_headroom_tokens = {DEFAULT_OUTPUT_HEADROOM_TOKENS}  # context tokens reserved for the model's answer plus its thinking\n"
+        f"input_margin_pct       = {DEFAULT_INPUT_MARGIN_PCT}  # extra margin when checking the input fits a model's window, percent\n"
+        f"strict_context_guard   = {strict_literal}  # if true, refuse a model whose context window cannot be measured\n"
+        f"retry_backoff_seconds  = {DEFAULT_RETRY_BACKOFF_SECONDS}  # seconds to wait between transport retries (0 = no wait)\n\n"
+    )
     return (
         "# MAGI Ollama backend - repo tier (./.claude/magi-ollama.toml)\n"
         "# Precedence (per key): env > this file (repo) > ~/.claude/magi-ollama.toml > built-in\n"
@@ -50,14 +78,13 @@ def render_template() -> str:
         f'base_url = "{DEFAULT_BASE_URL}"\n\n'
         "# API key for cloud/authenticated endpoints. LOCAL Ollama needs none.\n"
         "# SECURITY: do not commit a real key.\n"
-        '# api_key = "sk-..."\n\n'
-        "[models]\n"
+        '# api_key = "sk-..."\n\n' + tunables_lines + "[models]\n"
         "# Default trio = tier 'Maximo' (cloud, 3 distinct lineages). Needs `ollama signin` (mode A).\n"
         "# Each mage declares its lineage explicitly (v5.0.0); it is never inferred.\n"
         + model_lines
-        + "\n# Fallback rotation list (R4). max_rotations = 0 (or MAGI_OLLAMA_MAX_ROTATIONS=0)\n"
-        "# disables rotation entirely (kill-switch). Each fallback tag needs\n"
-        "# `ollama pull <tag>` first (manifest only, no weights downloaded).\n" + fallback_lines
+        + "\n# Fallback models, ordered strongest->weakest, one lineage each.\n"
+        "# Each fallback tag needs `ollama pull <tag>` first (manifest only, no weights).\n"
+        + fallback_lines
     )
 
 
