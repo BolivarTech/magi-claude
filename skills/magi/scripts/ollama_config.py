@@ -15,8 +15,9 @@ import re
 import sys
 import tomllib
 from dataclasses import dataclass
+from functools import partial
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from validate import ValidationError
 
@@ -49,7 +50,46 @@ DEFAULT_MODELS: Mapping[str, ModelSpec] = MappingProxyType(
     }
 )
 _MAGES = ("melchior", "balthasar", "caspar")
-_KNOWN_TOP_KEYS = {"base_url", "api_key", "models", "structured"}
+
+# Rotation config built-in defaults (R6/R12/R14/R24). Named constants, no magic
+# numbers -- each is the single source for both the resolver and --ollama-init.
+DEFAULT_MAX_ATTEMPTS_PER_MODEL = 2
+DEFAULT_MAX_ROTATIONS = 2
+DEFAULT_MAX_PROBE_ATTEMPTS = 3
+DEFAULT_OUTPUT_HEADROOM_TOKENS = 8192  # measured: verdicts 811-2189 tok + thinking headroom
+DEFAULT_INPUT_MARGIN_PCT = 40  # pre-filter only; the exact probe decides (R24)
+DEFAULT_RETRY_BACKOFF_SECONDS = 2.0
+DEFAULT_PREFLIGHT_TIMEOUT_SECONDS = 30  # metadata calls
+DEFAULT_PROBE_TIMEOUT_SECONDS = 120  # probe processes the whole prompt
+DEFAULT_STRICT_CONTEXT_GUARD = False
+
+#: Ordered strong->weak, ONE model per lineage, none colliding with the trio's
+#: lineages. Verified against registry.ollama.ai on 2026-07-11 (the website lists
+#: tags the registry does not serve -- see scripts/verify_fallback_tags.py).
+DEFAULT_FALLBACK: tuple[ModelSpec, ...] = (
+    ModelSpec("glm-5.2:cloud", "zhipu"),
+    ModelSpec("gpt-oss:120b-cloud", "openai"),
+    ModelSpec("minimax-m3:cloud", "minimax"),
+    ModelSpec("nemotron-3-super:cloud", "nvidia"),
+    ModelSpec("gemini-3-flash-preview:latest", "google"),
+)
+
+_KNOWN_TOP_KEYS = {
+    "base_url",
+    "api_key",
+    "models",
+    "structured",
+    "fallback",
+    "max_attempts_per_model",
+    "max_rotations",
+    "max_probe_attempts",
+    "output_headroom_tokens",
+    "input_margin_pct",
+    "strict_context_guard",
+    "retry_backoff_seconds",
+    "preflight_timeout_seconds",
+    "probe_timeout_seconds",
+}
 
 
 class OllamaConfigError(ValidationError):
@@ -65,12 +105,32 @@ class OllamaConfig:
         api_key: Bearer token for authentication, or None for no auth.
         models: Mapping of mage name to its :class:`ModelSpec` (tag + lineage).
         structured: Output structure mode ("schema" | "object" | "off").
+        fallback: Ordered fallback specs (strong->weak); () disables rotation (R4).
+        max_attempts_per_model: Attempts per active model before rotating (R1).
+        max_rotations: Max rotations per mage; 0 disables rotation (R6/R17).
+        max_probe_attempts: Max propose-verify probe attempts per mage (R24).
+        output_headroom_tokens: Output+thinking tokens reserved by the guard (R5b).
+        input_margin_pct: Rotation-candidate pre-filter margin percent (R24).
+        strict_context_guard: Treat unknown context windows as fail-closed (R18).
+        retry_backoff_seconds: Backoff between transport retries; 0 disables (R12).
+        preflight_timeout_seconds: Timeout for preflight metadata calls (R18).
+        probe_timeout_seconds: Timeout for the context probe call (R24).
     """
 
     base_url: str
     api_key: str | None
     models: Mapping[str, ModelSpec]
     structured: str = "schema"  # "schema" | "object" | "off" (R16)
+    fallback: Sequence[ModelSpec] = ()
+    max_attempts_per_model: int = DEFAULT_MAX_ATTEMPTS_PER_MODEL
+    max_rotations: int = DEFAULT_MAX_ROTATIONS
+    max_probe_attempts: int = DEFAULT_MAX_PROBE_ATTEMPTS
+    output_headroom_tokens: int = DEFAULT_OUTPUT_HEADROOM_TOKENS
+    input_margin_pct: int = DEFAULT_INPUT_MARGIN_PCT
+    strict_context_guard: bool = DEFAULT_STRICT_CONTEXT_GUARD
+    retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS
+    preflight_timeout_seconds: int = DEFAULT_PREFLIGHT_TIMEOUT_SECONDS
+    probe_timeout_seconds: int = DEFAULT_PROBE_TIMEOUT_SECONDS
 
 
 def _load_toml(path: str) -> dict[str, Any]:
@@ -229,6 +289,241 @@ def _parse_model_spec(mage: str, raw: Any, path: str) -> ModelSpec:
     )
 
 
+def _require_float(value: Any, *, key: str, minimum: float, path: str) -> float:
+    """Coerce *value* to a float >= *minimum* or fail closed.
+
+    Args:
+        value: Raw value from TOML (int/float) or env (str).
+        key: Key name, for the error message.
+        minimum: Inclusive lower bound.
+        path: Config path, for the error message.
+
+    Returns:
+        The validated float.
+
+    Raises:
+        OllamaConfigError: If *value* is a bool, is not numeric, or is below
+            *minimum*. Bools are rejected first: ``isinstance(True, int)`` is True,
+            so ``retry_backoff_seconds = true`` would otherwise become 1.0.
+    """
+    if isinstance(value, bool):
+        raise OllamaConfigError(f"{key} must be a number, not a boolean", path)
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError as exc:
+            raise OllamaConfigError(f"{key} must be a number (got {value!r})", path) from exc
+    else:
+        raise OllamaConfigError(f"{key} must be a number (got {value!r})", path)
+    if parsed < minimum:
+        raise OllamaConfigError(f"{key} must be >= {minimum} (got {parsed})", path)
+    return parsed
+
+
+#: Env vars are strings; TOML gives real booleans. Both must mean the same thing,
+#: and anything else must FAIL rather than be guessed at (a silently misread
+#: strict_context_guard would silently disable a safety guard).
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def _require_bool(value: Any, *, key: str, path: str) -> bool:
+    """Coerce *value* to a bool or fail closed.
+
+    Args:
+        value: Raw value: a TOML boolean, or an env string.
+        key: Key name, for the error message.
+        path: Config path, for the error message.
+
+    Returns:
+        The validated boolean.
+
+    Raises:
+        OllamaConfigError: If the value is neither a boolean nor one of
+            {1,true,yes,on} / {0,false,no,off} (case-insensitive). ``bool("false")``
+            is True in Python -- guessing here would flip a safety flag silently.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE:
+            return True
+        if text in _FALSE:
+            return False
+    raise OllamaConfigError(
+        f"{key} must be a boolean (true/false, 1/0, yes/no, on/off); got {value!r}", path
+    )
+
+
+def _require_int(value: Any, *, key: str, minimum: int, path: str) -> int:
+    """Coerce *value* to an int >= *minimum* or fail closed.
+
+    Args:
+        value: Raw value from TOML or env (str from env, int from TOML).
+        key: Key name, for the error message.
+        minimum: Inclusive lower bound.
+        path: Config path, for the error message.
+
+    Returns:
+        The validated integer.
+
+    Raises:
+        OllamaConfigError: If *value* is a bool, a float, a non-numeric string, or
+            is below *minimum*.
+
+    Notes:
+        Two coercions are rejected explicitly because both are SILENT failures,
+        which the standard forbids:
+
+        * ``bool``: ``isinstance(True, int)`` is True in Python, so
+          ``max_rotations = true`` would be accepted as 1.
+        * ``float``: ``int(2.7)`` is 2 -- ``max_rotations = 2.7`` would be
+          silently truncated instead of telling the user their config is wrong.
+    """
+    if isinstance(value, bool):
+        raise OllamaConfigError(f"{key} must be an integer, not a boolean", path)
+    if isinstance(value, float):
+        raise OllamaConfigError(f"{key} must be an integer, not a float (got {value!r})", path)
+    if isinstance(value, str):
+        # A strict regex, not lstrip("+-"): "+-5" and "--5" would survive a strip
+        # and then int() would raise a bare ValueError with a useless message
+        # (finding by Caspar, Checkpoint 2). Env vars are user input: validate them.
+        if not re.fullmatch(r"[+-]?\d+", value.strip()):
+            raise OllamaConfigError(f"{key} must be an integer (got {value!r})", path)
+        parsed = int(value.strip())
+    elif isinstance(value, int):
+        parsed = value
+    else:
+        raise OllamaConfigError(f"{key} must be an integer (got {value!r})", path)
+    if parsed < minimum:
+        raise OllamaConfigError(f"{key} must be >= {minimum} (got {parsed})", path)
+    return parsed
+
+
+#: Per-scalar resolution table (R14): (config key, env var, validator, default).
+#: The env-name mapping and precedence chain live here ONCE (DRY) instead of being
+#: copy-pasted per field; ``partial`` binds each numeric guard's ``minimum``.
+_SCALAR_SPECS: tuple[tuple[str, str, Callable[..., Any], Any], ...] = (
+    (
+        "max_attempts_per_model",
+        "MAGI_OLLAMA_MAX_ATTEMPTS",
+        partial(_require_int, minimum=1),
+        DEFAULT_MAX_ATTEMPTS_PER_MODEL,
+    ),
+    (
+        "max_rotations",
+        "MAGI_OLLAMA_MAX_ROTATIONS",
+        partial(_require_int, minimum=0),
+        DEFAULT_MAX_ROTATIONS,
+    ),
+    (
+        "max_probe_attempts",
+        "MAGI_OLLAMA_MAX_PROBE_ATTEMPTS",
+        partial(_require_int, minimum=1),
+        DEFAULT_MAX_PROBE_ATTEMPTS,
+    ),
+    (
+        "output_headroom_tokens",
+        "MAGI_OLLAMA_OUTPUT_HEADROOM_TOKENS",
+        partial(_require_int, minimum=0),
+        DEFAULT_OUTPUT_HEADROOM_TOKENS,
+    ),
+    (
+        "input_margin_pct",
+        "MAGI_OLLAMA_INPUT_MARGIN_PCT",
+        partial(_require_int, minimum=0),
+        DEFAULT_INPUT_MARGIN_PCT,
+    ),
+    (
+        "retry_backoff_seconds",
+        "MAGI_OLLAMA_RETRY_BACKOFF_SECONDS",
+        partial(_require_float, minimum=0.0),
+        DEFAULT_RETRY_BACKOFF_SECONDS,
+    ),
+    (
+        "preflight_timeout_seconds",
+        "MAGI_OLLAMA_PREFLIGHT_TIMEOUT_SECONDS",
+        partial(_require_int, minimum=1),
+        DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
+    ),
+    (
+        "probe_timeout_seconds",
+        "MAGI_OLLAMA_PROBE_TIMEOUT_SECONDS",
+        partial(_require_int, minimum=1),
+        DEFAULT_PROBE_TIMEOUT_SECONDS,
+    ),
+    (
+        "strict_context_guard",
+        "MAGI_OLLAMA_STRICT_CONTEXT",
+        _require_bool,
+        DEFAULT_STRICT_CONTEXT_GUARD,
+    ),
+)
+
+
+def _resolve_scalar(
+    global_cfg: dict[str, Any],
+    repo_cfg: dict[str, Any],
+    env: Mapping[str, str],
+    key: str,
+    env_name: str,
+    validate: Callable[..., Any],
+    default: Any,
+    repo_path: str,
+    global_path: str,
+) -> Any:
+    """Resolve one scalar with env > repo > global > default precedence (R14).
+
+    Args:
+        global_cfg: Global TOML config mapping.
+        repo_cfg: Repository TOML config mapping.
+        env: Environment variable mapping.
+        key: TOML config key.
+        env_name: Environment variable name for this key.
+        validate: Validator called as ``(value, key=key, path=path)``.
+        default: Built-in default used when the key is absent everywhere.
+        repo_path: Path to the repo config file, for error messages.
+        global_path: Path to the global config file, for error messages.
+
+    Returns:
+        The resolved and validated scalar value.
+
+    Raises:
+        OllamaConfigError: If the resolved env or TOML value is invalid.
+    """
+    if env_name in env:
+        return validate(env[env_name], key=key, path="<env>")
+    if key in repo_cfg:
+        return validate(repo_cfg[key], key=key, path=repo_path)
+    if key in global_cfg:
+        return validate(global_cfg[key], key=key, path=global_path)
+    return default
+
+
+def _parse_fallback_entries(raw: Any, path: str) -> tuple[ModelSpec, ...]:
+    """Parse a ``[[fallback]]`` array-of-tables into validated model specs (R4).
+
+    Args:
+        raw: Raw ``fallback`` value from a TOML config file.
+        path: Path to the config file, for error messages.
+
+    Returns:
+        Tuple of validated fallback :class:`ModelSpec` entries, in declared order.
+
+    Raises:
+        OllamaConfigError: If ``raw`` is not a list, or any entry is not a valid
+            ``{ model, lineage }`` table (delegated to :func:`_parse_model_spec`).
+    """
+    if not isinstance(raw, list):
+        raise OllamaConfigError(
+            f"fallback must be an array of tables; got {type(raw).__name__}", path
+        )
+    return tuple(_parse_model_spec(f"fallback[{i}]", entry, path) for i, entry in enumerate(raw))
+
+
 def resolve_config(
     *,
     global_path: str | None = None,
@@ -324,4 +619,27 @@ def resolve_config(
             )
         models[mage] = spec
 
-    return OllamaConfig(base_url=base_url, api_key=api_key, models=models, structured=structured)
+    # fallback list (R4): repo wins if present, else global, else empty (rotation
+    # OFF). NEVER falls through to DEFAULT_FALLBACK -- the built-in list reaches
+    # the user only via the --ollama-init template (decision #65).
+    fallback: tuple[ModelSpec, ...] = ()
+    if "fallback" in r:
+        fallback = _parse_fallback_entries(r["fallback"], repo_path)
+    elif "fallback" in g:
+        fallback = _parse_fallback_entries(g["fallback"], global_path)
+
+    # rotation scalars (R14 precedence, one declaration per key via _SCALAR_SPECS).
+    scalars: dict[str, Any] = {}
+    for key, env_name, validate, default in _SCALAR_SPECS:
+        scalars[key] = _resolve_scalar(
+            g, r, env, key, env_name, validate, default, repo_path, global_path
+        )
+
+    return OllamaConfig(
+        base_url=base_url,
+        api_key=api_key,
+        models=models,
+        structured=structured,
+        fallback=fallback,
+        **scalars,
+    )

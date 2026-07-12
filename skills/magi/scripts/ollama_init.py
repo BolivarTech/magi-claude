@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 
-from ollama_config import DEFAULT_BASE_URL, DEFAULT_MODELS
+from ollama_config import DEFAULT_BASE_URL, DEFAULT_FALLBACK, DEFAULT_MODELS
 
 REPO_CONFIG_RELPATH = os.path.join(".claude", "magi-ollama.toml")
 
@@ -26,6 +26,13 @@ def render_template() -> str:
     model_lines = "".join(
         f'{mage:<9} = {{ model = "{spec.model}", lineage = "{spec.lineage}" }}\n'
         for mage, spec in DEFAULT_MODELS.items()
+    )
+    # v5.0.0 (R4): the built-in fallback list reaches the user through this template
+    # (decision #65) -- the resolver never injects it. Ordered strong->weak, one
+    # lineage each, none colliding with the trio.
+    fallback_lines = "".join(
+        f'\n[[fallback]]\nmodel = "{spec.model}"\nlineage = "{spec.lineage}"\n'
+        for spec in DEFAULT_FALLBACK
     )
     return (
         "# MAGI Ollama backend - repo tier (./.claude/magi-ollama.toml)\n"
@@ -48,6 +55,8 @@ def render_template() -> str:
         "# Default trio = tier 'Maximo' (cloud, 3 distinct lineages). Needs `ollama signin` (mode A).\n"
         "# Each mage declares its lineage explicitly (v5.0.0); it is never inferred.\n"
         + model_lines
+        + "\n# Fallback rotation list (R4). max_rotations = 0 (or MAGI_OLLAMA_MAX_ROTATIONS=0)\n"
+        "# disables rotation entirely (kill-switch).\n" + fallback_lines
     )
 
 
