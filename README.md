@@ -59,7 +59,7 @@ different lineage** instead of losing the mage to degraded mode — preserving t
 independent perspectives the ensemble depends on. This **changes the `magi-ollama.toml`
 schema**: `[models]` entries go from a bare string to a table with an explicit `lineage`
 (`melchior = { model = "qwen3.5:397b-cloud", lineage = "alibaba" }`). A v4 config now
-fails closed with an actionable error — run `python scripts/validate_magi_toml.py` to see
+fails closed with an actionable error — run `python skills/magi/scripts/validate_magi_toml.py` to see
 exactly what to change (the lineage is never inferred). **Kill-switch:**
 `MAGI_OLLAMA_MAX_ROTATIONS=0` disables rotation entirely (a shadow-rollout mode that keeps
 the new preflight/probe active while rotation is off). **Hard limitation:** on an endpoint

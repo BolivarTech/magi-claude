@@ -96,7 +96,7 @@ cross-lineage diversity:
 - **v5.0.0 (BREAKING):** `[models]` now declares a `lineage` per mage and a
   `[[fallback]]` list; a mage whose model fails **rotates** to a declared fallback of a
   different lineage instead of degrading (announced on stderr/banner/report). A v4 config
-  fails closed — `python scripts/validate_magi_toml.py` shows the migration; kill-switch:
+  fails closed — `python skills/magi/scripts/validate_magi_toml.py` shows the migration; kill-switch:
   `MAGI_OLLAMA_MAX_ROTATIONS=0`. See [`docs/ollama-backend.md`](../../docs/ollama-backend.md).
 
 The orchestrator handles everything: agent launching, output parsing, schema validation,

@@ -185,9 +185,11 @@ probe_timeout_seconds     = 120   # timeout for the context-probe call, seconds
 their defaults**, so every knob (and the kill-switch) is visible and editable without
 reading the docs. Editing any of them is optional; an untouched scaffold behaves exactly
 as the built-in defaults. A **v4 config fails closed** with an actionable error;
-**`python scripts/validate_magi_toml.py [path]`** reports exactly what to change — it never
-guesses a lineage (two mages sharing a lineage would give a consensus that only *looks*
-like three perspectives).
+**`python skills/magi/scripts/validate_magi_toml.py [path]`** reports exactly what to
+change — it never guesses a lineage (two mages sharing a lineage would give a consensus
+that only *looks* like three perspectives). It ships with the plugin, so it is there the
+moment the fail-closed error tells you to run it; pointing it at a path that does not
+exist is an error (exit 2), never an `OK` on defaults it silently fell back to.
 
 ### Settings — what each one does
 

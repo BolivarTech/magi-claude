@@ -41,10 +41,13 @@ experiments/
 /scripts/claude_usage.py
 /scripts/sleep_signal.py
 /scripts/graphify_ollama.py
-# v5.0.0 migration + release tooling (network-bound, excluded from make verify).
-# The smoke tests import them, so they are dev-local too: a fresh checkout without
-# scripts/ simply never collects tests/test_release_tooling.py.
-/scripts/validate_magi_toml.py
+# Release tooling: network-bound (excluded from make verify) and for the maintainer,
+# not the user. Its smoke test imports it, so that test is dev-local too: a fresh
+# checkout without scripts/ simply never collects tests/test_release_tooling.py.
+#
+# NOTE: the v5 migration validator is NOT here. Every fail-closed v4 error, the README,
+# the skill and docs/ollama-backend.md tell the USER to run it, so it is product and
+# ships: skills/magi/scripts/validate_magi_toml.py (tests/test_validate_magi_toml.py).
 /scripts/verify_fallback_tags.py
 /tests/test_release_tooling.py
 
