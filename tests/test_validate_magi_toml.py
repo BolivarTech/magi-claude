@@ -122,12 +122,79 @@ def test_validator_ignores_the_users_global_config(tmp_path, monkeypatch):
     assert validate_magi_toml.main() == 0
 
 
-def test_validator_reports_cli_misuse_without_a_traceback(tmp_path, monkeypatch):
-    """A missing file is a user error, not a crash: exit 1 with a message, no traceback."""
+def test_validator_echoes_the_resolved_trio_so_you_can_see_it_was_read(tmp_path, monkeypatch, capsys):
+    """``OK`` must show WHAT was accepted, not just that something was.
+
+    A bare "OK: valid v5 config" is what an EMPTY file printed too (MAGI falls back to
+    the built-in defaults, which are valid) -- indistinguishable from a real endorsement
+    of the user's own trio. Echoing the resolved models is how the tool proves it read
+    the file you handed it.
+    """
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(render_template(), encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+
+    assert validate_magi_toml.main() == 0
+
+    out = capsys.readouterr().out
+    assert "melchior" in out
+    assert "qwen3.5:397b-cloud" in out
+    assert "alibaba" in out
+
+
+def test_validator_rejects_malformed_toml_without_the_lineage_lecture(tmp_path, monkeypatch, capsys):
+    """A syntax error is not a schema error: do not answer it with the lineage hint."""
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text('base_url = "http\n', encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+
+    assert validate_magi_toml.main() == 1
+
+    err = capsys.readouterr().err
+    assert "TOML" in err
+    assert "lineage is NOT inferred" not in err
+
+
+def test_validator_says_a_directory_is_not_a_file(tmp_path, monkeypatch, capsys):
+    """A directory EXISTS, so "no such config file" would be a lie about why it failed."""
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(tmp_path)])
+
+    with pytest.raises(SystemExit) as exc:
+        validate_magi_toml.main()
+
+    assert exc.value.code == 2
+    assert "not a file" in capsys.readouterr().err
+
+
+def test_validator_reports_an_unreadable_file_without_a_traceback(tmp_path, monkeypatch, capsys):
+    """An OSError from open() must not reach the user as a stack trace."""
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(render_template(), encoding="utf-8")
+
+    def _boom(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("builtins.open", _boom)
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+
+    with pytest.raises(SystemExit) as exc:
+        validate_magi_toml.main()
+
+    assert exc.value.code == 2
+    assert "Permission denied" in capsys.readouterr().err
+
+
+def test_validator_reports_a_missing_path_as_cli_misuse(tmp_path, monkeypatch, capsys):
+    """A missing file is CLI misuse (exit 2), pinned -- it must never be a silent OK.
+
+    Resolving a path that does not exist falls through to the built-in defaults and
+    validates THOSE, so the tool would report OK about a config it never read.
+    """
     missing = tmp_path / "does-not-exist.toml"
     monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(missing)])
 
     with pytest.raises(SystemExit) as exc:
         validate_magi_toml.main()
 
-    assert exc.value.code != 0
+    assert exc.value.code == 2
+    assert "no such config file" in capsys.readouterr().err
