@@ -31,8 +31,10 @@ def render_template() -> str:
 
     Returns:
         A TOML-formatted string with a two-mode header, the local base_url
-        active, api_key commented out, and the default trio models populated
-        as ``{ model, lineage }`` tables (v5.0.0 schema).
+        active, api_key commented out, the rotation/context-window scalars
+        emitted as active top-level keys at their built-in defaults, and the
+        default trio plus fallback list populated as ``{ model, lineage }``
+        tables (v5.0.0 schema).
     """
     # v5.0.0 (R3): each mage is a table declaring its lineage explicitly. Built
     # from DEFAULT_MODELS so template and resolver stay a single source of truth.
