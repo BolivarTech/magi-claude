@@ -6,12 +6,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import urllib.error
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+
+from validate import ValidationError
 
 
 async def _preflight_ok(config, prompt=""):
@@ -5027,3 +5031,72 @@ def test_retry_feedback_bound_holds_for_NON_ASCII_errors():
     # UTF-8 byte count is a strict upper bound on tokens for any byte-level BPE.
     worst_case_tokens = len(block.encode("utf-8"))
     assert worst_case_tokens <= MAX_RETRY_FEEDBACK_TOKENS
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (ValidationError("missing keys"), "schema"),
+        (json.JSONDecodeError("boom", "{", 0), "schema"),
+        (TimeoutError(), "timeout"),
+        (asyncio.TimeoutError(), "timeout"),
+        # HTTPError IS a subclass of URLError -- check it FIRST.
+        (urllib.error.HTTPError("u", 500, "err", {}, None), "http"),
+        (urllib.error.HTTPError("u", 429, "rate limited", {}, None), "http"),
+        # A socket timeout arrives WRAPPED: URLError(TimeoutError()).
+        (urllib.error.URLError(TimeoutError()), "timeout"),
+        (urllib.error.URLError(ConnectionRefusedError()), "connection"),
+        (ConnectionRefusedError(), "connection"),
+        (ConnectionResetError(), "connection"),
+        # Backend-mapped transport RuntimeErrors: classified by MESSAGE signature.
+        (RuntimeError("HTTP 503 Service Unavailable"), "http"),
+        (RuntimeError("Ollama 404 at chat-time: model unavailable"), "http"),
+        (
+            RuntimeError("Cannot reach Ollama at http://h:11434: [Errno 111] Connection refused"),
+            "connection",
+        ),
+        # A RuntimeError with NO transport signature is OUR bug -> "unexpected".
+        (RuntimeError("assert self._pid is not None"), "unexpected"),
+        (TypeError("a bug in OUR code"), "unexpected"),
+    ],
+)
+def test_classify_pins_every_transport_variant(exc, expected):
+    """_classify decides the SCOPE of a failure and whether the fast-fail fires."""
+    from run_magi import _classify
+
+    assert _classify(exc) == expected
+
+
+def test_non_transport_runtimeerror_is_unexpected_not_transport():
+    """A generic RuntimeError (our bug) must NOT masquerade as transport."""
+    from run_magi import _FAIL_CONNECTION, _FAIL_HTTP, _FAIL_TIMEOUT, _FAIL_UNEXPECTED, _classify
+
+    label = _classify(RuntimeError("some internal bug -- no HTTP status, no socket"))
+    assert label == _FAIL_UNEXPECTED
+    assert label not in (_FAIL_HTTP, _FAIL_CONNECTION, _FAIL_TIMEOUT)
+    assert _classify(RuntimeError("Ollama HTTP 500: Internal Server Error")) == _FAIL_HTTP
+    assert (
+        _classify(
+            RuntimeError("Cannot reach Ollama at http://h:11434: [Errno 111] Connection refused")
+        )
+        == _FAIL_CONNECTION
+    )
+
+
+def test_classify_matches_the_real_ollama_backend_messages():
+    """CONTRACT: the markers must match the VERBATIM strings ollama_backend._call raises."""
+    from run_magi import _FAIL_CONNECTION, _FAIL_HTTP, _FAIL_TIMEOUT, _classify
+
+    http_error = RuntimeError("Ollama HTTP 503: Service Unavailable")
+    chat_time_404 = RuntimeError(
+        "Ollama 404 at chat-time: model unavailable (Not Found). "
+        "Preflight passed -- possible ollama rm / auth expiry / TOCTOU."
+    )
+    unreachable = RuntimeError(
+        "Cannot reach Ollama at http://nas:11434: [Errno 111] Connection refused"
+    )
+    timed_out = TimeoutError("Ollama request timed out: timed out")
+    assert _classify(http_error) == _FAIL_HTTP
+    assert _classify(chat_time_404) == _FAIL_HTTP
+    assert _classify(unreachable) == _FAIL_CONNECTION
+    assert _classify(timed_out) == _FAIL_TIMEOUT
