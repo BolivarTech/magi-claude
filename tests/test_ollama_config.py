@@ -1,11 +1,14 @@
 # tests/test_ollama_config.py
 """Layered, per-key resolution of OllamaConfig (BDD-4,5,6)."""
 
+import dataclasses  # for FrozenInstanceError
+
 import pytest
 from validate import ValidationError
 from ollama_config import (
     DEFAULT_MODELS,
     DEFAULT_BASE_URL,
+    ModelSpec,
     OllamaConfig,
     OllamaConfigError,
     resolve_config,
@@ -136,3 +139,65 @@ def test_empty_base_url_in_toml_falls_through_to_default(tmp_path):
     r = _write(tmp_path / "r.toml", 'base_url=""\n')
     cfg = resolve_config(global_path="/nope.toml", repo_path=r, env={})
     assert cfg.base_url == DEFAULT_BASE_URL
+
+
+# --- Task 1: ModelSpec + table-shaped [models] with mandatory lineage (BREAKING) ---
+
+NEW_TOML = """
+base_url = "http://localhost:11434/v1"
+[models]
+melchior  = { model = "qwen3.5:397b-cloud",   lineage = "alibaba" }
+balthasar = { model = "kimi-k2.6:cloud",      lineage = "moonshot" }
+caspar    = { model = "deepseek-v4-pro:cloud", lineage = "deepseek" }
+"""
+
+OLD_TOML = """
+[models]
+melchior  = "qwen3.5:397b-cloud"
+balthasar = "kimi-k2.6:cloud"
+caspar    = "deepseek-v4-pro:cloud"
+"""
+
+
+def _write_toml(tmp_path, text):
+    p = tmp_path / "magi-ollama.toml"
+    p.write_text(text, encoding="utf-8")
+    return str(p)
+
+
+def test_models_resolve_to_model_spec_with_lineage(tmp_path):
+    cfg = resolve_config(repo_path=_write_toml(tmp_path, NEW_TOML), global_path=None, env={})
+    assert cfg.models["melchior"] == ModelSpec(model="qwen3.5:397b-cloud", lineage="alibaba")
+    assert cfg.models["caspar"].lineage == "deepseek"
+
+
+def test_old_string_schema_raises_actionable_migration_error(tmp_path):
+    path = _write_toml(tmp_path, OLD_TOML)
+    with pytest.raises(OllamaConfigError) as exc:
+        resolve_config(repo_path=path, global_path=None, env={})
+    msg = str(exc.value)
+    assert path in msg                    # names the offending file
+    assert "lineage" in msg               # shows the new shape
+    assert "melchior" in msg
+
+
+def test_lineage_is_normalised_so_case_cannot_defeat_the_invariant(tmp_path):
+    """Every guard compares lineages with == / in. A capital letter must not be able
+    to smuggle two mages of the same lab past R22."""
+    toml = NEW_TOML.replace('lineage = "alibaba"', 'lineage = "  AliBaba  "')
+    cfg = resolve_config(repo_path=_write_toml(tmp_path, toml), global_path=None, env={})
+    assert cfg.models["melchior"].lineage == "alibaba"
+
+
+def test_empty_lineage_is_rejected(tmp_path):
+    toml = NEW_TOML.replace('lineage = "alibaba"', 'lineage = ""')
+    with pytest.raises(OllamaConfigError):
+        resolve_config(repo_path=_write_toml(tmp_path, toml), global_path=None, env={})
+
+
+def test_model_spec_is_frozen():
+    # Specific exception, not a blanket Exception (§Error Handling): a frozen
+    # dataclass raises FrozenInstanceError, and asserting anything looser would
+    # also pass on an AttributeError from a typo in the test itself.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ModelSpec(model="a", lineage="b").model = "c"  # type: ignore[misc]
