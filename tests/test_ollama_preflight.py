@@ -288,3 +288,25 @@ async def test_measured_payload_with_unknown_windows_is_estimated_not_enforced(
     )
     with pytest.raises(OllamaPreflightError):
         await preflight(config_factory(strict_context_guard=True), "payload")
+
+
+async def test_payload_probes_run_concurrently_not_sequentially(ollama_config, monkeypatch):
+    """NR6b (MAGI gate, Balthasar): the trio's payload probes must run CONCURRENTLY --
+    three serialized round-trips triple the preflight latency for no reason."""
+    import asyncio as _asyncio
+
+    from ollama_preflight import _measure_payload
+
+    inflight = {"now": 0, "max": 0}
+
+    async def fake_probe(config, model, prompt, **kw):
+        inflight["now"] += 1
+        inflight["max"] = max(inflight["max"], inflight["now"])
+        await _asyncio.sleep(0)  # yield so siblings can start before this one finishes
+        inflight["now"] -= 1
+        return 100
+
+    monkeypatch.setattr("ollama_preflight.probe_prompt_tokens", fake_probe)
+    measured, _deltas, _est = await _measure_payload(ollama_config, "payload")
+    assert inflight["max"] == 3, "all three probes must be in flight at once, not serialized"
+    assert len(measured) == 3

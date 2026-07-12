@@ -258,8 +258,15 @@ async def _measure_payload(
     estimate = estimate_tokens(prompt)
     measured: dict[str, int] = {}
     deltas: list[dict[str, Any]] = []
-    for agent, spec in config.models.items():
-        exact = await probe_prompt_tokens(config, spec.model, prompt)
+    # Probe the trio CONCURRENTLY (NR6b: preflight I/O is O(M) concurrent calls, not
+    # serialized round-trips -- MAGI gate, Balthasar). ``gather`` preserves input order,
+    # so the deltas stay per-agent ordered. The three probes fit inside Ollama's 3-agent
+    # cap and run before any agent launches, so there is no contention.
+    items = list(config.models.items())
+    exacts = await asyncio.gather(
+        *(probe_prompt_tokens(config, spec.model, prompt) for _, spec in items)
+    )
+    for (agent, spec), exact in zip(items, exacts):
         if exact is None:
             continue
         measured[spec.model] = exact
