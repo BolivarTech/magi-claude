@@ -4336,6 +4336,19 @@ class TestInputSizeWiring:
 
         return created, buf
 
+    def test_out_flag_writes_the_human_readable_report_to_a_file(self, tmp_path, monkeypatch):
+        """-o/--out writes the format_report text (verdict banner + findings) to a file,
+        so the verdict is retrievable when stdout is not (e.g. a remote/phone client)."""
+        out = tmp_path / "verdict.txt"
+        self._patch_main(tmp_path, monkeypatch, extra_argv=["-o", str(out)])
+        assert out.exists(), "the -o target file must be written"
+        assert "REPORT" in out.read_text(encoding="utf-8"), "it must contain the report text"
+
+    def test_no_out_flag_writes_no_file(self, tmp_path, monkeypatch):
+        """Without -o, nothing new is written (stdout only) -- the flag is opt-in."""
+        self._patch_main(tmp_path, monkeypatch)
+        assert not (tmp_path / "verdict.txt").exists()
+
     def test_input_size_block_in_saved_report(self, tmp_path, monkeypatch):
         """Telemetry: magi-report.json on disk carries an input_size block with
         chars and est_tokens fields."""
@@ -6110,3 +6123,12 @@ class TestContextGuardDowngradeOnRotation:
 
         assert result.get("degraded") is not True
         assert result["context_guard"] == "enforced", "glm was exactly measured and fits"
+
+
+def test_parse_args_recognizes_the_out_flag():
+    """-o and --out both map to args.out; absent => None (opt-in)."""
+    from run_magi import parse_args
+
+    assert parse_args(["design", "x", "-o", "r.txt"]).out == "r.txt"
+    assert parse_args(["design", "x", "--out", "r.txt"]).out == "r.txt"
+    assert parse_args(["design", "x"]).out is None
