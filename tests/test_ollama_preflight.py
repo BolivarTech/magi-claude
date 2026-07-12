@@ -263,3 +263,22 @@ async def test_the_list_models_abort_path_redacts_the_api_key(config_factory, mo
     with pytest.raises(OllamaPreflightError) as ei:
         await preflight(cfg, "payload")
     assert "sk-supersecret-do-not-leak" not in str(ei.value)
+
+
+async def test_measured_payload_with_unknown_windows_is_estimated_not_enforced(
+    ollama_config, config_factory, preflight_env
+):
+    """The guard is 'enforced' only when the payload was measured AND every window is
+    known. Measured payload + unknown windows cannot prove invariant #3 -> 'estimated',
+    and strict must abort (else strict fails OPEN on a no-/api/show endpoint)."""
+    a, b, c = (s.model for s in ollama_config.models.values())
+    preflight_env["probe"] = 16_232  # payload measured for all three
+    unknown = ModelCapability(window=None, supports_completion=True)
+    preflight_env["caps"] = {a: unknown, b: unknown, c: unknown}
+
+    result = await preflight(ollama_config, "payload")
+    assert result.context_guard == CONTEXT_GUARD_ESTIMATED, (
+        "measured payload but unknown windows cannot be reported 'enforced'"
+    )
+    with pytest.raises(OllamaPreflightError):
+        await preflight(config_factory(strict_context_guard=True), "payload")

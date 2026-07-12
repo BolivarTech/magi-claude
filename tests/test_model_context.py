@@ -134,3 +134,15 @@ def test_required_tokens_applies_the_margin_when_only_an_estimate_exists():
         100_000, output_headroom_tokens=8192, input_margin_pct=40, exact=False
     )
     assert got == 140_000 + MAX_RETRY_FEEDBACK_TOKENS + 8192
+
+
+async def test_reads_window_from_nested_model_info(ollama_config):
+    """Real Ollama /api/show nests the window under model_info with an
+    architecture-prefixed key (e.g. ``qwen3.5.context_length``); there is NO
+    top-level ``context_length``. Reading only the top level leaves the window
+    unknown on the DEFAULT Ollama path, which silently disables the R5b guard."""
+    show = FakeShow(
+        {"a": {"capabilities": ["completion"], "model_info": {"qwen3.5.context_length": 262_144}}}
+    )
+    caps = await fetch_capabilities(ollama_config, ["a"], _show=show)
+    assert caps["a"].window == 262_144

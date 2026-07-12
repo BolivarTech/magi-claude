@@ -2512,3 +2512,32 @@ def test_dedup_same_title_keeps_higher_severity_detail_and_sources():
     assert f["severity"] == "warning", "higher severity must win"
     assert f["detail"] == "caspar impact justification", "higher-severity detail must win"
     assert set(f["sources"]) == {"melchior", "balthasar", "caspar"}
+
+
+def test_format_report_forwards_context_guard_and_warnings_to_the_banner():
+    """The banner reads context_guard/lineage_warnings from the report dict, but the
+    ONLY path that renders it for a human is format_report -- which must forward them,
+    or the guard/warning notices reach magi-report.json yet never the banner the reader
+    actually looks at (decision #102: a guard that warns where nobody looks is decorative)."""
+    from reporting import format_report
+
+    agents = [
+        {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [],
+            "recommendation": "ok",
+        }
+    ]
+    consensus = {"consensus": "GO", "findings": []}
+    out = format_report(
+        agents,
+        consensus,
+        context_guard="estimated",
+        lineage_warnings=["two mages look like the same lab"],
+    )
+    assert "estimated" in out, "an estimated guard must render in the banner (R16)"
+    assert "two mages look like the same lab" in out, "the lineage warning must render (R102)"
