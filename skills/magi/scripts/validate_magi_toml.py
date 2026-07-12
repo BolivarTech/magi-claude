@@ -62,7 +62,10 @@ def main() -> int:
         parser.error(f"no such config file: {args.path}")
 
     try:
-        config = resolve_config(repo_path=args.path, global_path=None, env={})
+        # global_path="" (falsy), NOT None: None is resolve_config's sentinel for "use
+        # ~/.claude/magi-ollama.toml", so a broken file in the user's HOME would make us
+        # reject a config they never asked us about. The verdict is about THIS file only.
+        config = resolve_config(repo_path=args.path, global_path="", env={})
     except OllamaConfigError as exc:
         print(f"INVALID: {exc}", file=sys.stderr)
         print(V5_SHAPE_HINT, file=sys.stderr)
