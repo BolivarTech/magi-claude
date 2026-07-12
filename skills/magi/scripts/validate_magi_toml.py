@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 from ollama_config import OllamaConfigError, resolve_config
+from ollama_preflight import OllamaPreflightError, check_config_offline
 
 DEFAULT_CONFIG_PATH = ".claude/magi-ollama.toml"
 
@@ -71,9 +72,13 @@ def main() -> int:
         print(V5_SHAPE_HINT, file=sys.stderr)
         return 1
 
-    lineages = [spec.lineage for spec in config.models.values()]
-    if len(set(lineages)) != len(lineages):
-        print(f"INVALID: the trio shares a lineage: {lineages}", file=sys.stderr)
+    # The product's own offline checks -- NOT a hand-rolled copy of them. A pre-run tool
+    # that green-lights a config the preflight refuses to run is worse than no tool.
+    try:
+        for warning in check_config_offline(config):
+            print(f"WARNING: {warning}", file=sys.stderr)
+    except OllamaPreflightError as exc:
+        print(f"INVALID: {exc}", file=sys.stderr)
         print(V5_SHAPE_HINT, file=sys.stderr)
         return 1
 
