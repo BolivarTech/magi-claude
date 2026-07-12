@@ -53,6 +53,21 @@ without changing the default Claude path. Quick start: `/magi --ollama` (or
 rationale, configuration, default models, and recommended hardware tiers — in
 [`docs/ollama-backend.md`](docs/ollama-backend.md).
 
+**New in v5.0.0 — fallback rotation (BREAKING, Ollama only):** when a mage's model
+exhausts its attempts, MAGI now **rotates it to a declared `[[fallback]]` model of a
+different lineage** instead of losing the mage to degraded mode — preserving the three
+independent perspectives the ensemble depends on. This **changes the `magi-ollama.toml`
+schema**: `[models]` entries go from a bare string to a table with an explicit `lineage`
+(`melchior = { model = "qwen3.5:397b-cloud", lineage = "alibaba" }`). A v4 config now
+fails closed with an actionable error — run `python scripts/validate_magi_toml.py` to see
+exactly what to change (the lineage is never inferred). **Kill-switch:**
+`MAGI_OLLAMA_MAX_ROTATIONS=0` disables rotation entirely (a shadow-rollout mode that keeps
+the new preflight/probe active while rotation is off). **Hard limitation:** on an endpoint
+that does **not** expose `/api/show`, with `strict_context_guard = false` (the default),
+there is **no truncation protection** — set `strict_context_guard = true` to fail closed
+instead. Rotation, its telemetry, the probe cost, and migration are documented in
+[`docs/ollama-backend.md`](docs/ollama-backend.md).
+
 > **`--ollama` runs the gate Claude-free, end-to-end.** The consensus verdict and the
 > output banner are produced by **deterministic local Python** (`consensus.determine_consensus`
 > + `reporting.format_report`), not by any LLM — so with `--ollama` the *entire* cycle

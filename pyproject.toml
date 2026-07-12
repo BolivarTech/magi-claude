@@ -1,6 +1,6 @@
 [project]
 name = "magi"
-version = "4.0.6"
+version = "5.0.0"
 requires-python = ">= 3.12"
 description = "MAGI multi-perspective analysis plugin for Claude Code"
 license = "MIT OR Apache-2.0"
@@ -24,11 +24,23 @@ mypy_path = "skills/magi/scripts"
 explicit_package_bases = true
 # Local developer tooling (gitignored, from BolivarTech/AI_Tools) is not held to
 # the plugin's strict typecheck. Harmless in the public repo (the dir is absent).
-exclude = ['^scripts/']
+# ``scripts/`` and the release-tooling smoke test are gitignored dev tooling
+# (from BolivarTech/AI_Tools); they import the network-bound scripts and are not
+# part of the shipped, type-checked plugin.
+exclude = ['^scripts/', 'tests/test_release_tooling\.py$']
 
 [[tool.mypy.overrides]]
 module = "_pytest.*"
 follow_imports = "skip"
+
+# tests/rotation_harness.py is a sibling test-helper module. pytest's prepend
+# import mode puts tests/ on sys.path so ``from rotation_harness import ...``
+# resolves at runtime, but mypy indexes tests as the ``tests.*`` package and
+# adding tests/ to mypy_path would duplicate the two ``conftest`` modules. Treat
+# the bare import as untyped; the module itself is still checked under tests.*.
+[[tool.mypy.overrides]]
+module = "rotation_harness"
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["tests.*", "conftest"]
@@ -38,3 +50,8 @@ disallow_incomplete_defs = false
 check_untyped_defs = false
 warn_return_any = false
 disable_error_code = ["type-arg", "misc", "unused-ignore"]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.156.6",
+]

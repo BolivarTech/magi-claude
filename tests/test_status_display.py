@@ -525,3 +525,40 @@ class TestRetryingState:
         d.update("m", "running")
         d.update("m", "retrying")
         d.update("m", "success")
+
+
+class TestRotatingState:
+    """Cover the ``rotating`` state added in v5.0.0 (fallback rotation)."""
+
+    def test_utf8_rotating_glyph_is_clockwise_arrow(self):
+        """UTF-8 mode renders rotating as ``⟳`` (U+27F3), distinct from retrying."""
+        from status_display import _UTF8_GLYPHS
+
+        assert _UTF8_GLYPHS.icons["rotating"] == "⟳"
+
+    def test_ascii_rotating_glyph_is_non_letter(self):
+        """ASCII fallback uses ``@`` -- a non-letter, so it cannot collide with a
+        capital in an agent name or state word (same rationale as the ``~`` timeout
+        and lowercase ``r`` retrying glyphs). The state word carries the meaning."""
+        from status_display import _ASCII_GLYPHS
+
+        glyph = _ASCII_GLYPHS.icons["rotating"]
+        assert glyph == "@"
+        assert not glyph.isalpha()
+
+    def test_rotating_does_not_mark_agent_terminal(self):
+        """``rotating`` is transitional, not terminal: the elapsed timer keeps
+        counting across the rotation so the eventual line shows total wall time."""
+        d = StatusDisplay(["m"], stream=io.StringIO(), use_ansi=False)
+        d.update("m", "running")
+        d.update("m", "rotating")
+        assert "m" not in d._end_times, "rotating is transitional, not terminal"
+        d.update("m", "success")
+        assert "m" in d._end_times
+
+    def test_unicode_probe_includes_rotating_glyph(self):
+        """The probe MUST carry ``⟳`` so a cp1252 console that cannot render it
+        falls back to ASCII instead of blowing up on the first rotation."""
+        from status_display import _UNICODE_PROBE
+
+        assert "⟳" in _UNICODE_PROBE

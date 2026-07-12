@@ -19,6 +19,17 @@ from ollama_config import OllamaConfig
 
 _REDACTED = "***"
 
+#: SINGLE SOURCE OF TRUTH for the transport-failure message contract (MAGI gate,
+#: Balthasar). ``_call`` below raises transport failures as RuntimeError -- which has no
+#: type to inspect -- so ``run_magi._classify`` recovers the failure CLASS by matching
+#: these against the message. They live HERE, next to the messages they must match, so
+#: rewording a message and its marker cannot drift apart. ``test_classify_matches_the_real_
+#: ollama_backend_messages`` pins the coupling; change a message below AND its marker here.
+#: ``TRANSPORT_HTTP_PATTERN`` uses ``HTTP \d`` (a digit MUST follow) so a coding-bug
+#: message like "no HTTP status" is NOT misread as transport.
+TRANSPORT_HTTP_PATTERN = r"HTTP \d|at chat-time"
+TRANSPORT_CONNECTION_MARKERS = ("Cannot reach Ollama",)
+
 
 class _ResponseFormatRejected(Exception):
     """Internal signal: server returned 400 rejecting response_format -> R15 downgrade."""
@@ -72,6 +83,13 @@ class OllamaBackend(AgentBackend):
         return text.replace(key, _REDACTED) if key else text
 
     def _call(self, req: urllib.request.Request, timeout: int) -> bytes:
+        # CONTRACT (MAGI gate, Balthasar): the RuntimeError message FORMATS below --
+        # "Ollama HTTP {code}", "Ollama 404 at chat-time", "Cannot reach Ollama at ..." --
+        # are matched by ``run_magi._classify`` (via ``_HTTP_MESSAGE_RE`` /
+        # ``_CONNECTION_MESSAGE_MARKERS``) to tell a transport failure from a coding bug.
+        # Reword a message here and you MUST update those markers + the pinning test
+        # ``test_classify_matches_the_real_ollama_backend_messages``, or a real transport
+        # error silently becomes "unexpected" and the mage dies on its first attempt.
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return cast(bytes, resp.read())

@@ -93,6 +93,11 @@ cross-lineage diversity:
 - A fail-fast **preflight** checks the host is reachable and the trio is
   available before launching; cloud models (`:cloud` tags) require `ollama signin`
   on the local daemon (no weight download) or an `api_key` for the direct cloud API.
+- **v5.0.0 (BREAKING):** `[models]` now declares a `lineage` per mage and a
+  `[[fallback]]` list; a mage whose model fails **rotates** to a declared fallback of a
+  different lineage instead of degrading (announced on stderr/banner/report). A v4 config
+  fails closed — `python scripts/validate_magi_toml.py` shows the migration; kill-switch:
+  `MAGI_OLLAMA_MAX_ROTATIONS=0`. See [`docs/ollama-backend.md`](../../docs/ollama-backend.md).
 
 The orchestrator handles everything: agent launching, output parsing, schema validation,
 failure alerting, consensus synthesis, and report generation. No additional steps needed.

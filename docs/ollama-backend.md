@@ -135,6 +135,88 @@ requires `ollama signin`).
 
 ---
 
+## 3b. Fallback rotation (v5.0.0, BREAKING)
+
+When a mage's active model exhausts its attempts — whether from **transport** failures
+(HTTP 5xx, host unreachable, timeout) or **schema** drift (invalid/truncated JSON) — MAGI
+rotates that mage to a declared substitute instead of dropping it to degraded mode. The
+substitute is chosen from a per-run **`[[fallback]]`** list, and rotation is governed by
+one rule: **one lineage, one mage** — a candidate is skipped if its lineage is already in
+play, already failed this mage, condemned run-wide by a transport failure, or if its
+context window cannot hold the payload. This preserves the three *independent* perspectives
+that make the ensemble meaningful. A run where a mage rotated to a **declared** fallback is
+**VALID** (not degraded); only a mage that finds no eligible candidate, or falls to an
+arbitrary model, degrades the run.
+
+### Schema (BREAKING)
+
+```toml
+[models]
+# v4 was a bare string; v5 is a table with an explicit lineage (never inferred).
+melchior  = { model = "qwen3.5:397b-cloud",    lineage = "alibaba"  }
+balthasar = { model = "kimi-k2.6:cloud",        lineage = "moonshot" }
+caspar    = { model = "deepseek-v4-pro:cloud",  lineage = "deepseek" }
+
+# Ordered most -> least capable, one model per lineage, none sharing a trio lineage.
+# With max_rotations = 2 only the first three are ever reached.
+[[fallback]]
+model   = "glm-5.2:cloud"
+lineage = "zhipu"
+[[fallback]]
+model   = "gpt-oss:120b-cloud"
+lineage = "openai"
+[[fallback]]
+model   = "minimax-m3:cloud"
+lineage = "minimax"
+
+max_attempts_per_model = 2     # attempts per model before rotating (>= 1)
+max_rotations          = 2     # rotations per mage; 0 disables rotation entirely
+max_probe_attempts     = 3     # propose-verify loop bound
+strict_context_guard   = false # true => abort/skip when a window cannot be measured
+retry_backoff_seconds  = 2.0   # backoff between TRANSPORT retries (schema retries do not wait)
+```
+
+`--ollama-init` scaffolds this shape. A **v4 config fails closed** with an actionable
+error; **`python scripts/validate_magi_toml.py [path]`** reports exactly what to change —
+it never guesses a lineage (two mages sharing a lineage would give a consensus that only
+*looks* like three perspectives).
+
+### Kill-switch and shadow rollout
+
+`max_rotations = 0` (or, without touching the TOML, **`MAGI_OLLAMA_MAX_ROTATIONS=0`**)
+turns rotation off while leaving the new preflight, the context probe, and the schema
+validation **active** — a shadow-rollout mode to validate the v5 config parsing and the
+measurement paths in production before enabling live rotation.
+
+### Context guard, the probe, and its cost
+
+Before launching a single agent, the preflight **measures** the payload with each trio
+model's own tokenizer (an exact `max_tokens=1` probe against `/chat/completions`) and reads
+each model's context window from `/api/show`. A model whose payload would not fit its
+window **does not run** (truncation produces a verdict indistinguishable from a legitimate
+one). The probe processes the full prompt once per trio model (concurrently) — on cloud
+models this is a real, if small, cost paid once per run. The report's **`context_guard`**
+field is `"enforced"` only when the payload was measured **and** every window is known; it
+reads `"estimated"` (and the banner says so) whenever measurement was not possible — for a
+rotated mage too.
+
+### Hard limitation — no `/api/show`, no protection
+
+On an endpoint that does **not** expose `/api/show` (a generic OpenAI-compatible server),
+the window cannot be read, so with `strict_context_guard = false` (the default) there is
+**no truncation protection at all** — not partial protection, *none*. A noisy warning names
+the affected models and the run proceeds on the estimator. Set **`strict_context_guard =
+true`** to fail closed (abort in preflight, skip in rotation) when a window is unknown.
+
+### Telemetry (never a silent fallback)
+
+Every rotation is announced on **stderr** at the moment it happens, marked in the report
+**banner** (`[fallback: <model>]`), and recorded in `magi-report.json` per agent
+(`model_configured`, `model_used`, `rotations`, structured `fallback_reason`) and per run
+(`fallback_agents`, `context_guard`, `lineage_warnings`, `token_estimate_delta`).
+
+---
+
 ## 4. Troubleshooting
 
 | Symptom | Likely cause | Action |

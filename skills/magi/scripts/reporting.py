@@ -113,7 +113,7 @@ def _fit_content(content: str, width: int, *, preserve_suffix: str = "") -> str:
     return prefix_source[:prefix_budget] + _ELLIPSIS + preserve_suffix
 
 
-def format_banner(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> str:
+def format_banner(report: dict[str, Any]) -> str:
     """Generate the MAGI verdict banner with consistent alignment.
 
     Produces an ASCII box of fixed width (52 columns) containing agent
@@ -126,14 +126,26 @@ def format_banner(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> st
     never slides — a future longer agent role name or a long consensus
     label cannot silently produce a malformed box.
 
+    Rotation telemetry (T13) is appended BELOW the box as free-form lines
+    (never truncated): a ``[fallback: <model>]`` marker per rotated mage
+    (R9), a ``[context guard: estimated]`` notice when the input size was
+    not measured (R16), and each lineage warning in full (R102). These
+    fields are fail-soft: a report lacking them (the Claude path, or a
+    pre-T13 dict) renders exactly the classic box.
+
     Args:
-        agents: List of validated agent output dictionaries.
-        consensus: Consensus dictionary produced by ``determine_consensus``.
+        report: The run report dict — reads ``agents`` and ``consensus``
+            (required), plus the optional rotation telemetry
+            (``model_used`` / ``model_configured`` per agent, top-level
+            ``context_guard`` and ``lineage_warnings``).
 
     Returns:
-        Multi-line string with the formatted banner. Every line has
-        exactly ``_BANNER_WIDTH`` characters.
+        Multi-line string with the formatted banner. Every boxed line has
+        exactly ``_BANNER_WIDTH`` characters; appended telemetry lines are
+        free-form.
     """
+    agents = report["agents"]
+    consensus = report["consensus"]
     labels = [_agent_label(a["agent"]) for a in agents]
     max_label_len = max((len(label) for label in labels), default=0)
 
@@ -161,6 +173,17 @@ def format_banner(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> st
     fitted_cons = _fit_content(cons_content, _BANNER_INNER)
     lines.append("|" + fitted_cons.ljust(_BANNER_INNER) + "|")
     lines.append(border)
+
+    # Rotation telemetry, below the box (free-form -- a warning the reader cannot
+    # read in full is decorative, R102). Fail-soft: absent keys => nothing appended.
+    for agent in agents:
+        used = agent.get("model_used")
+        if used is not None and used != agent.get("model_configured"):
+            lines.append(f"[fallback: {used}]")
+    if report.get("context_guard") == "estimated":
+        lines.append("[context guard: estimated -- input size was NOT measured (R16)]")
+    for warning in report.get("lineage_warnings", []):
+        lines.append(f"[lineage warning: {warning}]")
 
     return "\n".join(lines)
 
@@ -197,7 +220,13 @@ def _format_finding_line(finding: dict[str, Any]) -> str:
     )
 
 
-def format_report(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> str:
+def format_report(
+    agents: list[dict[str, Any]],
+    consensus: dict[str, Any],
+    *,
+    context_guard: str | None = None,
+    lineage_warnings: list[str] | None = None,
+) -> str:
     """Generate the full human-readable report.
 
     The report enforces the canonical MAGI output format:
@@ -214,11 +243,21 @@ def format_report(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> st
     Args:
         agents: List of validated agent output dictionaries.
         consensus: Consensus dictionary produced by ``determine_consensus``.
+        context_guard: The run's ``context_guard`` ("enforced"|"estimated"), forwarded
+            to the banner so an ESTIMATED guard renders where the reader looks (R16).
+            ``None`` (the Claude path / pre-v5 callers) renders the classic box.
+        lineage_warnings: Declared-lineage warnings (R21), forwarded to the banner
+            (decision #102: a guard that warns where nobody looks is decorative).
 
     Returns:
         Multi-line markdown string.
     """
-    sections: list[str] = [format_banner(agents, consensus), ""]
+    banner_report: dict[str, Any] = {"agents": agents, "consensus": consensus}
+    if context_guard is not None:
+        banner_report["context_guard"] = context_guard
+    if lineage_warnings:
+        banner_report["lineage_warnings"] = lineage_warnings
+    sections: list[str] = [format_banner(banner_report), ""]
 
     if consensus["findings"]:
         sections.append("## Key Findings")

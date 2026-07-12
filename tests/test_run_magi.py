@@ -6,12 +6,32 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import urllib.error
+from email.message import Message
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+
+from fallback_policy import AgentRotationState
+from ollama_config import ModelSpec
+from rotation_harness import FALLBACK, REQUIRED, TRIO, _rotation, _run, _valid
+from validate import ValidationError
+
+
+async def _preflight_ok(config, prompt=""):
+    """Async PreflightResult stand-in for tests that patch out the network guard.
+
+    T9: ``select_backend`` now reads ``result.fallback`` / ``.min_window_tokens`` /
+    ``.capabilities``, so a bare ``None`` no longer satisfies it. Return a minimal
+    real ``PreflightResult`` (the trio's lineages are distinct, windows big enough).
+    """
+    from rotation_harness import _preflight_result
+
+    return _preflight_result()
 
 
 class TestParseArgs:
@@ -382,15 +402,15 @@ class TestRunOrchestrator:
 
     @pytest.mark.asyncio
     async def test_model_passed_to_launch_agent(self, tmp_path):
-        """Verify that the model parameter propagates to launch_agent."""
+        """Verify that the model propagates to launch_agent as a ModelSpec (T9)."""
         from run_magi import run_orchestrator
 
-        captured_models: list[str] = []
+        captured: list[Any] = []
 
         async def mock_launch(
-            agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
         ):
-            captured_models.append(model)
+            captured.append(spec)
             return {
                 "agent": agent_name,
                 "verdict": "approve",
@@ -409,8 +429,8 @@ class TestRunOrchestrator:
                 timeout=300,
                 model="sonnet",
             )
-            assert all(m == "sonnet" for m in captured_models)
-            assert len(captured_models) == 3
+            assert all(isinstance(s, ModelSpec) and s.model == "sonnet" for s in captured)
+            assert len(captured) == 3
 
     @pytest.mark.asyncio
     async def test_two_fail_one_succeeds_raises(self, tmp_path):
@@ -827,7 +847,7 @@ class TestLaunchAgentValidation:
                 prompt="test",
                 output_dir=str(tmp_path),
                 timeout=300,
-                model="gpt4",
+                spec=ModelSpec("gpt4", "anthropic"),
             )
 
 
@@ -3083,7 +3103,7 @@ class TestMainLockWiring:
         monkeypatch.setattr(
             run_magi,
             "format_report",
-            lambda agents, consensus: "REPORT",
+            lambda agents, consensus, **kw: "REPORT",
         )
 
         async def fake_orch(*a, **k):
@@ -3447,7 +3467,7 @@ class TestFindingGuardWiring:
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -3498,7 +3518,7 @@ class TestFindingGuardWiring:
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -3551,7 +3571,7 @@ class TestFindingGuardWiring:
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -3699,7 +3719,7 @@ class TestFindingGuardWiring:
         monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -3765,7 +3785,7 @@ class TestFindingGuardWiring:
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -3851,7 +3871,7 @@ class TestFindingGuardWiring:
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -3942,7 +3962,7 @@ class TestFindingGuardWiring:
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -4022,7 +4042,7 @@ class TestFindingGuardWiring:
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -4039,14 +4059,20 @@ class TestFindingGuardWiring:
         cfg = OllamaConfig(
             base_url="http://h:11434/v1",
             api_key=None,
-            models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+            models={
+                "melchior": ModelSpec("m", "la"),
+                "balthasar": ModelSpec("b", "lb"),
+                "caspar": ModelSpec("c", "lc"),
+            },
         )
         ollama_backend = OllamaBackend(cfg)
-        monkeypatch.setattr(
-            run_magi,
-            "select_backend",
-            lambda args: (ollama_backend, {"melchior": "m", "balthasar": "b", "caspar": "c"}),
-        )
+
+        # select_backend is async now (T9) and returns a 3-tuple; run_orchestrator is
+        # faked below, so rotation=None is fine (the banner only reads .model).
+        async def fake_select(args, prompt):
+            return ollama_backend, dict(cfg.models), None
+
+        monkeypatch.setattr(run_magi, "select_backend", fake_select)
 
         def fake_create(output_dir: object, run_root: object = None) -> str:
             d = tmp_path / "magi-run-ollama-cost"
@@ -4114,7 +4140,7 @@ class TestFindingGuardWiring:
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -4251,7 +4277,7 @@ class TestInputSizeWiring:
             run_magi, "_load_input_content", lambda arg: (input_body, "Inline input")
         )
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: (input_body, None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -4419,7 +4445,7 @@ class TestInputSizeWiring:
         monkeypatch.setattr(run_magi.shutil, "which", lambda name: "claude")
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: (RAW_BODY, "Inline input"))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -4625,7 +4651,7 @@ class TestF4GuardObservability:
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -4735,7 +4761,7 @@ class TestF4GuardObservability:
         monkeypatch.setattr(run_magi, "build_user_prompt", lambda mode, content: "PROMPT")
         monkeypatch.setattr(run_magi, "_load_input_content", lambda arg: ("BODY", "Inline input"))
         monkeypatch.setattr(run_magi, "_maybe_enrich", lambda *a, **k: ("BODY", None))
-        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus: "REPORT")
+        monkeypatch.setattr(run_magi, "format_report", lambda agents, consensus, **kw: "REPORT")
         monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
         monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
         monkeypatch.setattr(run_magi, "sweep_legacy_runs_once", lambda: None)
@@ -4817,28 +4843,39 @@ def test_select_backend_claude_default():
     from claude_backend import ClaudeBackend
 
     args = parse_args(["design", "x"])
-    backend, agent_models = select_backend(args)
+    backend, agent_models, rotation = asyncio.run(select_backend(args, "payload"))
     assert isinstance(backend, ClaudeBackend)
-    assert set(agent_models.values()) == {"opus"}
+    assert {s.model for s in agent_models.values()} == {"opus"}
+    assert rotation is None  # Claude path keeps v4 single-shot retry, no rotation
 
 
 def test_select_backend_ollama_uses_trio(monkeypatch):
     from run_magi import parse_args, select_backend
     import run_magi
     from ollama_backend import OllamaBackend
-    from ollama_config import OllamaConfig
+    from ollama_config import ModelSpec, OllamaConfig
+    from run_magi import RotationContext
 
     cfg = OllamaConfig(
         base_url="http://h/v1",
         api_key=None,
-        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+        models={
+            "melchior": ModelSpec("m", "la"),
+            "balthasar": ModelSpec("b", "lb"),
+            "caspar": ModelSpec("c", "lc"),
+        },
     )
     monkeypatch.setattr(run_magi, "resolve_config", lambda **k: cfg)
-    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+    monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
     args = parse_args(["design", "x", "--ollama"])
-    backend, agent_models = select_backend(args)
+    backend, agent_models, rotation = asyncio.run(select_backend(args, "payload"))
     assert isinstance(backend, OllamaBackend)
-    assert agent_models == {"melchior": "m", "balthasar": "b", "caspar": "c"}
+    assert agent_models == {
+        "melchior": ModelSpec("m", "la"),
+        "balthasar": ModelSpec("b", "lb"),
+        "caspar": ModelSpec("c", "lc"),
+    }
+    assert isinstance(rotation, RotationContext)  # Ollama path carries the apparatus
 
 
 def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
@@ -4875,7 +4912,11 @@ def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
             "P",
             str(tmp_path),
             900,
-            agent_models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+            agent_models={
+                "melchior": ModelSpec("m", "la"),
+                "balthasar": ModelSpec("b", "lb"),
+                "caspar": ModelSpec("c", "lc"),
+            },
             backend=FakeBackend(),
             show_status=False,
         )
@@ -4887,7 +4928,7 @@ def test_resolve_config_called_once_in_select_backend(monkeypatch):
     """F-M invariant: resolve_config is called exactly once in select_backend."""
     from run_magi import parse_args, select_backend
     import run_magi
-    from ollama_config import OllamaConfig
+    from ollama_config import ModelSpec, OllamaConfig
 
     call_count = 0
 
@@ -4897,13 +4938,17 @@ def test_resolve_config_called_once_in_select_backend(monkeypatch):
         return OllamaConfig(
             base_url="http://h/v1",
             api_key=None,
-            models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+            models={
+                "melchior": ModelSpec("m", "la"),
+                "balthasar": ModelSpec("b", "lb"),
+                "caspar": ModelSpec("c", "lc"),
+            },
         )
 
     monkeypatch.setattr(run_magi, "resolve_config", counting_resolve)
-    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+    monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
     args = parse_args(["design", "x", "--ollama"])
-    select_backend(args)
+    asyncio.run(select_backend(args, "payload"))
     assert call_count == 1
 
 
@@ -4914,12 +4959,16 @@ def test_resolve_config_called_once_in_select_backend(monkeypatch):
 
 def _make_ollama_cfg():  # type: ignore[return]  # OllamaConfig imported lazily
     """Return a minimal OllamaConfig for T10 tests."""
-    from ollama_config import OllamaConfig
+    from ollama_config import ModelSpec, OllamaConfig
 
     return OllamaConfig(
         base_url="http://h/v1",
         api_key=None,
-        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
+        models={
+            "melchior": ModelSpec("m", "la"),
+            "balthasar": ModelSpec("b", "lb"),
+            "caspar": ModelSpec("c", "lc"),
+        },
     )
 
 
@@ -4962,7 +5011,7 @@ def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
     monkeypatch.setattr(run_magi.shutil, "which", lambda _: None)  # claude absent
     monkeypatch.setattr(run_magi, "resolve_config", lambda **k: _make_ollama_cfg())
-    monkeypatch.setattr(run_magi, "preflight", lambda c: None)
+    monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
 
     captured: dict[str, object] = {}
 
@@ -4981,3 +5030,1083 @@ def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
     from ollama_backend import OllamaBackend
 
     assert isinstance(captured["backend"], OllamaBackend)
+
+
+def test_retry_feedback_truncates_a_huge_error():
+    # BDD-45: the error is bounded so the retry prompt cannot grow without limit.
+    from model_context import MAX_ERROR_CHARS
+    from run_magi import _build_retry_prompt
+    from validate import ValidationError
+
+    err = ValidationError("x" * 10_000)
+    out = _build_retry_prompt("PROMPT", err)
+    assert len(out) < len("PROMPT") + MAX_ERROR_CHARS + 600
+    assert "..." in out
+
+
+def test_retry_feedback_bound_holds_for_NON_ASCII_errors():
+    # Truncating CHARS does not bound TOKENS. Exercise the TRUE worst case: an emoji
+    # is 4 UTF-8 bytes, and a byte-level BPE emits up to one token per byte (C2-3).
+    from model_context import MAX_RETRY_FEEDBACK_TOKENS
+    from run_magi import _build_retry_prompt
+    from validate import ValidationError
+
+    err = ValidationError("\U0001f525" * 10_000)
+    block = _build_retry_prompt("", err)
+    # UTF-8 byte count is a strict upper bound on tokens for any byte-level BPE.
+    worst_case_tokens = len(block.encode("utf-8"))
+    assert worst_case_tokens <= MAX_RETRY_FEEDBACK_TOKENS
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (ValidationError("missing keys"), "schema"),
+        (json.JSONDecodeError("boom", "{", 0), "schema"),
+        (TimeoutError(), "timeout"),
+        (asyncio.TimeoutError(), "timeout"),
+        # HTTPError IS a subclass of URLError -- check it FIRST.
+        (urllib.error.HTTPError("u", 500, "err", Message(), None), "http"),
+        (urllib.error.HTTPError("u", 429, "rate limited", Message(), None), "http"),
+        # A socket timeout arrives WRAPPED: URLError(TimeoutError()).
+        (urllib.error.URLError(TimeoutError()), "timeout"),
+        (urllib.error.URLError(ConnectionRefusedError()), "connection"),
+        (ConnectionRefusedError(), "connection"),
+        (ConnectionResetError(), "connection"),
+        # Backend-mapped transport RuntimeErrors: classified by MESSAGE signature.
+        (RuntimeError("HTTP 503 Service Unavailable"), "http"),
+        (RuntimeError("Ollama 404 at chat-time: model unavailable"), "http"),
+        (
+            RuntimeError("Cannot reach Ollama at http://h:11434: [Errno 111] Connection refused"),
+            "connection",
+        ),
+        # A RuntimeError with NO transport signature is OUR bug -> "unexpected".
+        (RuntimeError("assert self._pid is not None"), "unexpected"),
+        (TypeError("a bug in OUR code"), "unexpected"),
+    ],
+)
+def test_classify_pins_every_transport_variant(exc, expected):
+    """_classify decides the SCOPE of a failure and whether the fast-fail fires."""
+    from run_magi import _classify
+
+    assert _classify(exc) == expected
+
+
+def test_non_transport_runtimeerror_is_unexpected_not_transport():
+    """A generic RuntimeError (our bug) must NOT masquerade as transport."""
+    from run_magi import _FAIL_CONNECTION, _FAIL_HTTP, _FAIL_TIMEOUT, _FAIL_UNEXPECTED, _classify
+
+    label = _classify(RuntimeError("some internal bug -- no HTTP status, no socket"))
+    assert label == _FAIL_UNEXPECTED
+    assert label not in (_FAIL_HTTP, _FAIL_CONNECTION, _FAIL_TIMEOUT)
+    assert _classify(RuntimeError("Ollama HTTP 500: Internal Server Error")) == _FAIL_HTTP
+    assert (
+        _classify(
+            RuntimeError("Cannot reach Ollama at http://h:11434: [Errno 111] Connection refused")
+        )
+        == _FAIL_CONNECTION
+    )
+
+
+def test_classify_matches_the_real_ollama_backend_messages():
+    """CONTRACT: the markers must match the VERBATIM strings ollama_backend._call raises."""
+    from run_magi import _FAIL_CONNECTION, _FAIL_HTTP, _FAIL_TIMEOUT, _classify
+
+    http_error = RuntimeError("Ollama HTTP 503: Service Unavailable")
+    chat_time_404 = RuntimeError(
+        "Ollama 404 at chat-time: model unavailable (Not Found). "
+        "Preflight passed -- possible ollama rm / auth expiry / TOCTOU."
+    )
+    unreachable = RuntimeError(
+        "Cannot reach Ollama at http://nas:11434: [Errno 111] Connection refused"
+    )
+    timed_out = TimeoutError("Ollama request timed out: timed out")
+    assert _classify(http_error) == _FAIL_HTTP
+    assert _classify(chat_time_404) == _FAIL_HTTP
+    assert _classify(unreachable) == _FAIL_CONNECTION
+    assert _classify(timed_out) == _FAIL_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# Task 9: two-level attempt loop (R1/R2/R12) -- attempts, retry scope, backoff
+# ---------------------------------------------------------------------------
+
+
+class TestAttemptsPerModel:
+    """R1/R2/R12: attempts, retry scope and backoff for ONE active model."""
+
+    @pytest.mark.asyncio
+    async def test_transport_failure_is_now_retried(self, tmp_path):
+        """v4 never retried transport -- a 503 killed the mage. R2 changes that."""
+        calls = {"caspar": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            calls["caspar"] += 1
+            if calls["caspar"] == 1:
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert calls["caspar"] == 2, "a transport failure must be retried, not fatal"
+        assert result.get("degraded") is not True
+        assert len(result["agents"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_timeout_on_first_attempt_is_retried_not_terminal(self, tmp_path):
+        """BDD-20 (integration): a timeout was TERMINAL in v4. R2 makes it a failed
+        ATTEMPT, so the SAME model gets its retry."""
+        calls = {"melchior": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "melchior":
+                return _valid(agent_name)
+            calls["melchior"] += 1
+            if calls["melchior"] == 1:
+                raise TimeoutError("Ollama request timed out")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert calls["melchior"] == 2, (
+            "a timeout must be RETRIED on the same model, not terminate the mage -- "
+            "if this is 1, timeouts went terminal again (the v4 regression)"
+        )
+        assert result.get("degraded") is not True
+        assert len(result["agents"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_schema_retry_carries_feedback_but_transport_retry_does_not(self, tmp_path):
+        """BDD-4: the model that ANSWERED needs correction; the one that never
+        answered needs a pause, not a lecture."""
+        prompts = {"caspar": [], "melchior": []}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "balthasar":
+                return _valid(agent_name)
+            prompts[agent_name].append(prompt)
+            if len(prompts[agent_name]) == 1:
+                if agent_name == "caspar":
+                    raise ValidationError("missing keys: ['recommendation']")
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert "---RETRY-FEEDBACK---" in prompts["caspar"][1], "schema retry must correct"
+        assert "recommendation" in prompts["caspar"][1], "it must cite the actual defect"
+        assert "---RETRY-FEEDBACK---" not in prompts["melchior"][1], (
+            "a transport retry must resend the ORIGINAL prompt: the model never "
+            "answered, so there is nothing to correct"
+        )
+
+    @pytest.mark.asyncio
+    async def test_backoff_waits_between_transport_attempts_only(self, tmp_path, monkeypatch):
+        """BDD-35: waiting helps a rate-limited server; it does not help a model
+        that produced malformed JSON -- there, the feedback is the fix."""
+        import run_magi
+
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(run_magi.asyncio, "sleep", fake_sleep)
+
+        calls = {"caspar": 0, "melchior": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "balthasar":
+                return _valid(agent_name)
+            calls[agent_name] += 1
+            if calls[agent_name] == 1:
+                if agent_name == "caspar":
+                    raise RuntimeError("HTTP 429 Too Many Requests")
+                raise ValidationError("bad json")
+            return _valid(agent_name)
+
+        await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert sleeps == [2.0], (
+            "exactly one backoff: the transport retry (caspar). The schema retry "
+            f"(melchior) must not sleep. Got {sleeps}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_launch_agent_receives_a_ModelSpec_not_a_bare_tag(self, tmp_path):
+        """The signature change, pinned (finding by Melchior, Checkpoint 2). The
+        rotation path condemns a LINEAGE on failure, so it must reach the call site."""
+        seen = []
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            seen.append(spec)
+            return _valid(agent_name)
+
+        await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert all(isinstance(s, ModelSpec) for s in seen), f"got {[type(s) for s in seen]}"
+        assert {s.lineage for s in seen} == {"alibaba", "moonshot", "deepseek"}
+
+    @pytest.mark.asyncio
+    async def test_local_model_tags_get_no_special_treatment(self, tmp_path):
+        """BDD-21: a local tag is just a tag. The declared lineage governs the skip;
+        there is NO branch anywhere that asks "is this cloud or local?"."""
+        local_trio = {
+            "melchior": ModelSpec("qwen3:14b", "alibaba"),
+            "balthasar": ModelSpec("gpt-oss:20b", "openai"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
+        }
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            return _valid(agent_name)
+
+        from run_magi import run_orchestrator
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="t",
+                output_dir=str(tmp_path),
+                timeout=300,
+                agent_models=local_trio,
+                rotation=_rotation(),
+                show_status=False,
+            )
+        assert len(result["agents"]) == 3
+        assert result.get("degraded") is not True
+
+    @pytest.mark.asyncio
+    async def test_claude_path_without_rotation_keeps_v4_behaviour(self, tmp_path):
+        """BDD-19: rotation=None => single-shot schema retry, transport still fatal."""
+        calls = {"caspar": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            calls["caspar"] += 1
+            raise RuntimeError("HTTP 503 Service Unavailable")
+
+        from run_magi import run_orchestrator
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="t",
+                output_dir=str(tmp_path),
+                timeout=300,
+                model="opus",
+                show_status=False,
+            )
+
+        assert calls["caspar"] == 1, "v4 contract: transport failures are NOT retried"
+        assert result["degraded"] is True
+        assert len(result["agents"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 10: rotation propose-verify-commit (R5/R8/R24) + failure routing (R13)
+# ---------------------------------------------------------------------------
+
+
+class TestRotationProposeVerifyCommit:
+    """R24: propose under the lock, VERIFY with a probe outside it, then commit."""
+
+    @pytest.mark.asyncio
+    async def test_mage_rotates_after_exhausting_attempts_and_still_votes(self, tmp_path):
+        """BDD-2/BDD-11: a dead model no longer costs a mage, and the run is VALID
+        (not degraded), because the fallback was DECLARED."""
+        seen: list[str] = []
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            seen.append(spec.model)
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert seen == ["deepseek-v4-pro:cloud", "deepseek-v4-pro:cloud", "glm-5.2:cloud"]
+        assert result.get("degraded") is not True, (
+            "a declared fallback keeps the run VALID -- that is the whole feature"
+        )
+        assert len(result["agents"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_schema_failure_also_reaches_rotation(self, tmp_path):
+        """BDD-3: rotation is failure-type AGNOSTIC. A mage that exhausts its attempts
+        with SCHEMA failures (the model answered but never satisfied the contract)
+        must rotate just the same and vote."""
+        seen: list[str] = []
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            seen.append(spec.model)
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise ValidationError("missing keys: ['findings']")  # SCHEMA, not transport
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert seen == ["deepseek-v4-pro:cloud", "deepseek-v4-pro:cloud", "glm-5.2:cloud"]
+        assert result.get("degraded") is not True, "the schema path reaches rotation too"
+        assert len(result["agents"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_max_attempts_per_model_is_never_exceeded(self, tmp_path):
+        """Two attempts per model, then the model is spent -- never a third."""
+        per_model: dict[str, int] = {}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            per_model[spec.model] = per_model.get(spec.model, 0) + 1
+            raise RuntimeError("HTTP 503 Service Unavailable")
+
+        await _run(tmp_path, mock_launch, rotation=_rotation(max_attempts=2, max_rotations=1))
+
+        assert per_model["deepseek-v4-pro:cloud"] == 2, "trio model: exactly max_attempts"
+        assert per_model["glm-5.2:cloud"] == 2, "fallback: a FULL fresh budget"
+        assert len(per_model) == 2, "1 + max_rotations models, no more"
+
+    def test_fallback_reason_kind_is_always_an_R13_enum_value(self):
+        """R13: telemetry carries {transport, schema, timeout} ONLY. The internal
+        connection/http distinction must NEVER leak into fallback_reason.kind."""
+        from run_magi import (
+            _FAIL_CONNECTION,
+            _FAIL_HTTP,
+            _FAIL_SCHEMA,
+            _FAIL_TIMEOUT,
+            _AttemptsExhausted,
+            _reason,
+        )
+
+        old = ModelSpec("deepseek-v4-pro:cloud", "deepseek")
+        new = ModelSpec("glm-5.2:cloud", "zhipu")
+        for fail_kind in (_FAIL_CONNECTION, _FAIL_HTTP, _FAIL_TIMEOUT, _FAIL_SCHEMA):
+            exc = _AttemptsExhausted(fail_kind, "boom", http_status=None, attempts=2)
+            reason = _reason(old, new, exc, AgentRotationState(rotations_done=1))
+            assert reason["kind"] in ("transport", "schema", "timeout"), fail_kind
+
+    @pytest.mark.asyncio
+    async def test_probe_rejects_a_candidate_that_does_not_fit_and_we_repropose(self, tmp_path):
+        """BDD-54: the pre-filter PROPOSED it; the probe MEASURED it; the probe wins."""
+        probed: list[str] = []
+
+        async def probe(model: str, prompt: str, timeout: int) -> int | None:
+            probed.append(model)
+            return 10_000_000 if model == "glm-5.2:cloud" else REQUIRED
+
+        seen: list[str] = []
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            seen.append(spec.model)
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation(probe=probe))
+
+        assert probed == ["glm-5.2:cloud", "gpt-oss:120b-cloud"]
+        assert "glm-5.2:cloud" not in seen, "a model that would truncate must NEVER run"
+        assert seen[-1] == "gpt-oss:120b-cloud"
+        assert result.get("degraded") is not True
+
+    @pytest.mark.asyncio
+    async def test_no_io_call_ever_holds_the_registry_lock(self, tmp_path):
+        """Caspar's deadlock CRITICAL, made executable: no I/O under the registry lock."""
+        ctx = _rotation()
+        violations: list[str] = []
+
+        async def probe(model: str, prompt: str, timeout: int) -> int | None:
+            if ctx.registry._lock.locked():
+                violations.append(f"probe({model})")
+            return REQUIRED
+
+        ctx = _rotation(probe=probe)
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and spec.lineage == "deepseek":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert not violations, f"I/O executed while holding the registry lock: {violations}"
+
+    @pytest.mark.asyncio
+    async def test_probe_runs_outside_the_registry_lock(self, tmp_path):
+        """BDD-55: the probe must never hold the registry lock."""
+        ctx = _rotation()
+        held_during_probe: list[bool] = []
+
+        async def probe(model: str, prompt: str, timeout: int) -> int | None:
+            held_during_probe.append(ctx.registry._lock.locked())
+            return REQUIRED
+
+        ctx = _rotation(probe=probe)
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert held_during_probe, "the probe must have run at least once"
+        assert not any(held_during_probe), "the registry lock was held during a network call"
+
+    @pytest.mark.asyncio
+    async def test_attempt_counter_resets_on_rotation(self, tmp_path):
+        """BDD-10: the new model gets a FULL budget, not the leftovers of the old."""
+        per_model: dict[str, int] = {}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            per_model[spec.model] = per_model.get(spec.model, 0) + 1
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            if per_model[spec.model] == 1:
+                raise RuntimeError("HTTP 503 Service Unavailable")  # fallback fails ONCE
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert per_model == {"deepseek-v4-pro:cloud": 2, "glm-5.2:cloud": 2}
+        assert result.get("degraded") is not True, "the fallback's 2nd attempt succeeded"
+
+    @pytest.mark.asyncio
+    async def test_max_probe_attempts_bounds_the_propose_verify_loop(self, tmp_path):
+        """A stale window cache must not turn a correctness guard into a latency hole:
+        the loop is bounded, and exhausting it kills the mage cleanly."""
+        probed: list[str] = []
+
+        async def probe(model: str, prompt: str, timeout: int) -> int | None:
+            probed.append(model)
+            return 10_000_000  # NOTHING fits
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            raise RuntimeError("HTTP 503 Service Unavailable")
+
+        result = await _run(
+            tmp_path,
+            mock_launch,
+            rotation=_rotation(probe=probe, max_probe_attempts=3, max_rotations=5),
+        )
+
+        assert len(probed) == 3, f"bounded by max_probe_attempts, got {len(probed)}"
+        assert result["degraded"] is True, "no fitting candidate -> the mage dies"
+        assert len(result["agents"]) == 2, "degraded mode still synthesizes with 2"
+
+
+# ---------------------------------------------------------------------------
+# Task 11: failure semantics (R5a) + fast-fail on a dead endpoint (R15)
+# ---------------------------------------------------------------------------
+
+
+class TestFailureSemanticsAndFastFail:
+    """R5a: a failure is global or local by its NATURE, not by who suffered it."""
+
+    @pytest.mark.asyncio
+    async def test_transport_failure_condemns_the_lineage_for_every_mage(self, tmp_path):
+        """BDD-30: if the glm-5.2 (zhipu) fallback is down for Melchior, it is down
+        for Balthasar too -- never handed a lineage already condemned run-wide."""
+        ctx = _rotation()
+        used: dict[str, list[str]] = {"melchior": [], "balthasar": [], "caspar": []}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            used[agent_name].append(spec.model)
+            if agent_name == "caspar":
+                return _valid(agent_name)
+            if spec.lineage in ("alibaba", "moonshot", "zhipu"):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert "zhipu" in ctx.registry.run_failed_lineages
+        assert used["balthasar"].count("glm-5.2:cloud") <= 2, (
+            "balthasar may have raced melchior into zhipu at most once; it must "
+            "never be handed a lineage already condemned run-wide"
+        )
+        assert any(m == "gpt-oss:120b-cloud" for m in used["balthasar"])
+        assert result.get("degraded") is not True
+
+    @pytest.mark.asyncio
+    async def test_schema_failure_stays_local_to_the_mage(self, tmp_path):
+        """BDD-31: the model was ALIVE and answered -- condemning the lineage run-wide
+        would throw away a model that works fine for the other two."""
+        ctx = _rotation()
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and spec.lineage == "deepseek":
+                raise ValidationError("missing keys: ['findings']")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert ctx.registry.run_failed_lineages == set(), (
+            "a schema failure must NEVER be globalized"
+        )
+        assert result.get("degraded") is not True
+
+    @pytest.mark.asyncio
+    async def test_two_connection_refused_lineages_abort_the_run_at_once(self, tmp_path):
+        """BDD-40: rotating is pointless if what died is the SERVER."""
+        attempts = {"n": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            attempts["n"] += 1
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+
+        with pytest.raises(RuntimeError, match="endpoint"):
+            await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert attempts["n"] <= 6, (
+            "the abort must be FAST: once 2 distinct lineages refuse the connection, "
+            "the shared endpoint_down Event stops the siblings before they spend "
+            f"their own budgets on the same dead server (got {attempts['n']} attempts; "
+            "without the Event this would be 18)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_http_500_storm_does_NOT_trigger_the_fast_fail(self, tmp_path):
+        """BDD-41: a 500 means SOMEONE answered -- the endpoint is alive and the next
+        attempt may succeed. Aborting would kill healthy runs a backoff would save."""
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if spec.lineage in ("alibaba", "moonshot", "deepseek"):
+                raise RuntimeError("HTTP 500 Internal Server Error")
+            return _valid(agent_name)  # every fallback works
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert result["consensus"] is not None, "the run must continue and rotate"
+        assert result.get("degraded") is not True
+        assert len(result["agents"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Task 12: fault injection on the async paths (the paths a happy test never walks)
+# ---------------------------------------------------------------------------
+
+
+class TestRotationFaultInjection:
+    """The paths a happy test never walks -- where all three gate bugs lived."""
+
+    @pytest.mark.asyncio
+    async def test_a_failed_status_display_after_the_verdict_does_not_cost_the_verdict(
+        self, tmp_path
+    ):
+        """The 4th broad catch: the post-verdict status-display update is BEST-EFFORT.
+        A UI glitch on the "success" update must be SWALLOWED: the run completes, the
+        verdict stands, and the lineage stays claimed."""
+        import run_magi
+
+        ctx = _rotation()
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            return _valid(agent_name)
+
+        def raise_only_on_success(display, name, state, log_gate):
+            if state == "success":
+                raise RuntimeError("status display died after the verdict")
+
+        with patch.object(run_magi, "_safe_display_update", side_effect=raise_only_on_success):
+            result = await _run(tmp_path, mock_launch, rotation=ctx)  # does NOT raise
+
+        assert len(result["agents"]) == 3, "a display glitch must never drop a verdict"
+        assert result.get("degraded") is not True
+        assert "deepseek" in await ctx.registry.lineages_in_play(exclude=None), (
+            "caspar emitted a valid verdict; its lineage stays claimed even though the "
+            "display update failed afterwards"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_late_exception_in_teardown_propagates_without_releasing_the_lineage(
+        self, tmp_path
+    ):
+        """A GENUINE late exception reaching agent_slot.__aexit__ with succeeded=True must
+        PROPAGATE yet still CONSERVE the lineage: succeeded is the sole determinant."""
+        from fallback_policy import LineageRegistry
+
+        reg = LineageRegistry(TRIO)
+        state = AgentRotationState()
+
+        with pytest.raises(RuntimeError, match="genuine teardown bug"):
+            async with reg.agent_slot("caspar", state):
+                state.succeeded = True  # a valid verdict exists
+                raise RuntimeError("genuine teardown bug after the verdict")
+
+        assert "deepseek" in await reg.lineages_in_play(exclude=None), (
+            "succeeded=True conserves the lineage even though a real exception "
+            "propagated from teardown"
+        )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_claims_are_serialised_even_with_injected_delays(self, tmp_path):
+        """Caspar's TOCTOU objection, made falsifiable: force the interleaving and assert
+        the invariant survives it."""
+        from fallback_policy import LineageRegistry
+
+        registry = LineageRegistry(TRIO)
+        policy = _rotation().policy
+        real_next = policy.next_model
+        claims: list[str] = []
+
+        def slow_next(*args, **kwargs):
+            """Pure, but slow: widen the read-decide-commit window."""
+            result = real_next(*args, **kwargs)
+            if result:
+                claims.append(result.lineage)
+            return result
+
+        policy.next_model = slow_next  # type: ignore[method-assign]
+
+        s1, s2 = AgentRotationState(), AgentRotationState()
+        got = await asyncio.gather(
+            registry.claim_next("melchior", policy, s1),
+            registry.claim_next("balthasar", policy, s2),
+        )
+
+        assert all(g is not None for g in got)
+        assert got[0].lineage != got[1].lineage, (
+            f"two mages reserved the same lineage under concurrency: {claims}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_two_mages_rotating_concurrently_get_distinct_lineages(self, tmp_path):
+        """The cycle-1 TOCTOU: read-decide-commit must be atomic, or both mages pick the
+        same lineage and the consensus only LOOKS like 3 perspectives."""
+        ctx = _rotation()
+        assigned: dict[str, str] = {}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar":
+                return _valid(agent_name)
+            if spec.lineage in ("alibaba", "moonshot"):  # both trio models die
+                await asyncio.sleep(0)  # force interleaving
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            assigned[agent_name] = spec.lineage
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert len(assigned) == 2
+        assert len(set(assigned.values())) == 2, f"two mages landed on the same lineage: {assigned}"
+        assert result.get("degraded") is not True
+
+    @pytest.mark.asyncio
+    async def test_cancellation_mid_run_releases_the_lineage(self, tmp_path):
+        """CancelledError is a death, not a success: the slot must free the lineage."""
+        ctx = _rotation()
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar":
+                raise asyncio.CancelledError()
+            return _valid(agent_name)
+
+        with pytest.raises((asyncio.CancelledError, RuntimeError)):
+            await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert "deepseek" not in await ctx.registry.lineages_in_play(exclude=None)
+
+    @pytest.mark.asyncio
+    async def test_a_probe_that_raises_reproposes_instead_of_killing_the_mage(self, tmp_path):
+        """A probe is an accuracy optimisation. It must never be fatal: with the guard
+        non-strict, an unmeasurable candidate is accepted (loudly)."""
+
+        async def probe(model: str, prompt: str, timeout: int) -> int | None:
+            raise urllib.error.HTTPError("u", 500, "boom", Message(), None)
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and spec.lineage == "deepseek":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation(probe=probe))
+
+        assert result.get("degraded") is not True, "a failed probe must not kill the mage"
+
+    @pytest.mark.asyncio
+    async def test_degraded_mode_survives_a_mage_that_exhausts_its_rotations(self, tmp_path):
+        """BDD-7 / R7: rotation does not replace degraded mode -- it postpones it."""
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            raise RuntimeError("HTTP 503 Service Unavailable")  # every model fails
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation(max_rotations=2))
+
+        assert result["degraded"] is True
+        assert len(result["agents"]) == 2
+        assert result["consensus"] is not None, "2 agents still synthesize (v2.x minimum)"
+
+    @pytest.mark.asyncio
+    async def test_truncated_OUTPUT_is_loud_not_silent(self, tmp_path):
+        """BDD-36: a truncated OUTPUT breaks the 7-key JSON -> JSONDecodeError -> a failed
+        attempt -> retry -> rotation. It is LOUD, and lands in the fail-closed path."""
+        calls = {"caspar": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            calls["caspar"] += 1
+            if calls["caspar"] == 1:
+                raise json.JSONDecodeError("Expecting ',' delimiter", '{"agent": "cas', 14)
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert calls["caspar"] == 2, "a truncated output is a schema failure -> retried"
+        assert result.get("degraded") is not True, "and the retry recovered it"
+
+    @pytest.mark.asyncio
+    async def test_rotation_never_opens_a_fourth_concurrent_request(self, tmp_path):
+        """BDD-18 / NR2: Ollama's Pro cap is 3 agents. Rotation is SEQUENTIAL within a
+        mage: it must never add a slot."""
+        in_flight = {"now": 0, "max": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            in_flight["now"] += 1
+            in_flight["max"] = max(in_flight["max"], in_flight["now"])
+            try:
+                await asyncio.sleep(0)
+                if spec.lineage == "deepseek":
+                    raise RuntimeError("HTTP 503 Service Unavailable")
+                return _valid(agent_name)
+            finally:
+                in_flight["now"] -= 1
+
+        await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert in_flight["max"] <= 3, f"opened {in_flight['max']} concurrent requests"
+
+
+# ---------------------------------------------------------------------------
+# Task 13: noisy telemetry (R9/R13/R16/NR3b) -- no silent fallback ever
+# ---------------------------------------------------------------------------
+
+
+def _preflight(context_guard, *, deltas=(), warnings=()):
+    """A PreflightResult carrying the telemetry the report reads from it (T8)."""
+    from ollama_preflight import PreflightResult
+
+    return PreflightResult(
+        capabilities={},
+        min_window_tokens=REQUIRED,
+        required_tokens=REQUIRED,
+        context_guard=context_guard,
+        lineage_warnings=list(warnings),
+        fallback=tuple(FALLBACK),
+        token_estimate_delta=list(deltas),
+    )
+
+
+async def _rotated_report(tmp_path, *, preflight=None, api_key=None, secret_in_error=False):
+    """Drive a REAL caspar rotation (deepseek-v4-pro -> glm-5.2) and return the report."""
+    from dataclasses import replace
+
+    async def mock_launch(
+        agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+    ):
+        if agent_name != "caspar":
+            return _valid(agent_name)
+        if spec.model == "deepseek-v4-pro:cloud":
+            msg = "HTTP 503 Service Unavailable"
+            if secret_in_error:
+                msg += " (backend echoed auth token=sk-supersecret into the body)"
+            raise RuntimeError(msg)
+        return _valid(agent_name)
+
+    rotation = _rotation()
+    if preflight is not None:
+        rotation = replace(rotation, preflight=preflight)
+    if api_key is not None:
+        rotation = replace(rotation, config=replace(rotation.config, api_key=api_key))
+    return await _run(tmp_path, mock_launch, rotation=rotation)
+
+
+def _caspar(report):
+    """The rotated mage's agent entry -- located by NAME, never by list position."""
+    return next(a for a in report["agents"] if a["agent"] == "caspar")
+
+
+class TestTelemetrySurfaces:
+    """R9/R13/R16: every rotation is visible on stderr, in the banner, and in the report."""
+
+    @pytest.mark.asyncio
+    async def test_rotation_is_announced_on_stderr_with_its_cause(self, tmp_path, capsys):
+        """R9/BDD-12: a fallback is NEVER silent -- stderr names the new model."""
+        await _rotated_report(tmp_path)
+        assert "rotating to glm-5.2:cloud" in capsys.readouterr().err
+
+    @pytest.mark.asyncio
+    async def test_report_carries_model_configured_used_rotations_and_reason(self, tmp_path):
+        """R13/BDD-12: the rotated mage's telemetry is complete AND correctly scoped."""
+        report = await _rotated_report(tmp_path)
+
+        caspar = _caspar(report)
+        assert caspar["model_configured"] == "deepseek-v4-pro:cloud"
+        assert caspar["model_used"] == "glm-5.2:cloud"
+        assert caspar["rotations"] == 1
+        assert caspar["fallback_reason"]["kind"] == "transport"
+        assert caspar["fallback_reason"]["from_model"] == "deepseek-v4-pro:cloud"
+        assert caspar["fallback_reason"]["to_model"] == "glm-5.2:cloud"
+
+        melchior = next(a for a in report["agents"] if a["agent"] == "melchior")
+        assert melchior["model_configured"] == melchior["model_used"], "no rotation => equal"
+        assert melchior["rotations"] == 0
+        assert melchior["fallback_reason"] is None
+
+    @pytest.mark.asyncio
+    async def test_model_used_is_the_tag_string_not_a_serialized_ModelSpec(self, tmp_path):
+        """R13 (a): the report stores the .model TAG, not the ModelSpec (not JSON-serialisable)."""
+        caspar = _caspar(await _rotated_report(tmp_path))
+        assert isinstance(caspar["model_used"], str)
+        assert isinstance(caspar["model_configured"], str)
+        assert not isinstance(caspar["model_used"], ModelSpec)
+        assert caspar["model_used"] == "glm-5.2:cloud"
+
+    @pytest.mark.asyncio
+    async def test_fallback_agents_lists_exactly_the_rotated_mages(self, tmp_path):
+        """R9 (b): the run-level roll-up names every mage that rotated -- and no other."""
+        report = await _rotated_report(tmp_path)
+        assert report["fallback_agents"] == ["caspar"]
+
+    @pytest.mark.asyncio
+    async def test_banner_marks_the_rotated_mage(self, tmp_path):
+        """R9: the banner -- where the verdict's reader actually looks -- flags the swap."""
+        from reporting import format_banner
+
+        report = await _rotated_report(tmp_path)
+        assert "[fallback: glm-5.2:cloud]" in format_banner(report)
+
+    @pytest.mark.asyncio
+    async def test_banner_renders_the_estimated_guard_and_lineage_warnings(self, tmp_path):
+        """R16/R102: an ESTIMATED guard and any lineage warning must RENDER in the banner."""
+        from reporting import format_banner
+
+        warning = "deepseek-v4-pro declares 'deepseek' but no known pattern confirms it"
+        report = await _rotated_report(
+            tmp_path,
+            preflight=_preflight("estimated", warnings=[warning]),
+        )
+        banner = format_banner(report)
+        assert "estimated" in banner, "the reader must SEE the guard was not enforced (R16)"
+        assert warning in banner, "the lineage warning must reach the banner (R102)"
+
+    @pytest.mark.asyncio
+    async def test_fallback_reason_is_the_structured_R13_dict_with_kind_in_the_enum(self, tmp_path):
+        """R13 (d): fallback_reason is a STRUCTURED dict and its kind is an R13 enum member."""
+        from run_magi import _KIND_SCHEMA, _KIND_TIMEOUT, _KIND_TRANSPORT
+
+        reason = _caspar(await _rotated_report(tmp_path))["fallback_reason"]
+        assert isinstance(reason, dict)
+        assert {
+            "kind",
+            "from_model",
+            "from_lineage",
+            "to_model",
+            "to_lineage",
+            "detail",
+            "http_status",
+            "attempts",
+        } <= set(reason)
+        assert reason["kind"] in (_KIND_TRANSPORT, _KIND_SCHEMA, _KIND_TIMEOUT)
+        assert reason["kind"] == _KIND_TRANSPORT, "a 503 is transport, not http/connection"
+
+    @pytest.mark.asyncio
+    async def test_context_guard_has_exactly_two_values(self, tmp_path):
+        """R16/BDD-42: the field's domain is exactly {enforced, estimated}."""
+        report = await _rotated_report(tmp_path)
+        assert report["context_guard"] in ("enforced", "estimated")
+
+    @pytest.mark.asyncio
+    async def test_context_guard_is_enforced_when_measured_and_estimated_otherwise(self, tmp_path):
+        """R16/R18 (c): the field's SEMANTICS -- enforced only when MEASURED, else estimated."""
+        from ollama_preflight import CONTEXT_GUARD_ENFORCED, CONTEXT_GUARD_ESTIMATED
+
+        enforced_report = await _rotated_report(
+            tmp_path, preflight=_preflight(CONTEXT_GUARD_ENFORCED)
+        )
+        estimated_report = await _rotated_report(
+            tmp_path, preflight=_preflight(CONTEXT_GUARD_ESTIMATED)
+        )
+
+        assert enforced_report["context_guard"] == "enforced"
+        assert estimated_report["context_guard"] == "estimated"
+
+    @pytest.mark.asyncio
+    async def test_token_estimate_delta_is_reported(self, tmp_path):
+        """R16/BDD-46: the estimate-vs-measured delta reaches the report per trio model."""
+        from ollama_preflight import CONTEXT_GUARD_ENFORCED
+
+        delta = {"agent": "melchior", "estimated": 13_827, "actual": 16_232, "error_pct": -14.8}
+        report = await _rotated_report(
+            tmp_path, preflight=_preflight(CONTEXT_GUARD_ENFORCED, deltas=[delta])
+        )
+
+        d = report["token_estimate_delta"][0]
+        assert {"agent", "estimated", "actual", "error_pct"} <= set(d)
+        assert d["actual"] == 16_232
+
+    @pytest.mark.asyncio
+    async def test_the_whole_report_round_trips_through_json_dumps(self, tmp_path):
+        """R13 (e): the WHOLE report must be JSON-serialisable (no raw ModelSpec leaked)."""
+        from ollama_preflight import CONTEXT_GUARD_ESTIMATED
+
+        report = await _rotated_report(
+            tmp_path,
+            preflight=_preflight(
+                CONTEXT_GUARD_ESTIMATED,
+                deltas=[{"agent": "melchior", "estimated": 1, "actual": 2, "error_pct": 100.0}],
+                warnings=["two mages look like the same lab"],
+            ),
+        )
+        json.dumps(report)  # must NOT raise: no dataclass leaked into the report tree
+
+    @pytest.mark.asyncio
+    async def test_api_key_never_appears_in_any_error_surface(self, tmp_path, capsys):
+        """NR3b: the api_key is redacted at the single boundary -- absent from BOTH the
+        report JSON (fallback_reason detail) and stderr (the rotation notice)."""
+        report = await _rotated_report(tmp_path, api_key="sk-supersecret", secret_in_error=True)
+
+        blob = json.dumps(report) + capsys.readouterr().err
+        assert "sk-supersecret" not in blob
+
+
+def test_build_retry_prompt_redacts_the_api_key():
+    """MAGI gate (Caspar, security): the retry prompt is written to {agent}.prompt.txt.
+    If an error message ever carries the api_key, embedding it verbatim would leak it
+    (NR3b: the key must appear on NO surface). Redact the error before embedding."""
+    from run_magi import _build_retry_prompt
+    from validate import ValidationError
+
+    err = ValidationError("backend echoed auth token=sk-supersecret into the message")
+    out = _build_retry_prompt("original prompt", err, api_key="sk-supersecret")
+    assert "sk-supersecret" not in out
+
+
+def test_classify_unwraps_socket_timeout_wrapped_in_urlerror():
+    """MAGI gate (Caspar): a socket timeout arrives as URLError(socket.timeout()). It
+    must classify as timeout, never connection, or two slow requests would trip the
+    endpoint-down fast-fail on a reachable server (decisions #50/#98)."""
+    import socket
+    import urllib.error
+
+    from run_magi import _FAIL_TIMEOUT, _classify
+
+    assert _classify(urllib.error.URLError(socket.timeout())) == _FAIL_TIMEOUT
+
+
+class TestContextGuardDowngradeOnRotation:
+    """MAGI gate (Loop 1 pass 2): the run-level context_guard must not claim 'enforced'
+    when a rotated mage ran on an estimated/unknown window -- R16 honesty on the
+    highest-risk path."""
+
+    @pytest.mark.asyncio
+    async def test_guard_downgrades_when_a_rotated_mage_runs_unmeasured(self, tmp_path):
+        async def probe(model, prompt, timeout):
+            # glm's window is known (harness default), but its payload is UNMEASURABLE
+            # (endpoint returned no usage) -> _rotate accepts it on the estimate.
+            return None if model == "glm-5.2:cloud" else REQUIRED
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation(probe=probe))
+
+        assert result.get("degraded") is not True, "the fallback still produced a verdict"
+        assert result["context_guard"] == "estimated", (
+            "caspar ran glm on an estimate -> the run was NOT fully enforced; the label "
+            "must not keep claiming 'enforced' (preflight computed it from the trio only)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard_stays_enforced_when_the_rotated_mage_is_exactly_measured(self, tmp_path):
+        """The downgrade is conditional: a rotation to an EXACTLY measured model keeps
+        'enforced' -- the label must not over-report estimation either."""
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            if spec.model == "deepseek-v4-pro:cloud":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        # default probe returns REQUIRED (an exact, fitting measurement) for glm too
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert result.get("degraded") is not True
+        assert result["context_guard"] == "enforced", "glm was exactly measured and fits"
