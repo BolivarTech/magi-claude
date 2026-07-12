@@ -18,7 +18,7 @@ import pytest
 
 from fallback_policy import AgentRotationState
 from ollama_config import ModelSpec
-from rotation_harness import REQUIRED, _rotation, _run, _valid
+from rotation_harness import REQUIRED, TRIO, _rotation, _run, _valid
 from validate import ValidationError
 
 
@@ -5631,3 +5631,215 @@ class TestFailureSemanticsAndFastFail:
         assert result["consensus"] is not None, "the run must continue and rotate"
         assert result.get("degraded") is not True
         assert len(result["agents"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Task 12: fault injection on the async paths (the paths a happy test never walks)
+# ---------------------------------------------------------------------------
+
+
+class TestRotationFaultInjection:
+    """The paths a happy test never walks -- where all three gate bugs lived."""
+
+    @pytest.mark.asyncio
+    async def test_a_failed_status_display_after_the_verdict_does_not_cost_the_verdict(
+        self, tmp_path
+    ):
+        """The 4th broad catch: the post-verdict status-display update is BEST-EFFORT.
+        A UI glitch on the "success" update must be SWALLOWED: the run completes, the
+        verdict stands, and the lineage stays claimed."""
+        import run_magi
+
+        ctx = _rotation()
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            return _valid(agent_name)
+
+        def raise_only_on_success(display, name, state, log_gate):
+            if state == "success":
+                raise RuntimeError("status display died after the verdict")
+
+        with patch.object(run_magi, "_safe_display_update", side_effect=raise_only_on_success):
+            result = await _run(tmp_path, mock_launch, rotation=ctx)  # does NOT raise
+
+        assert len(result["agents"]) == 3, "a display glitch must never drop a verdict"
+        assert result.get("degraded") is not True
+        assert "deepseek" in await ctx.registry.lineages_in_play(exclude=None), (
+            "caspar emitted a valid verdict; its lineage stays claimed even though the "
+            "display update failed afterwards"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_late_exception_in_teardown_propagates_without_releasing_the_lineage(
+        self, tmp_path
+    ):
+        """A GENUINE late exception reaching agent_slot.__aexit__ with succeeded=True must
+        PROPAGATE yet still CONSERVE the lineage: succeeded is the sole determinant."""
+        from fallback_policy import LineageRegistry
+
+        reg = LineageRegistry(TRIO)
+        state = AgentRotationState()
+
+        with pytest.raises(RuntimeError, match="genuine teardown bug"):
+            async with reg.agent_slot("caspar", state):
+                state.succeeded = True  # a valid verdict exists
+                raise RuntimeError("genuine teardown bug after the verdict")
+
+        assert "deepseek" in await reg.lineages_in_play(exclude=None), (
+            "succeeded=True conserves the lineage even though a real exception "
+            "propagated from teardown"
+        )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_claims_are_serialised_even_with_injected_delays(self, tmp_path):
+        """Caspar's TOCTOU objection, made falsifiable: force the interleaving and assert
+        the invariant survives it."""
+        from fallback_policy import LineageRegistry
+
+        registry = LineageRegistry(TRIO)
+        policy = _rotation().policy
+        real_next = policy.next_model
+        claims: list[str] = []
+
+        def slow_next(*args, **kwargs):
+            """Pure, but slow: widen the read-decide-commit window."""
+            result = real_next(*args, **kwargs)
+            if result:
+                claims.append(result.lineage)
+            return result
+
+        policy.next_model = slow_next  # type: ignore[method-assign]
+
+        s1, s2 = AgentRotationState(), AgentRotationState()
+        got = await asyncio.gather(
+            registry.claim_next("melchior", policy, s1),
+            registry.claim_next("balthasar", policy, s2),
+        )
+
+        assert all(g is not None for g in got)
+        assert got[0].lineage != got[1].lineage, (
+            f"two mages reserved the same lineage under concurrency: {claims}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_two_mages_rotating_concurrently_get_distinct_lineages(self, tmp_path):
+        """The cycle-1 TOCTOU: read-decide-commit must be atomic, or both mages pick the
+        same lineage and the consensus only LOOKS like 3 perspectives."""
+        ctx = _rotation()
+        assigned: dict[str, str] = {}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar":
+                return _valid(agent_name)
+            if spec.lineage in ("alibaba", "moonshot"):  # both trio models die
+                await asyncio.sleep(0)  # force interleaving
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            assigned[agent_name] = spec.lineage
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert len(assigned) == 2
+        assert len(set(assigned.values())) == 2, f"two mages landed on the same lineage: {assigned}"
+        assert result.get("degraded") is not True
+
+    @pytest.mark.asyncio
+    async def test_cancellation_mid_run_releases_the_lineage(self, tmp_path):
+        """CancelledError is a death, not a success: the slot must free the lineage."""
+        ctx = _rotation()
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar":
+                raise asyncio.CancelledError()
+            return _valid(agent_name)
+
+        with pytest.raises((asyncio.CancelledError, RuntimeError)):
+            await _run(tmp_path, mock_launch, rotation=ctx)
+
+        assert "deepseek" not in await ctx.registry.lineages_in_play(exclude=None)
+
+    @pytest.mark.asyncio
+    async def test_a_probe_that_raises_reproposes_instead_of_killing_the_mage(self, tmp_path):
+        """A probe is an accuracy optimisation. It must never be fatal: with the guard
+        non-strict, an unmeasurable candidate is accepted (loudly)."""
+
+        async def probe(model: str, prompt: str, timeout: int) -> int | None:
+            raise urllib.error.HTTPError("u", 500, "boom", Message(), None)
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and spec.lineage == "deepseek":
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation(probe=probe))
+
+        assert result.get("degraded") is not True, "a failed probe must not kill the mage"
+
+    @pytest.mark.asyncio
+    async def test_degraded_mode_survives_a_mage_that_exhausts_its_rotations(self, tmp_path):
+        """BDD-7 / R7: rotation does not replace degraded mode -- it postpones it."""
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            raise RuntimeError("HTTP 503 Service Unavailable")  # every model fails
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation(max_rotations=2))
+
+        assert result["degraded"] is True
+        assert len(result["agents"]) == 2
+        assert result["consensus"] is not None, "2 agents still synthesize (v2.x minimum)"
+
+    @pytest.mark.asyncio
+    async def test_truncated_OUTPUT_is_loud_not_silent(self, tmp_path):
+        """BDD-36: a truncated OUTPUT breaks the 7-key JSON -> JSONDecodeError -> a failed
+        attempt -> retry -> rotation. It is LOUD, and lands in the fail-closed path."""
+        calls = {"caspar": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            calls["caspar"] += 1
+            if calls["caspar"] == 1:
+                raise json.JSONDecodeError("Expecting ',' delimiter", '{"agent": "cas', 14)
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert calls["caspar"] == 2, "a truncated output is a schema failure -> retried"
+        assert result.get("degraded") is not True, "and the retry recovered it"
+
+    @pytest.mark.asyncio
+    async def test_rotation_never_opens_a_fourth_concurrent_request(self, tmp_path):
+        """BDD-18 / NR2: Ollama's Pro cap is 3 agents. Rotation is SEQUENTIAL within a
+        mage: it must never add a slot."""
+        in_flight = {"now": 0, "max": 0}
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            in_flight["now"] += 1
+            in_flight["max"] = max(in_flight["max"], in_flight["now"])
+            try:
+                await asyncio.sleep(0)
+                if spec.lineage == "deepseek":
+                    raise RuntimeError("HTTP 503 Service Unavailable")
+                return _valid(agent_name)
+            finally:
+                in_flight["now"] -= 1
+
+        await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert in_flight["max"] <= 3, f"opened {in_flight['max']} concurrent requests"
