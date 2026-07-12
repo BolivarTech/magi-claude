@@ -43,6 +43,18 @@ def test_template_round_trips_to_the_builtin_defaults(tmp_path):
     assert cfg.max_attempts_per_model == 2
 
 
+def test_rendered_template_parses_as_valid_toml_with_correct_scalar_types():
+    # Guards template generation directly (independent of the resolver): the emitted
+    # text must be valid TOML, and the type-sensitive scalars must render as a real
+    # boolean and a real float -- not the Python `False` / int forms.
+    import tomllib
+
+    data = tomllib.loads(render_template())
+    assert data["strict_context_guard"] is False  # lowercase TOML bool, not "False"
+    assert isinstance(data["retry_backoff_seconds"], float)  # 2.0, not 2
+    assert isinstance(data["max_rotations"], int)
+
+
 def test_template_comments_carry_no_internal_spec_ids():
     # The comments are for whoever edits the file, not for the spec authors:
     # internal requirement IDs like (R24)/(R5b)/(R4) mean nothing to a user.
