@@ -323,3 +323,14 @@ def test_env_overrides_file_for_kill_switch(tmp_path):
         env={"MAGI_OLLAMA_MAX_ROTATIONS": "0"},
     )
     assert cfg.max_rotations == 0  # kill-switch (R17)
+
+
+def test_require_float_rejects_non_finite_values():
+    """MAGI gate (Caspar): inf/nan pass the ``>= minimum`` check (nan comparisons are
+    always False, inf is >= anything), so ``retry_backoff_seconds = inf`` would reach
+    ``asyncio.sleep(inf)`` and hang the orchestrator forever. Reject non-finite."""
+    from ollama_config import OllamaConfigError, _require_float
+
+    for bad in ("inf", "-inf", "nan"):
+        with pytest.raises(OllamaConfigError):
+            _require_float(bad, key="retry_backoff_seconds", minimum=0.0, path="t.toml")

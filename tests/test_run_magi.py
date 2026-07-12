@@ -6036,3 +6036,27 @@ class TestTelemetrySurfaces:
 
         blob = json.dumps(report) + capsys.readouterr().err
         assert "sk-supersecret" not in blob
+
+
+def test_build_retry_prompt_redacts_the_api_key():
+    """MAGI gate (Caspar, security): the retry prompt is written to {agent}.prompt.txt.
+    If an error message ever carries the api_key, embedding it verbatim would leak it
+    (NR3b: the key must appear on NO surface). Redact the error before embedding."""
+    from run_magi import _build_retry_prompt
+    from validate import ValidationError
+
+    err = ValidationError("backend echoed auth token=sk-supersecret into the message")
+    out = _build_retry_prompt("original prompt", err, api_key="sk-supersecret")
+    assert "sk-supersecret" not in out
+
+
+def test_classify_unwraps_socket_timeout_wrapped_in_urlerror():
+    """MAGI gate (Caspar): a socket timeout arrives as URLError(socket.timeout()). It
+    must classify as timeout, never connection, or two slow requests would trip the
+    endpoint-down fast-fail on a reachable server (decisions #50/#98)."""
+    import socket
+    import urllib.error
+
+    from run_magi import _FAIL_TIMEOUT, _classify
+
+    assert _classify(urllib.error.URLError(socket.timeout())) == _FAIL_TIMEOUT
