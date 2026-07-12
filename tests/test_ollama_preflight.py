@@ -15,7 +15,6 @@ from ollama_preflight import (
     CONTEXT_GUARD_ENFORCED,
     CONTEXT_GUARD_ESTIMATED,
     OllamaPreflightError,
-    PREFLIGHT_TIMEOUT,
     _is_cloud_tag,
     _list_models,
     preflight,
@@ -57,7 +56,14 @@ async def test_list_models_returns_available_ids(config_factory, monkeypatch):
     available = await _list_models(config_factory())
     assert available == {"m", "b", "c", "x"}
     assert cap["url"].endswith("/models")
-    assert cap["timeout"] == PREFLIGHT_TIMEOUT
+
+
+async def test_list_models_honors_the_configured_preflight_timeout(config_factory, monkeypatch):
+    """MAGI gate (Balthasar): the /models call must use config.preflight_timeout_seconds,
+    not a hardcoded value -- a slow NAS configured for 45s was silently cut at 10s."""
+    cap = _patch(monkeypatch, body=_models_body(["m"]))
+    await _list_models(config_factory(preflight_timeout_seconds=45))
+    assert cap["timeout"] == 45
 
 
 async def test_list_models_auth_error_redacts_key(config_factory, monkeypatch):

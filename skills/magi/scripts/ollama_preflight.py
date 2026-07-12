@@ -28,8 +28,6 @@ from ollama_config import ModelSpec, OllamaConfig
 from redaction import redact_secrets
 from validate import ValidationError
 
-PREFLIGHT_TIMEOUT = 10
-
 CONTEXT_GUARD_ENFORCED = "enforced"  # payload MEASURED; invariant #3 holds
 CONTEXT_GUARD_ESTIMATED = "estimated"  # could not measure; invariant #3 does NOT hold
 
@@ -117,7 +115,9 @@ async def _list_models(config: OllamaConfig) -> set[str]:
     req = urllib.request.Request(url, headers=headers, method="GET")
 
     def _call() -> Any:
-        with urllib.request.urlopen(req, timeout=PREFLIGHT_TIMEOUT) as resp:
+        # Honor the configured metadata timeout (MAGI gate, Balthasar): a hardcoded
+        # value silently cut a slow-NAS operator's configured window on the /models call.
+        with urllib.request.urlopen(req, timeout=config.preflight_timeout_seconds) as resp:
             return json.loads(resp.read())
 
     try:
