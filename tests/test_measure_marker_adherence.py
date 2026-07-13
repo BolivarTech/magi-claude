@@ -134,6 +134,26 @@ def test_spy_survives_a_payload_too_deep_to_decode():
     assert mma.tally["caspar"]["invalid_json"] == 1
 
 
+def test_measuring_an_undecodable_payload_does_not_ABORT_the_measurement(tmp_path):
+    """MAGI gate (Balthasar, cycle 8) -- and he caught a defect I introduced fixing his last one.
+
+    The spy tallies the ``RecursionError`` and re-raises it, and its own comment promised *"the
+    measurement carries on"*. It did not: ``measure_raw_file`` caught only
+    ``VerdictExtractionError`` and ``JSONDecodeError``, so the re-raise escaped and took the
+    whole release measurement down -- leaving no artifact at all, which is the one outcome this
+    instrument must never produce. A comment asserting more than the code does is the exact
+    defect this project keeps paying for.
+    """
+    raw = _write_raw(
+        tmp_path, "caspar", "<MAGI_VERDICT>\n" + "[" * 20_000 + "]" * 20_000 + "\n</MAGI_VERDICT>"
+    )
+    mma.install_spy()
+
+    mma.measure_raw_file(raw, "caspar")  # must NOT raise
+
+    assert mma.tally["caspar"]["invalid_json"] == 1
+
+
 def test_spy_tallies_ok_on_a_clean_verdict():
     """A well-formed delimited block increments the 'ok' bucket and returns the block."""
     mma.install_spy()

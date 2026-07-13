@@ -211,3 +211,26 @@ class TestCheckPromptsDryRun:
         err = capsys.readouterr().err
         assert "caspar.md" in err
         assert "faq-prompt-guard" in err, "a FATAL that aborts owes the reader somewhere to go"
+
+    def test_the_ABBREVIATION_reaches_the_dry_run(self):
+        """MAGI gate (Balthasar, cycle 8): the first version screened raw ``sys.argv``.
+
+        That duplicated the flag name as a magic string and bypassed argparse's own
+        abbreviation handling: ``--check`` is a valid abbreviation of ``--check-prompts`` (no
+        other ``--check*`` option exists), so argparse would accept it, expand it -- and the
+        raw scan would miss it, silently giving the user a normal run they never asked for.
+        The flag now flows through argparse, which is what knows about abbreviations.
+        """
+        import run_magi
+
+        args = run_magi.parse_args(["--check"])
+
+        assert args.check_prompts is True
+        assert args.mode is None, "a dry run needs neither a mode nor an input"
+
+    def test_a_normal_run_still_REQUIRES_mode_and_input(self):
+        """Making the positionals optional at parse time must not make them optional."""
+        import run_magi
+
+        with pytest.raises(SystemExit):
+            run_magi.parse_args([])
