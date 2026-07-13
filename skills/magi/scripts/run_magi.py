@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from collections import Counter, defaultdict
 import os
 import re
 import shutil
@@ -135,6 +136,44 @@ MAX_HISTORY_RUNS = 5
 VALID_MODES = ("code-review", "design", "analysis")
 
 
+#: Intentos por modelo, por defecto: el original + 1 reintento con feedback correctivo.
+DEFAULT_MAX_ATTEMPTS = 2
+MIN_ATTEMPTS = 1
+
+#: Cota superior. **No es paranoia:** sin ella, un ``--max-attempts 1000`` (un cero de mas)
+#: convierte un mago obstinado en **mil llamadas** -- caras en Ollama (`:cloud` es de pago)
+#: y **cientos de dolares en Claude**, con un run que no termina nunca. El proyecto ya
+#: valida asi los enteros del TOML (NR3 de MS1: valor invalido -> error, sin fallback
+#: silencioso); esto es la misma regla en el flag.
+MAX_ATTEMPTS_CAP = 10
+
+
+def _max_attempts(raw: str) -> int:
+    """Valida ``--max-attempts``: entero en ``[MIN_ATTEMPTS, MAX_ATTEMPTS_CAP]``.
+
+    Args:
+        raw: El valor tal como llega de la linea de comandos.
+
+    Returns:
+        El entero validado.
+
+    Raises:
+        argparse.ArgumentTypeError: Si no es un entero, o cae fuera del rango. **Falla
+            cerrado**: nunca degrada a un default silencioso.
+    """
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--max-attempts must be an integer (got {raw!r})"
+        ) from exc
+    if not MIN_ATTEMPTS <= value <= MAX_ATTEMPTS_CAP:
+        raise argparse.ArgumentTypeError(
+            f"--max-attempts must be between {MIN_ATTEMPTS} and {MAX_ATTEMPTS_CAP} (got {value})"
+        )
+    return value
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments.
 
@@ -196,6 +235,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="show_status",
         action="store_false",
         help="Disable the live status tree display",
+    )
+    parser.add_argument(
+        "--max-attempts",
+        type=_max_attempts,
+        default=DEFAULT_MAX_ATTEMPTS,
+        help=(
+            f"Attempts per model, {MIN_ATTEMPTS}..{MAX_ATTEMPTS_CAP} "
+            f"(default: {DEFAULT_MAX_ATTEMPTS}). With --ollama, the TOML's "
+            f"max_attempts_per_model overrides it."
+        ),
     )
     parser.add_argument(
         "--base",
@@ -1155,6 +1204,27 @@ async def select_backend(
     return OllamaBackend(config), dict(config.models), rotation
 
 
+def _record_extraction_failure(
+    tally: dict[str, "Counter[str]"],
+    agent: str,
+    error: ValidationError | json.JSONDecodeError,
+) -> None:
+    """Anota la CAUSA del fallo de extraccion en la telemetria de adherencia (R18).
+
+    Reutiliza el mismo dispatcher que elige el feedback del reintento
+    (``retry_feedback._retry_feedback_cause``), asi que la telemetria y la instruccion
+    correctiva **no pueden discrepar**: si el modelo recibe "te faltaron las marcas", el
+    contador que sube es ``missing_markers``. Duplicar la clasificacion seria plantar la
+    semilla de que un dia el reporte diga una cosa y el prompt otra.
+
+    Args:
+        tally: El acumulador por agente.
+        agent: El mago cuyo intento fallo.
+        error: La excepcion que lo tumbo.
+    """
+    tally[agent][_retry_feedback_cause(error)] += 1
+
+
 async def run_orchestrator(
     agents_dir: str,
     prompt: str,
@@ -1166,6 +1236,7 @@ async def run_orchestrator(
     backend: AgentBackend | None = None,
     rotation: RotationContext | None = None,
     show_status: bool = True,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> dict[str, Any]:
     """Run all three agents concurrently and synthesize results.
 
@@ -1217,6 +1288,11 @@ async def run_orchestrator(
     # cohorts: ``retried - failed`` is "retry recovered",
     # ``retried & failed`` is "retry also failed".
     retried: set[str] = set()
+    # R18 -- telemetria de adherencia. R17 mide UNA vez, con los modelos de HOY; los
+    # modelos derivan bajo el mismo tag. Sin esto, el dia que uno empiece a omitir las
+    # marcas se veria como "MAGI va lento y rota mucho" -- un sintoma que nadie sabria
+    # leer. Aditivo y fail-soft: ``consensus`` no lo lee.
+    extraction_failures: dict[str, Counter[str]] = defaultdict(Counter)
     # Rotation telemetry (T10): agent -> its final AgentRotationState. Registered
     # up-front in the rotation path so even a mage that DIES appears, giving Task 13 a
     # defined source for model_configured / model_used / fallback_reason.
@@ -1267,37 +1343,36 @@ async def run_orchestrator(
         """
         _safe_display_update(display, name, "running", log_gate)
         try:
-            try:
-                result = await launch_agent(
-                    name,
-                    agents_dir,
-                    prompt,
-                    output_dir,
-                    timeout,
-                    agent_models[name],
-                    backend=backend,
-                )
-            except (ValidationError, json.JSONDecodeError) as err:
-                # Single-shot retry (2.2.0 + 2.2.4): fires on schema
-                # drift (ValidationError, 2.2.0 scope) AND on JSON parse
-                # failures (json.JSONDecodeError, 2.2.4 scope expansion).
-                # Never on timeout / subprocess failure / cancellation /
-                # ValueError (config or parser-shape errors). The retry
-                # gets a fresh ``timeout`` budget (not the residual of
-                # the first attempt) and carries the parser/validator
-                # text so the model can target the specific defect —
-                # missing key, truncated output, unbalanced brace, etc.
-                retried.add(name)
-                _safe_display_update(display, name, "retrying", log_gate)
-                result = await launch_agent(
-                    name,
-                    agents_dir,
-                    _build_retry_prompt(prompt, err),
-                    output_dir,
-                    timeout,
-                    agent_models[name],
-                    backend=backend,
-                )
+            # N intentos (MS2/R13): el camino Claude tenia un retry SINGLE-SHOT fijo; ahora
+            # lo gobierna ``--max-attempts`` (default 2 = el comportamiento previo, exacto).
+            #
+            # Dispara ante deriva de schema (ValidationError -- que incluye TODOS los fallos
+            # de extraccion del sentinel) y ante JSON no parseable (json.JSONDecodeError).
+            # NUNCA ante timeout / fallo de subproceso / cancelacion / ValueError. Cada
+            # reintento recibe un ``timeout`` FRESCO (no el residuo del anterior) y lleva el
+            # feedback correctivo ESPECIFICO DE LA CAUSA: el tipo de excepcion selecciona la
+            # instruccion, asi que un modelo que olvido las marcas recibe "te faltaron las
+            # marcas" y no un mensaje generico de schema.
+            attempt_prompt = prompt
+            for attempt in range(max_attempts):
+                try:
+                    result = await launch_agent(
+                        name,
+                        agents_dir,
+                        attempt_prompt,
+                        output_dir,
+                        timeout,
+                        agent_models[name],
+                        backend=backend,
+                    )
+                    break
+                except (ValidationError, json.JSONDecodeError) as err:
+                    _record_extraction_failure(extraction_failures, name, err)
+                    if attempt + 1 >= max_attempts:
+                        raise
+                    retried.add(name)
+                    _safe_display_update(display, name, "retrying", log_gate)
+                    attempt_prompt = _build_retry_prompt(prompt, err)
         except (asyncio.TimeoutError, TimeoutError):
             _safe_display_update(display, name, "timeout", log_gate)
             raise
@@ -1471,6 +1546,14 @@ async def run_orchestrator(
     # that ignore unknown keys keep working unchanged.
     if retried:
         report["retried_agents"] = sorted(retried)
+    if extraction_failures:
+        # R18. ADITIVO y FAIL-SOFT: ``consensus`` no lo lee, y un reporte sin este
+        # campo sigue siendo valido (NR3). Es lo unico que va a VER la deriva de un
+        # modelo en produccion -- donde la tasa real, con una muestra de 5+2, solo se
+        # puede conocer ahi.
+        report["extraction_failures"] = {
+            agent: dict(causes) for agent, causes in sorted(extraction_failures.items())
+        }
 
     # T13 telemetry (R9/R13/R16): fold each mage's rotation state + the preflight's
     # measured fields into the report. Additive and fail-soft -- absent on the Claude
@@ -1862,6 +1945,7 @@ def main() -> None:
                 backend=backend,
                 rotation=rotation,
                 show_status=args.show_status,
+                max_attempts=args.max_attempts,
             )
         )
     except BaseException:
