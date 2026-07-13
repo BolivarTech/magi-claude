@@ -121,3 +121,43 @@ class TestAgentPromptGuard:
 
         agents = Path(__file__).parent.parent / "skills" / "magi" / "agents"
         AgentPromptGuard(agents, VerdictSentinel()).check()
+
+
+class TestTheGuardIsACTUALLYWired:
+    """El guard mas importante de MS2 estuvo **implementado, testeado y documentado**...
+    **y nunca se llamaba**. Codigo muerto.
+
+    Ningun test de la suite lo habria cazado: los unit tests del guard pasaban (probaban la
+    clase), y los del orquestador tambien (nunca lo invocaban). Lo encontro una **auditoria
+    de la documentacion**, al comprobar que la FAQ describia un guard que no corria.
+
+    La leccion, y por eso este test existe: **"la clase funciona" y "el sistema la usa" son
+    dos afirmaciones distintas, y solo la segunda protege a alguien.**
+    """
+
+    def test_run_magi_main_invokes_the_guard_before_spending_a_token(self):
+        import inspect
+
+        import run_magi
+
+        source = inspect.getsource(run_magi.main)
+        assert "AgentPromptGuard" in source, "el guard NO se invoca desde main(): es codigo muerto"
+        assert ".check()" in source
+
+    def test_the_guard_runs_BEFORE_the_backend_is_selected(self):
+        """Debe abortar **antes de gastar un token**, no despues del preflight."""
+        import inspect
+
+        import run_magi
+
+        source = inspect.getsource(run_magi.main)
+        assert source.index("AgentPromptGuard") < source.index("select_backend")
+
+    def test_PromptContractError_is_caught_and_exits_nonzero(self):
+        import inspect
+
+        import run_magi
+
+        source = inspect.getsource(run_magi.main)
+        assert "except PromptContractError" in source
+        assert "sys.exit(1)" in source
