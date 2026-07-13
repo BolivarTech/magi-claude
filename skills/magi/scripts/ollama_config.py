@@ -73,7 +73,13 @@ DEFAULT_FALLBACK: tuple[ModelSpec, ...] = (
     ModelSpec("gpt-oss:120b-cloud", "openai"),
     ModelSpec("minimax-m3:cloud", "minimax"),
     ModelSpec("nemotron-3-super:cloud", "nvidia"),
-    ModelSpec("gemini-3-flash-preview:latest", "google"),
+    # The Google slot was gemini-3-flash-preview:latest, taken as a known risk: one model
+    # per lineage, and Gemini 3 beat gemma4. Ollama is retiring that tag (2026-07-15), so
+    # it goes back to gemma4:cloud (verified against registry.ollama.ai, HTTP 200). A
+    # retired default is harmless by R11.1 -- a missing fallback warns, never aborts -- but
+    # it would put a dead entry, and a warning, in every scaffolded config. Never ship a
+    # preview tag as a default: it is a promise the vendor has not made (pinned by test).
+    ModelSpec("gemma4:cloud", "google"),
 )
 
 _KNOWN_TOP_KEYS = {
