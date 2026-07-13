@@ -20,6 +20,7 @@ from fallback_policy import AgentRotationState
 from ollama_config import ModelSpec
 from rotation_harness import FALLBACK, REQUIRED, TRIO, _rotation, _run, _valid
 from validate import ValidationError
+from verdict_markers import MissingVerdictMarkers
 
 
 async def _preflight_ok(config, prompt=""):
@@ -6523,3 +6524,68 @@ class TestAdherenceTelemetry:
         import consensus
 
         assert "extraction_failures" not in inspect.getsource(consensus)
+
+    @pytest.mark.asyncio
+    async def test_the_CLAUDE_path_emits_the_field_in_the_REPORT(self, tmp_path):
+        """El contador tiene que llegar al reporte, no quedarse en un acumulador interno.
+
+        Los tests de arriba ejercitan ``_record_extraction_failure`` como unidad. Ninguno
+        comprobaba que el campo **aparezca en el reporte** -- que es lo unico que el
+        usuario (y el gate R17a) llegan a ver.
+        """
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and "MAGI_VERDICT" not in prompt:
+                raise MissingVerdictMarkers("no <MAGI_VERDICT> block in the output")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch)
+
+        assert result["extraction_failures"] == {"caspar": {"missing_markers": 1}}
+
+    @pytest.mark.asyncio
+    async def test_a_ROTATING_mage_records_its_omission_too(self, tmp_path):
+        """R18 se escribio PARA el camino de rotacion -- y es el unico backend que se usa.
+
+        Sin esto, ``extraction_failures`` esta **siempre ausente bajo ``--ollama``**: la
+        deriva de un modelo se veria como *"MAGI va lento y rota mucho"*, que es
+        exactamente el sintoma que nadie sabria leer. Y el README **promete** el campo.
+        """
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and "MAGI_VERDICT" not in prompt:
+                raise MissingVerdictMarkers("no <MAGI_VERDICT> block in the output")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert result.get("degraded") is not True, "el retry lo salva: run valido"
+        assert result["extraction_failures"] == {"caspar": {"missing_markers": 1}}
+
+    @pytest.mark.asyncio
+    async def test_a_rotating_mage_records_EVERY_failed_attempt_across_models(self, tmp_path):
+        """Un mago que omite las marcas en TODOS sus intentos, en dos modelos, cuenta 4.
+
+        La rotacion no borra la cuenta: cada intento que fallo la extraccion es un dato
+        de adherencia, y el del modelo rotado tambien cuenta (es el mismo asiento).
+        """
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            raise MissingVerdictMarkers("no <MAGI_VERDICT> block in the output")
+
+        result = await _run(
+            tmp_path, mock_launch, rotation=_rotation(max_attempts=2, max_rotations=1)
+        )
+
+        assert result.get("degraded") is True, "caspar agota modelo + fallback y muere"
+        assert result["extraction_failures"] == {"caspar": {"missing_markers": 4}}, (
+            "2 intentos x 2 modelos -- incluido el ULTIMO, el que lo mato"
+        )
