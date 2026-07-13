@@ -30,7 +30,7 @@ import sys
 import urllib.error
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 # Bootstrap: make sibling modules importable under invocations that do NOT
 # auto-inject this directory into sys.path (e.g. ``python -m
@@ -1235,6 +1235,37 @@ async def select_backend(
     return OllamaBackend(config), dict(config.models), rotation
 
 
+def announce_extraction_failures(failures: Mapping[str, Mapping[str, int]]) -> None:
+    """Say out loud that a mage failed to deliver its verdict on some attempt (R18).
+
+    The counts already reach ``magi-report.json``. That was not enough, and the proof is a
+    real run: a gate cycle recorded ``caspar: {missing_markers: 1}`` -- the mage forgot the
+    markers, the retry recovered it, the run came out valid, and the only trace was a field
+    in a file nobody opens. A model drifting under the same tag looks exactly like that, run
+    after run, until it stops being recoverable. **A counter that has to be gone looking for
+    is a counter that gets found too late** (MAGI gate, Caspar).
+
+    Silent on a clean run: a warning that fires every time is a warning nobody reads.
+
+    Args:
+        failures: The per-agent, per-cause tally, exactly as it reaches the report.
+    """
+    if not failures:
+        return
+
+    detail = "; ".join(
+        f"{agent}: " + ", ".join(f"{cause}={count}" for cause, count in sorted(causes.items()))
+        for agent, causes in sorted(failures.items())
+    )
+    print(
+        f"[!] WARNING: verdict extraction failed on some attempts -- {detail}. "
+        "The retry (and rotation) may have recovered it, but a seat that keeps doing this is "
+        "a model drifting away from the marker contract. See docs/ollama-backend.md "
+        "(what each cause means and what to do about it).",
+        file=sys.stderr,
+    )
+
+
 def _record_extraction_failure(
     tally: dict[str, "Counter[str]"],
     agent: str,
@@ -2152,6 +2183,11 @@ def main() -> None:
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+
+    # R18 made ACTIVE: filing the counts was not enough (MAGI gate, Caspar). Announced here,
+    # after the report exists, so the message and the file it points to always agree.
+    announce_extraction_failures(report.get("extraction_failures", {}))
+
     print(f"\nFull report saved to: {report_path}")
     print(f"Cost: ${report['cost']['total_usd']:.4f} ({len(report['agents'])} agents)")
     print(f"Input size: ~{est_tokens} tokens ({raw_input_chars} chars)")
