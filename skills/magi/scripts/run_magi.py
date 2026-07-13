@@ -1404,8 +1404,15 @@ async def run_orchestrator(
     # attempt loop would then fall through to an UnboundLocalError on ``result``). The CLI
     # cannot produce this -- ``_max_attempts`` enforces the range -- but ``run_orchestrator``
     # is a public entry point with many direct callers.
-    if max_attempts < 1:
-        raise RuntimeError(f"max_attempts must be >= 1 (got {max_attempts})")
+    if not MIN_ATTEMPTS <= max_attempts <= MAX_ATTEMPTS_CAP:
+        # BOTH ends. The CLI flag and the Ollama TOML are both bounded above; a direct Python
+        # caller was the last unbounded door, and the budget is spent on PAID calls (MAGI gate,
+        # Balthasar). NOT an assert: ``python -O`` strips those, and the loop below would then
+        # fall through to an UnboundLocalError on ``result``.
+        raise RuntimeError(
+            f"max_attempts must be between {MIN_ATTEMPTS} and {MAX_ATTEMPTS_CAP} "
+            f"(got {max_attempts})"
+        )
 
     # The prompt-contract guard lives HERE, not only in ``main()`` (MAGI gate finding,
     # Balthasar): this is the function that actually hands the ``.md`` files to a model, so

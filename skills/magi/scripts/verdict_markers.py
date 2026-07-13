@@ -63,7 +63,14 @@ _LINE_BREAK = re.compile(r"\r\n|\r|\n")
 #: and what is inside **is decided by ``json.loads``**. Permissive where it does not matter,
 #: strict where it does (the markers).
 _FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)\s*[^\s`~]*\s*$")
-_FENCE_CLOSE_RE = re.compile(r"^\s*(```|~~~)\s*$")
+
+#: The CLOSING fence tolerates an info string too, because models echo the opening one on the
+#: close (```json ... ```json). Demanding a bare fence there left both fence lines inside the
+#: block, ``json.loads`` choked on them, and a verdict that was never wrong came back for a
+#: retry (MAGI gate, Caspar). Being permissive costs nothing: a fence is only stripped when the
+#: FIRST and the LAST line are both fences, and what is inside is still decided by
+#: ``json.loads``. Permissive where it does not matter, strict where it does (the markers).
+_FENCE_CLOSE_RE = _FENCE_OPEN_RE
 
 
 class VerdictExtractionError(ValidationError):
