@@ -1569,6 +1569,19 @@ async def run_orchestrator(
             successful.append(result)
 
     if len(successful) < 2:
+        # R18 tiene que SOBREVIVIR a la muerte del run, y este es el unico sitio donde puede.
+        # Un run que muere bajo el suelo de 2 magos NO escribe ``magi-report.json`` -- y con
+        # el se iria el unico dato que explica la muerte. El dia que un modelo empiece a
+        # omitir las marcas, MAGI moriria diciendo "solo 0 magos tuvieron exito" y nadie
+        # sabria por que: exactamente el sintoma ilegible que esta telemetria existe para
+        # eliminar. Sale por stderr porque es el unico canal que queda cuando no hay reporte.
+        if extraction_failures:
+            causes = {agent: dict(counts) for agent, counts in sorted(extraction_failures.items())}
+            print(
+                f"[!] extraction_failures (R18, the run died before it could be reported): "
+                f"{json.dumps(causes, sort_keys=True)}",
+                file=sys.stderr,
+            )
         raise RuntimeError(
             f"Only {len(successful)} agent(s) succeeded \u2014 fewer than 2 required for synthesis"
         )
