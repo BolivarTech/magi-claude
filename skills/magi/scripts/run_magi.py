@@ -1310,6 +1310,15 @@ async def run_orchestrator(
     if max_attempts < 1:
         raise RuntimeError(f"max_attempts must be >= 1 (got {max_attempts})")
 
+    # El guard del contrato de prompts vive AQUI, no solo en ``main()`` (hallazgo del gate
+    # MAGI, Balthasar): esta es la funcion que de verdad entrega los ``.md`` a un modelo, asi
+    # que es la puerta que hay que cerrar. Con el guard solo en el CLI, cualquier otro caller
+    # -- un test, una integracion -- corria con prompts rancios o con un veredicto fabricable
+    # ENTRE las marcas, que es justo el ultimo camino de fabricacion que MS2 cierra.
+    # ``main()`` lo sigue llamando antes para abortar cuanto antes (sin crear el temp dir ni
+    # pagar el preflight); repetirlo aqui cuesta tres lecturas de fichero y es idempotente.
+    AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
+
     # Back-compat (BDD-30): KEEP `model` so the ~40 existing call sites in
     # tests keep working untouched; derive agent_models from it when not
     # supplied. Values are ModelSpec now (launch_agent takes a spec); the
