@@ -349,3 +349,27 @@ def test_the_envelope_keys_COVER_every_captured_cli_shape():
             f"_ENVELOPE_KEYS={_ENVELOPE_KEYS} -- the parser would route it to the raw text and "
             "spend a retry telling the model it forgot markers in text the CLI wrote"
         )
+
+
+def test_the_CLI_exits_cleanly_when_the_markers_are_missing(tmp_path, capsys):
+    """MAGI gate (Balthasar, cycle 17): the standalone CLI crashed on its own contract.
+
+    ``main()`` caught ``(JSONDecodeError, ValueError, FileNotFoundError, OSError)``, and the
+    extraction errors inherit from ``ValidationError`` -- deliberately, so the ORCHESTRATOR's
+    retry guard catches them. None of them is a ``ValueError``, so running this script by hand
+    against a response with no markers printed a traceback instead of the one line that says what
+    is wrong. The parser's most common failure, and its own CLI could not name it.
+    """
+    import sys
+
+    from parse_agent_output import main
+
+    src = tmp_path / "raw.json"
+    src.write_text("a response with no markers at all", encoding="utf-8")
+    sys.argv = ["parse_agent_output.py", str(src), str(tmp_path / "out.json")]
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    assert "marker" in capsys.readouterr().err.lower(), "say WHICH contract was broken"
