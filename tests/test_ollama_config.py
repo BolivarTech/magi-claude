@@ -348,19 +348,37 @@ def test_require_bool_accepts_integer_1_and_0_but_not_other_ints():
             _require_bool(bad, key="strict_context_guard", path="t.toml")
 
 
-def test_no_shipped_default_is_a_preview_tag():
-    """A default we ship must not be a tag Ollama can retire from under the user.
+def test_no_shipped_default_carries_a_provisional_tag():
+    """A default we ship must not be a tag the vendor has told us is provisional.
 
     ``gemini-3-flash-preview:latest`` was accepted into the fallback list as a known risk
     (the Google slot takes one model, and Gemini 3 beat gemma4). Ollama then announced its
     retirement, which would have left every user's scaffolded config carrying a dead entry
     -- harmless by R11.1 (a missing fallback warns, never aborts) but noisy on every run,
-    and a default nobody chose. A preview tag is a promise the vendor has not made.
+    and a default nobody chose.
+
+    Scope, stated honestly (finding: Caspar, MAGI gate 2026-07-12): this catches only the
+    labels that ANNOUNCE impermanence. Any tag can be retired without one --
+    ``nemotron-3-ultra`` had no manifest at all -- and the guard for that is
+    ``scripts/verify_fallback_tags.py``, which hits registry.ollama.ai before every
+    release. This test is the cheap, offline half: it cannot see the registry, but it can
+    refuse a name that says "temporary" out loud, and it runs on every commit.
+
+    Matching is on TOKENS, not substrings, and allows a trailing number: ``arcee`` contains
+    "rc" and is not a release candidate, while ``rc1`` and ``beta2`` are.
     """
+    import re
+
     from ollama_config import DEFAULT_FALLBACK, DEFAULT_MODELS
+
+    provisional = re.compile(r"^(preview|alpha|beta|rc|experimental|nightly|test)\d*$")
 
     shipped = [spec.model for spec in DEFAULT_MODELS.values()]
     shipped += [spec.model for spec in DEFAULT_FALLBACK]
 
-    offenders = [tag for tag in shipped if "preview" in tag]
-    assert offenders == [], f"preview tags shipped as defaults: {offenders}"
+    offenders = [
+        tag
+        for tag in shipped
+        if any(provisional.match(token) for token in re.split(r"[^a-z0-9]+", tag.lower()))
+    ]
+    assert offenders == [], f"provisional tags shipped as defaults: {offenders}"
