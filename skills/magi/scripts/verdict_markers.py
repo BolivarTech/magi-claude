@@ -19,6 +19,7 @@ event loop y sin disco.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 from validate import ValidationError
@@ -42,6 +43,16 @@ ECHO_CANARY: dict[str, str] = {
 #: ``Mn`` cubre los selectores de variacion. **Por CATEGORIA, no por lista: la categoria
 #: es exhaustiva y no envejece.**
 _STRIPPED_CATEGORIES = frozenset({"Cf", "Mn"})
+
+#: Fence de apertura: ``` o ~~~, con o sin info-string, con espacios alrededor.
+#: El info-string se acepta **permisivo** (cualquier token sin espacios) y NO como lista
+#: blanca: una lista **enumera** lo permitido, asi que cada lenguaje con un punto o una
+#: almohadilla (``json5``, ``c#``, ``asp.net``) seria un fallo futuro. Aqui ser permisivo
+#: es **gratis**: el fence solo se quita si la primera **Y** la ultima linea lo son, y lo
+#: de dentro **lo decide ``json.loads``**. Permisivo en lo que no importa, estricto en lo
+#: que si (las marcas).
+_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)\s*[^\s`~]*\s*$")
+_FENCE_CLOSE_RE = re.compile(r"^\s*(```|~~~)\s*$")
 
 
 class VerdictExtractionError(ValidationError):
@@ -179,3 +190,95 @@ class VerdictSentinel:
             es corrupcion del archivo, no tolerancia debida.
         """
         return line.strip() == marker
+
+    def extract(self, text: str) -> str:
+        """Devuelve el UNICO bloque delimitado. **NO escanea fuera de las marcas.**
+
+        **El ORDEN de los tres primeros chequeos es LOAD-BEARING.** El orquestador elige
+        el feedback del reintento **por el TIPO de excepcion**, asi que decirle *"emitiste
+        mas de un bloque"* a un modelo que **no emitio ninguna marca** gasta el reintento
+        en una instruccion **falsa**, y el mago muere por un bug del algoritmo que existe
+        para salvarlo. (Hallado como ``[CRITICAL]`` en revision.)
+
+        Se cuentan **todas** las aperturas y **todos** los cierres, **una sola pasada** y
+        **una sola normalizacion por linea**. **No hay "primer cierre" ni "ultimo
+        cierre"**: elegir entre ellos seria una regla de desempate, y las reglas de
+        desempate son heuristicas -- justo lo que este modulo borra.
+
+        Args:
+            text: La salida cruda del agente (entrada **no confiable**).
+
+        Returns:
+            El contenido entre las marcas, con el fence markdown quitado si envolvia el
+            bloque **entero**.
+
+        Raises:
+            MissingVerdictMarkers: No hay ninguna marca (ni apertura ni cierre).
+            UnterminatedVerdictBlock: Falta exactamente una de las dos -- firma de una
+                salida **truncada**.
+            AmbiguousVerdictMarkers: El conteo no es exactamente 1 y 1, o el cierre
+                precede a la apertura.
+        """
+        lines = text.splitlines()
+
+        opens: list[int] = []
+        closes: list[int] = []
+        want_open = self.open.casefold()
+        want_close = self.close.casefold()
+        for index, line in enumerate(lines):
+            normalized = self._normalize_line(line)
+            if normalized == want_open:
+                opens.append(index)
+            elif normalized == want_close:
+                closes.append(index)
+
+        if not opens and not closes:
+            raise MissingVerdictMarkers(
+                f"no verdict markers found: expected both {self.open!r} and {self.close!r}"
+            )
+        if not opens or not closes:
+            raise UnterminatedVerdictBlock(
+                f"unterminated verdict block: {len(opens)} open marker(s) and "
+                f"{len(closes)} close marker(s) (likely a truncated response)"
+            )
+        if len(opens) != 1 or len(closes) != 1:
+            raise AmbiguousVerdictMarkers(
+                f"expected exactly one verdict block, found {len(opens)} open and "
+                f"{len(closes)} close markers"
+            )
+        if closes[0] < opens[0]:
+            raise AmbiguousVerdictMarkers(
+                f"close marker precedes the open marker (open at line {opens[0]}, "
+                f"close at line {closes[0]})"
+            )
+
+        return self._strip_fence(lines[opens[0] + 1 : closes[0]])
+
+    @staticmethod
+    def _strip_fence(block_lines: list[str]) -> str:
+        """Quita un fence markdown que envuelva el bloque **entero**.
+
+        **Normalizar DENTRO de una region ya delimitada esta permitido; BUSCAR fuera de
+        las marcas, jamas.** Si el fence no envuelve el bloque completo, el contenido se
+        deja **INTACTO** y decide ``json.loads``: recortar *"lo que estorba"* hasta que
+        algo decodifique **seria volver a buscar**.
+
+        El cierre debe ser **del MISMO tipo** que la apertura (` ``` ` con ` ``` `, ``~~~``
+        con ``~~~``). Un par **desparejado** no es un fence: es texto — ningun parser
+        markdown lo acepta y ningun modelo lo emite.
+
+        Args:
+            block_lines: Las lineas de entre las marcas.
+
+        Returns:
+            El bloque como texto, sin las dos lineas de fence si eran un par valido.
+        """
+        body = list(block_lines)
+        if len(body) < 2:
+            return "\n".join(body).strip()
+
+        opened = _FENCE_OPEN_RE.match(body[0])
+        closed = _FENCE_CLOSE_RE.match(body[-1])
+        if opened and closed and opened.group(1) == closed.group(1):
+            body = body[1:-1]
+        return "\n".join(body).strip()
