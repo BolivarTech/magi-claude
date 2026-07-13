@@ -1,6 +1,6 @@
 [project]
 name = "magi"
-version = "5.1.0"
+version = "5.1.1"
 requires-python = ">= 3.12"
 description = "MAGI multi-perspective analysis plugin for Claude Code"
 license = "MIT OR Apache-2.0"
