@@ -709,8 +709,8 @@ class TestCleanupOldRuns:
         # No gettempdir patch: correctness depends on the run_root arg.
         cleanup_old_runs(1, str(tmp_path))
 
-        # Solo los directorios de run: ``tmp_path`` lleva ademas los prompts que siembra la
-        # fixture ``seeded_agents_dir`` (el orquestador exige un agents_dir real).
+        # Run directories only: ``tmp_path`` also carries the prompts seeded by the
+        # ``seeded_agents_dir`` fixture (the orchestrator demands a real agents_dir).
         survivors = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("magi-run-"))
         assert survivors == ["magi-run-0002"]
 
@@ -1364,8 +1364,8 @@ class TestLaunchAgentTimeoutReaping:
         assert not (tmp_path / "melchior.stderr.log").exists()
 
 
-# MS2: el veredicto va entre marcas ancladas a linea. Un mock SIN marcas ya no pasa el
-# parser -- que es exactamente el punto (R15): un veredicto pelado no se acepta.
+# MS2: the verdict goes between line-anchored markers. A mock with NO markers no longer
+# gets past the parser -- which is exactly the point (R15): a bare verdict is not accepted.
 _FAKE_VERDICT_OBJECT = (
     '{"agent": "melchior", "verdict": "approve", "confidence": 0.8, '
     '"summary": "ok", "reasoning": "looks fine", "findings": [], '
@@ -1374,7 +1374,7 @@ _FAKE_VERDICT_OBJECT = (
 _FAKE_AGENT_JSON = f"<MAGI_VERDICT>\n{_FAKE_VERDICT_OBJECT}\n</MAGI_VERDICT>"
 
 # The ``claude -p --output-format json`` envelope wraps the agent's TEXT as a string
-# under ``result`` — y ese texto, desde MS2, es el bloque delimitado.
+# under ``result`` -- and that text, since MS2, is the delimited block.
 _FAKE_CLAUDE_ENVELOPE = json.dumps({"result": _FAKE_AGENT_JSON}).encode("utf-8")
 
 
@@ -4946,7 +4946,7 @@ def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
             out: str,
         ) -> bytes:
             seen[name] = model
-            # MS2: el backend devuelve el TEXTO del modelo, que lleva el bloque delimitado.
+            # MS2: the backend returns the model's TEXT, which carries the delimited block.
             verdict = (
                 '{"agent":"' + name + '",'
                 '"verdict":"approve","confidence":0.5,'
@@ -4955,9 +4955,9 @@ def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
             )
             return f"<MAGI_VERDICT>\n{verdict}\n</MAGI_VERDICT>".encode()
 
-    # El agents_dir lo siembra la fixture ``seeded_agents_dir`` con los prompts REALES. Este
-    # test escribia ``"S"`` como system prompt: un fichero de un caracter haciendose pasar por
-    # el contrato, que el guard (ahora en el orquestador) rechaza -- con razon.
+    # The agents_dir is seeded by the ``seeded_agents_dir`` fixture with the REAL prompts.
+    # This test used to write ``"S"`` as the system prompt: a one-character file passing
+    # itself off as the contract, which the guard (now in the orchestrator) rejects -- rightly.
     asyncio.run(
         run_orchestrator(
             str(tmp_path),
@@ -6211,12 +6211,12 @@ def test_write_report_file_cleans_temp_and_raises_on_failure(tmp_path, monkeypat
 
 
 # ---------------------------------------------------------------------------
-# MS2 -- canario anti-eco (R6), identidad del agente (R10), clasificacion (R14)
+# MS2 -- anti-echo canary (R6), agent identity (R10), classification (R14)
 # ---------------------------------------------------------------------------
 
 
 class TestEchoCanaryAndAgentIdentity:
-    """Los dos guards que corren DESPUES de que el schema valide."""
+    """The two guards that run AFTER the schema validates."""
 
     @staticmethod
     def _marked(obj: dict) -> bytes:
@@ -6228,10 +6228,10 @@ class TestEchoCanaryAndAgentIdentity:
             "agent": "caspar",
             "verdict": "reject",
             "confidence": 0.9,
-            "summary": "un veredicto real",
-            "reasoning": "razonamiento real",
+            "summary": "a real verdict",
+            "reasoning": "real reasoning",
             "findings": [],
-            "recommendation": "arregla X",
+            "recommendation": "fix X",
         }
         base.update(over)
         return base
@@ -6244,12 +6244,12 @@ class TestEchoCanaryAndAgentIdentity:
             async def run(self, *a, **k):
                 return raw
 
-        # El system prompt lo pone la fixture ``seeded_agents_dir`` con el .md REAL. Este
-        # helper escribia "SYS" encima (MAGI gate, Balthasar): hoy no rompe nada porque
-        # ``launch_agent`` no corre el guard, pero deja el agents_dir CORRUPTO para cualquier
-        # test posterior que use el mismo ``tmp_path`` con ``run_orchestrator`` -- que si lo
-        # corre, y abortaria con un ``[FATAL]`` desconcertante. Un prompt de tres letras no
-        # aportaba nada que el real no de.
+        # The system prompt is placed by the ``seeded_agents_dir`` fixture, with the REAL
+        # .md. This helper used to write "SYS" over it (MAGI gate, Balthasar): today that
+        # breaks nothing because ``launch_agent`` does not run the guard, but it leaves the
+        # agents_dir CORRUPTED for any later test that uses the same ``tmp_path`` with
+        # ``run_orchestrator`` -- which does run it, and would abort with a baffling
+        # ``[FATAL]``. A three-letter prompt added nothing the real one does not give.
         return await run_magi.launch_agent(
             agent, str(tmp_path), "P", str(tmp_path), 900, backend=_Fake()
         )
@@ -6261,10 +6261,10 @@ class TestEchoCanaryAndAgentIdentity:
 
     @pytest.mark.asyncio
     async def test_the_ECHOED_example_is_rejected(self, tmp_path):
-        """R6: el ejemplo del system prompt, copiado, NO es un veredicto.
+        """R6: the system prompt's example, copied, is NOT a verdict.
 
-        Es el ultimo cinturon: si el modelo copia el ejemplo de FUERA de las marcas y lo
-        envuelve el mismo, el canario lo caza por su huella dactilar.
+        It is the last belt: if the model copies the example from OUTSIDE the markers and
+        wraps it in markers itself, the canary catches it by its fingerprint.
         """
         from verdict_markers import ECHO_CANARY, EchoedExampleRejected
 
@@ -6274,12 +6274,12 @@ class TestEchoCanaryAndAgentIdentity:
 
     @pytest.mark.asyncio
     async def test_a_verdict_claiming_ANOTHER_mage_is_rejected(self, tmp_path):
-        """R10: cierra la SUPLANTACION.
+        """R10: closes the IMPERSONATION.
 
-        ``load_agent_output`` valida que ``agent`` este en el enum, pero **nadie** validaba
-        que fuera el mago que se lanzo. Un nombre duplicado mata el run entero; uno unico
-        pero equivocado mete el texto de un mago en el asiento de otro, y el consenso lo
-        cuenta como una perspectiva independiente **que nunca existio**.
+        ``load_agent_output`` validates that ``agent`` is in the enum, but **nobody**
+        validated that it was the mage that was launched. A duplicate name kills the whole
+        run; a unique but wrong one puts one mage's text in another's seat, and consensus
+        counts it as an independent perspective **that never existed**.
         """
         from verdict_markers import AgentIdentityError
 
@@ -6289,16 +6289,16 @@ class TestEchoCanaryAndAgentIdentity:
 
     @pytest.mark.asyncio
     async def test_a_capitalised_agent_name_is_caught_UPSTREAM_by_the_schema(self, tmp_path):
-        """MEDIDO, no supuesto: ``validate.py`` ya rechaza "Caspar" en el ENUM.
+        """MEASURED, not assumed: ``validate.py`` already rejects "Caspar" at the ENUM.
 
-        Yo habia escrito la comparacion de identidad como *case-insensitive* asumiendo que
-        una mayuscula llegaria hasta ahi. **No llega**: el enum de ``load_agent_output``
-        corre ANTES y devuelve *"Unknown agent 'Caspar'. Must be one of [...]"* -- que es
-        un ``ValidationError``, o sea **reintento con un feedback perfectamente accionable**.
+        I had written the identity comparison as *case-insensitive*, assuming a capital
+        letter would reach it. **It does not**: ``load_agent_output``'s enum runs BEFORE and
+        returns *"Unknown agent 'Caspar'. Must be one of [...]"* -- which is a
+        ``ValidationError``, i.e. **a retry with perfectly actionable feedback**.
 
-        El ``casefold()`` del guard de identidad se conserva como cinturon (cuesta cero y
-        sigue siendo correcto si el enum se relajara), pero **hoy es inalcanzable**, y eso
-        se dice aqui en vez de fingir que lo prueba.
+        The identity guard's ``casefold()`` is kept as a belt (it costs nothing and stays
+        correct if the enum were ever relaxed), but **today it is unreachable**, and that is
+        said here instead of pretending this test proves it.
         """
         from validate import ValidationError
 
@@ -6317,12 +6317,13 @@ class TestEchoCanaryAndAgentIdentity:
     ],
 )
 def test_every_extraction_failure_is_classified_as_SCHEMA(exc_name):
-    """R14: el modelo RESPONDIO -- lo que no pudo fue con el contrato.
+    """R14: the model DID ANSWER -- what it could not do was meet the contract.
 
-    Por tanto el fallo es **local al mago**: lleva feedback correctivo y, al agotar los
-    intentos, ROTA (Ollama) o muere (Claude). **No condena el linaje run-wide** (eso es
-    para transporte). Sale "gratis" porque los errores heredan de ``ValidationError``... y
-    "sale gratis" es exactamente la clase de suposicion que este proyecto ya pago cara.
+    The failure is therefore **local to the mage**: it carries corrective feedback and, once
+    the attempts run out, it ROTATES (Ollama) or dies (Claude). **It does not condemn the
+    lineage run-wide** (that is for transport). It comes "for free" because the errors
+    inherit from ``ValidationError``... and "for free" is exactly the class of assumption
+    this project has already paid dearly for.
     """
     import run_magi
     import verdict_markers
@@ -6425,18 +6426,18 @@ def test_retry_feedback_bound_holds_for_every_template_under_NON_ASCII_errors(ca
 
 
 # ---------------------------------------------------------------------------
-# MS2 -- T8: --max-attempts backend-agnostico (R13)
+# MS2 -- T8: --max-attempts, backend-agnostic (R13)
 # ---------------------------------------------------------------------------
 
 
 class TestMaxAttemptsFlag:
-    """El camino Claude tenia un retry SINGLE-SHOT fijo; ahora es configurable.
+    """The Claude path had a fixed SINGLE-SHOT retry; now it is configurable.
 
-    **Por que un FLAG y no leer el TOML de Ollama desde Claude:** ``magi-ollama.toml`` es,
-    por diseno, la config **del backend Ollama**. Que ``ClaudeBackend`` la lea significa o
-    **invertir el acoplamiento** (el backend por defecto dependiendo del opcional) o
-    inventar una config file para Claude, que **no existe** (el camino Claude es 100 %
-    flags de CLI, sin estado en disco).
+    **Why a FLAG and not reading Ollama's TOML from Claude:** ``magi-ollama.toml`` is, by
+    design, the config **of the Ollama backend**. Having ``ClaudeBackend`` read it means
+    either **inverting the coupling** (the default backend depending on the optional one) or
+    inventing a config file for Claude, which **does not exist** (the Claude path is 100 %
+    CLI flags, with no state on disk).
     """
 
     def test_the_default_is_two_attempts(self):
@@ -6447,9 +6448,9 @@ class TestMaxAttemptsFlag:
 
     @pytest.mark.parametrize("bad", ["0", "-1", "11"])
     def test_out_of_range_is_rejected_fail_closed(self, bad):
-        """Sin cota superior, un ``--max-attempts 1000`` (un cero de mas) son **mil
-        llamadas**: caras en Ollama (`:cloud` es de pago) y **cientos de dolares en
-        Claude**. El proyecto ya valida asi los enteros del TOML."""
+        """With no upper bound, a ``--max-attempts 1000`` (one zero too many) is **a
+        thousand calls**: expensive on Ollama (`:cloud` is paid) and **hundreds of dollars
+        on Claude**. The project already validates the TOML's integers this way."""
         import run_magi
 
         with pytest.raises(SystemExit):
@@ -6461,11 +6462,11 @@ class TestMaxAttemptsFlag:
         assert run_magi.MAX_ATTEMPTS_CAP == 10
 
     def test_passing_it_WITH_ollama_says_out_loud_that_the_toml_wins(self, capsys):
-        """El TOML gana (R13) -- pero hoy ganaba **en silencio**.
+        """The TOML wins (R13) -- but until now it won **in silence**.
 
-        Un usuario que pide ``--max-attempts 5 --ollama`` cree que configuro algo. No
-        configuro nada, y no hay forma de que se entere: el flag se ignora sin una linea.
-        Un override silencioso es una mentira educada.
+        A user who asks for ``--max-attempts 5 --ollama`` believes they configured
+        something. They configured nothing, and there is no way for them to find out: the
+        flag is ignored without a single line. A silent override is a polite lie.
         """
         import run_magi
 
@@ -6474,7 +6475,7 @@ class TestMaxAttemptsFlag:
         assert "max_attempts_per_model" in capsys.readouterr().err
 
     def test_NOT_passing_it_with_ollama_stays_quiet(self, capsys):
-        """El aviso es por un override REAL, no por el default: si no, seria ruido."""
+        """The warning is for a REAL override, not for the default: otherwise it is noise."""
         import run_magi
 
         run_magi.parse_args(["code-review", "x.md", "--ollama"])
@@ -6482,12 +6483,12 @@ class TestMaxAttemptsFlag:
         assert capsys.readouterr().err == ""
 
     def test_passing_the_DEFAULT_VALUE_explicitly_still_warns(self, capsys):
-        """*"Lo pasaste?"* y *"cuanto vale?"* son preguntas DISTINTAS.
+        """*"Did you pass it?"* and *"what is it worth?"* are DIFFERENT questions.
 
-        Contestar la primera con ``!= DEFAULT`` la falla para exactamente un valor: el
-        default. Un usuario que escribe ``--ollama --max-attempts 2`` **paso el flag**, el
-        TOML se lo pisa igual (y su ``max_attempts_per_model`` puede no ser 2), y se
-        quedaba sin aviso -- la misma mentira educada, sobreviviendo en el unico hueco.
+        Answering the first with ``!= DEFAULT`` gets it wrong for exactly one value: the
+        default. A user who types ``--ollama --max-attempts 2`` **did pass the flag**, the
+        TOML overrides it all the same (and their ``max_attempts_per_model`` may not be 2),
+        and they got no warning -- the same polite lie, surviving in the one gap left.
         """
         import run_magi
 
@@ -6505,10 +6506,10 @@ class TestMaxAttemptsFlag:
 
     @pytest.mark.asyncio
     async def test_max_attempts_below_one_fails_with_ITS_OWN_cause(self, tmp_path):
-        """El guard vive en la ENTRADA, no dentro de la corrutina por-mago.
+        """The guard lives at the ENTRY POINT, not inside the per-mage coroutine.
 
-        Dentro, el ``gather`` lo captura y el usuario lee *"Only 0 agent(s) succeeded"* --
-        el error entierra su propia causa.
+        Inside, the ``gather`` catches it and the user reads *"Only 0 agent(s) succeeded"* --
+        the error buries its own cause.
         """
         from run_magi import run_orchestrator
 
@@ -6524,25 +6525,25 @@ class TestMaxAttemptsFlag:
 
 
 # ---------------------------------------------------------------------------
-# MS2 -- T9: telemetria de adherencia (R18)
+# MS2 -- T9: adherence telemetry (R18)
 # ---------------------------------------------------------------------------
 
 
 class TestAdherenceTelemetry:
-    """R17 mide UNA vez, con los modelos de HOY. Los modelos derivan bajo el mismo tag.
+    """R17 measures ONCE, with TODAY's models. Models drift under the very same tag.
 
-    Sin esta telemetria, el dia que un modelo empiece a omitir las marcas se veria como
-    *"MAGI va lento y rota mucho"* -- un sintoma que **nadie sabria leer**. Y con una
-    muestra de 5+2 en el gate, **la tasa real solo se va a conocer en produccion**: esto es
-    lo unico que la va a ver.
+    Without this telemetry, the day a model starts omitting the markers it would look like
+    *"MAGI is slow and rotates a lot"* -- a symptom **nobody would know how to read**. And
+    with a sample of 5+2 at the gate, **the real rate will only ever be known in
+    production**: this is the only thing that will see it.
     """
 
     def test_the_recorder_reuses_the_SAME_dispatcher_as_the_retry_feedback(self):
-        """Telemetria y feedback **no pueden discrepar**.
+        """Telemetry and feedback **cannot disagree**.
 
-        Si el modelo recibe *"te faltaron las marcas"*, el contador que sube es
-        ``missing_markers``. Duplicar la clasificacion seria plantar la semilla de que un
-        dia el reporte diga una cosa y el prompt otra.
+        If the model is told *"you left out the markers"*, the counter that goes up is
+        ``missing_markers``. Duplicating the classification would plant the seed for the
+        day the report says one thing and the prompt another.
         """
         from collections import Counter, defaultdict
 
@@ -6588,7 +6589,8 @@ class TestAdherenceTelemetry:
         }
 
     def test_the_field_is_ADDITIVE_and_fail_soft(self):
-        """``consensus`` no lo lee, y un reporte SIN el campo sigue siendo valido (NR3)."""
+        """``consensus`` does not read it, and a report WITHOUT the field is still valid
+        (NR3)."""
         import inspect
 
         import consensus
@@ -6597,11 +6599,11 @@ class TestAdherenceTelemetry:
 
     @pytest.mark.asyncio
     async def test_the_CLAUDE_path_emits_the_field_in_the_REPORT(self, tmp_path):
-        """El contador tiene que llegar al reporte, no quedarse en un acumulador interno.
+        """The counter has to reach the report, not stay in an internal accumulator.
 
-        Los tests de arriba ejercitan ``_record_extraction_failure`` como unidad. Ninguno
-        comprobaba que el campo **aparezca en el reporte** -- que es lo unico que el
-        usuario (y el gate R17a) llegan a ver.
+        The tests above exercise ``_record_extraction_failure`` as a unit. None of them
+        checked that the field **shows up in the report** -- which is the only thing the
+        user (and the R17a gate) ever get to see.
         """
 
         async def mock_launch(
@@ -6617,11 +6619,11 @@ class TestAdherenceTelemetry:
 
     @pytest.mark.asyncio
     async def test_a_ROTATING_mage_records_its_omission_too(self, tmp_path):
-        """R18 se escribio PARA el camino de rotacion -- y es el unico backend que se usa.
+        """R18 was written FOR the rotation path -- and that is the backend actually in use.
 
-        Sin esto, ``extraction_failures`` esta **siempre ausente bajo ``--ollama``**: la
-        deriva de un modelo se veria como *"MAGI va lento y rota mucho"*, que es
-        exactamente el sintoma que nadie sabria leer. Y el README **promete** el campo.
+        Without this, ``extraction_failures`` is **always absent under ``--ollama``**: a
+        model's drift would look like *"MAGI is slow and rotates a lot"*, which is exactly
+        the symptom nobody would know how to read. And the README **promises** the field.
         """
 
         async def mock_launch(
@@ -6633,18 +6635,18 @@ class TestAdherenceTelemetry:
 
         result = await _run(tmp_path, mock_launch, rotation=_rotation())
 
-        assert result.get("degraded") is not True, "el retry lo salva: run valido"
+        assert result.get("degraded") is not True, "the retry saves it: valid run"
         assert result["extraction_failures"] == {"caspar": {"missing_markers": 1}}
 
     @pytest.mark.asyncio
     async def test_the_prompt_guard_covers_the_ORCHESTRATOR_not_just_the_CLI(self, tmp_path):
-        """Hallazgo del gate MAGI (Balthasar, ciclos 1 y 2): el guard tenia una costura.
+        """MAGI gate finding (Balthasar, cycles 1 and 2): the guard had a seam.
 
-        Vivia en ``main()``, asi que **cualquier** caller de ``run_orchestrator`` -- el punto
-        donde los ``.md`` se le entregan de verdad a un modelo -- se lo saltaba. El guard es
-        la ULTIMA defensa contra una instalacion rancia y contra un prompt "mejorado" con un
-        veredicto fabricable entre las marcas; una defensa que solo cubre una de las dos
-        puertas no es defensa en profundidad, es una puerta con cerradura y otra sin ella.
+        It lived in ``main()``, so **any** caller of ``run_orchestrator`` -- the point where
+        the ``.md`` files are actually handed to a model -- skipped it. The guard is the LAST
+        defence against a stale installation and against an "improved" prompt carrying a
+        fabricable verdict between the markers; a defence that covers only one of the two
+        doors is not defence in depth, it is one door locked and the other one open.
         """
         from run_magi import run_orchestrator
 
@@ -6675,13 +6677,13 @@ class TestAdherenceTelemetry:
 
     @pytest.mark.asyncio
     async def test_a_run_that_DIES_still_surfaces_why(self, tmp_path, capsys):
-        """El caso catastrofico: los tres magos omiten las marcas -> el run muere.
+        """The catastrophic case: all three mages omit the markers -> the run dies.
 
-        Muere **bajo el suelo de 2 magos**, asi que no llega a escribir ``magi-report.json``
-        -- y con el se iba el unico dato que explicaba la muerte. El dia que un modelo
-        empiece a omitir las marcas de verdad, MAGI moriria diciendo *"solo 0 magos
-        tuvieron exito"* y **nadie sabria por que**: es justo el sintoma ilegible que R18
-        existe para eliminar. La telemetria tiene que sobrevivir a la muerte del run.
+        It dies **below the floor of 2 mages**, so it never gets to write
+        ``magi-report.json`` -- and with it went the only datum that explained the death.
+        The day a model really starts omitting the markers, MAGI would die saying *"only 0
+        agents succeeded"* and **nobody would know why**: precisely the illegible symptom
+        R18 exists to eliminate. The telemetry has to survive the death of the run.
         """
 
         async def mock_launch(
@@ -6699,10 +6701,10 @@ class TestAdherenceTelemetry:
 
     @pytest.mark.asyncio
     async def test_a_rotating_mage_records_EVERY_failed_attempt_across_models(self, tmp_path):
-        """Un mago que omite las marcas en TODOS sus intentos, en dos modelos, cuenta 4.
+        """A mage that omits the markers on ALL its attempts, across two models, counts 4.
 
-        La rotacion no borra la cuenta: cada intento que fallo la extraccion es un dato
-        de adherencia, y el del modelo rotado tambien cuenta (es el mismo asiento).
+        Rotation does not wipe the count: every attempt that failed extraction is an
+        adherence data point, and the rotated model's attempts count too (same seat).
         """
 
         async def mock_launch(
@@ -6716,7 +6718,7 @@ class TestAdherenceTelemetry:
             tmp_path, mock_launch, rotation=_rotation(max_attempts=2, max_rotations=1)
         )
 
-        assert result.get("degraded") is True, "caspar agota modelo + fallback y muere"
+        assert result.get("degraded") is True, "caspar spends model + fallback and dies"
         assert result["extraction_failures"] == {"caspar": {"missing_markers": 4}}, (
-            "2 intentos x 2 modelos -- incluido el ULTIMO, el que lo mato"
+            "2 attempts x 2 models -- including the LAST one, the one that killed it"
         )

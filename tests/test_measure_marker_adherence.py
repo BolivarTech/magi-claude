@@ -214,15 +214,15 @@ def _write_run_report(tmp_path: Path, *, agents, extraction_failures=None) -> Pa
 
 
 def test_a_retry_recovered_omission_is_NOT_measured_as_clean(tmp_path):
-    """El fallo que el instrumento existe para contar, y que NO podia ver.
+    """The failure the instrument exists to count, and which it could NOT see.
 
-    ``launch_agent`` reescribe ``{agent}.raw.json`` en CADA intento, asi que el archivo
-    solo guarda el ULTIMO. Un mago que omite las marcas y acierta en el reintento dejaba
-    un raw impecable -> el artefacto salia **verde** con una omision real dentro. Con
-    ``max_attempts=2`` y una tasa real del 5 %, el artefacto habria reportado ~0.25 %:
-    sistematicamente optimista, justo en el numero del que cuelga el criterio de exito.
+    ``launch_agent`` rewrites ``{agent}.raw.json`` on EVERY attempt, so the file only keeps
+    the LAST one. A mage that omits the markers and gets it right on the retry left behind a
+    spotless raw -> the artifact came out **green** with a real omission inside it. With
+    ``max_attempts=2`` and a true rate of 5 %, the artifact would have reported ~0.25 %:
+    systematically optimistic, in exactly the number the success criterion hangs from.
     """
-    for agent in mma.AGENT_NAMES:  # el raw del ULTIMO intento: limpio, del retry que acerto
+    for agent in mma.AGENT_NAMES:  # the LAST attempt's raw: clean, from the retry that hit
         _write_raw(tmp_path, agent, f'<MAGI_VERDICT>\n{{"agent": "{agent}"}}\n</MAGI_VERDICT>')
     _write_run_report(
         tmp_path,
@@ -233,18 +233,18 @@ def test_a_retry_recovered_omission_is_NOT_measured_as_clean(tmp_path):
 
     mma.measure_output_dir(tmp_path)
 
-    assert mma.tally["caspar"]["missing_markers"] == 1, "la omision del 1er intento SE VE"
-    assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1, "y el reintento que acerto tambien"
+    assert mma.tally["caspar"]["missing_markers"] == 1, "the first attempt's omission IS VISIBLE"
+    assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1, "and so is the retry that got it right"
     artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
-    assert artifact["verdict"] == "red", "un run con una omision NO es un run verde"
+    assert artifact["verdict"] == "red", "a run with an omission is NOT a green run"
 
 
 def test_the_report_carries_the_causes_the_spy_STRUCTURALLY_cannot_see(tmp_path):
-    """``EchoedExampleRejected`` y ``AgentIdentityError`` se lanzan DESPUES del parser.
+    """``EchoedExampleRejected`` and ``AgentIdentityError`` are raised AFTER the parser.
 
-    El spy envuelve ``VerdictSentinel.extract``, asi que esos dos nunca pasan por el: un
-    artefacto construido solo con el spy certificaba 4 de las 6 causas. El contador del
-    run las tiene todas -- porque las clasifica donde se deciden.
+    The spy wraps ``VerdictSentinel.extract``, so those two never go through it: an artifact
+    built from the spy alone certified 4 of the 6 causes. The run's own tally has them all --
+    because it classifies them where they are decided.
     """
     for agent in mma.AGENT_NAMES:
         _write_raw(tmp_path, agent, f'<MAGI_VERDICT>\n{{"agent": "{agent}"}}\n</MAGI_VERDICT>')
@@ -267,12 +267,12 @@ def test_the_report_carries_the_causes_the_spy_STRUCTURALLY_cannot_see(tmp_path)
 
 
 def test_a_run_that_died_without_a_report_falls_back_to_the_raw_files(tmp_path):
-    """Un run que muere bajo el suelo de 2 magos no escribe reporte.
+    """A run that dies below the floor of 2 mages writes no report.
 
-    Los raws que alcanzo a producir siguen siendo muestras validas: se miden con el
-    parser real, como antes. Lo que NUNCA se hace es fabricar un cero.
+    The raws it did manage to produce are still valid samples: they are measured with the
+    real parser, as before. What is NEVER done is to fabricate a zero.
     """
-    _write_raw(tmp_path, "caspar", "el modelo se olvido de las marcas")
+    _write_raw(tmp_path, "caspar", "the model forgot the markers")
     mma.install_spy()
 
     mma.measure_output_dir(tmp_path)
@@ -282,30 +282,30 @@ def test_a_run_that_died_without_a_report_falls_back_to_the_raw_files(tmp_path):
 
 
 def test_a_run_measured_by_the_BLIND_fallback_can_NEVER_certify_green(tmp_path):
-    """El camino ciego no puede firmar el release -- ni aunque no vea ni un fallo.
+    """The blind path cannot sign off the release -- not even if it sees zero failures.
 
-    El fallback re-parsea los raws, que solo guardan el ULTIMO intento de cada mago: es
-    **exactamente** el instrumento optimista que este gate acaba de eliminar. Peor: el
-    ``ok`` del fallback lo firma el sentinel + ``json.loads``, sin canario ni identidad,
-    asi que cuenta como bueno un veredicto que el run real habria **rechazado**.
+    The fallback re-parses the raws, which only keep each mage's LAST attempt: it is
+    **exactly** the optimistic instrument this gate has just eliminated. Worse: the
+    fallback's ``ok`` is signed by the sentinel + ``json.loads``, with no canary and no
+    identity check, so it counts as good a verdict the real run would have **rejected**.
 
-    El WARNING a stderr no basta: ``make release-check`` corre ``check``, que lee **solo el
-    artefacto** -- y para entonces el warning ya no existe. Lo que no queda escrito en el
-    artefacto, no gobierna nada.
+    The WARNING on stderr is not enough: ``make release-check`` runs ``check``, which reads
+    **only the artifact** -- and by then the warning no longer exists. What is not written
+    into the artifact governs nothing.
     """
-    for agent in mma.AGENT_NAMES:  # tres raws impecables, ningun reporte
+    for agent in mma.AGENT_NAMES:  # three spotless raws, no report at all
         _write_raw(tmp_path, agent, f'<MAGI_VERDICT>\n{{"agent": "{agent}"}}\n</MAGI_VERDICT>')
     mma.install_spy()
 
     mma.measure_output_dir(tmp_path)
     artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
 
-    assert artifact["fallback_measured"] == 1, "el artefacto DICE que midio a ciegas"
-    assert artifact["verdict"] != "green", "una medicion ciega no certifica nada"
+    assert artifact["fallback_measured"] == 1, "the artifact SAYS it measured blind"
+    assert artifact["verdict"] != "green", "a blind measurement certifies nothing"
 
 
 def test_check_rejects_an_artifact_that_was_measured_blind(tmp_path):
-    """Y el gate lo rechaza leyendo el artefacto, que es lo unico que ve."""
+    """And the gate rejects it by reading the artifact, which is all it ever sees."""
     _write_report(tmp_path / "r.json", fallback_measured=1)
 
     passed, message = mma.check_release_gate(tmp_path / "r.json", mma._REPO_ROOT, mma._AGENTS_DIR)
@@ -315,11 +315,11 @@ def test_check_rejects_an_artifact_that_was_measured_blind(tmp_path):
 
 
 def test_every_cause_of_the_retry_contract_has_a_column_in_the_artifact():
-    """El vocabulario de causas es UNO: el de ``FEEDBACK_TEMPLATES`` (R12).
+    """There is ONE vocabulary of causes: that of ``FEEDBACK_TEMPLATES`` (R12).
 
-    Si el artefacto enumerase sus propias causas, una causa nueva en el contrato de
-    reintento no tendria columna -- y un fallo real se contaria como cero. Que es
-    exactamente la clase de ceguera que este ciclo esta arreglando.
+    If the artifact enumerated its own causes, a new cause in the retry contract would have
+    no column -- and a real failure would be counted as zero. Which is exactly the class of
+    blindness this cycle is fixing.
     """
     from retry_feedback import FEEDBACK_TEMPLATES
 
@@ -389,10 +389,10 @@ def _write_report(path: Path, **overrides) -> None:
 
 
 def test_check_rejects_an_artifact_with_no_blindness_field_at_all(tmp_path):
-    """Un gate fail-closed no infiere una garantia de un SILENCIO.
+    """A fail-closed gate does not infer a guarantee from a SILENCE.
 
-    Leer un campo ausente como *"no hubo ceguera"* es exactamente la forma de fail-open que
-    este proyecto ya pago tres veces: la ausencia de evidencia convertida en evidencia.
+    Reading an absent field as *"there was no blindness"* is exactly the form of fail-open
+    this project has already paid for three times: absence of evidence turned into evidence.
     """
     report_path = tmp_path / "legacy.json"
     _write_report(report_path)
