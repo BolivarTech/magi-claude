@@ -23,11 +23,11 @@ from fallback_policy import ModelCapability
 from ollama_config import OllamaConfig
 from redaction import redact_secrets
 
-#: La cota del bloque de feedback la DERIVA ``retry_feedback`` de las plantillas reales.
-#: Hardcodearla aqui era una bomba: si una plantilla crece, este guard seguiria reservando
-#: el valor viejo -> infra-reserva -> TRUNCAMIENTO SILENCIOSO (el fallo que R5b existe para
-#: prevenir). Una sola fuente lo hace imposible. Se re-exporta para los consumidores que ya
-#: la leian desde aqui.
+#: ``retry_feedback`` DERIVES the feedback block's bound from the real templates.
+#: Hardcoding it here was a bomb: if a template grows, this guard would keep reserving the
+#: old value -> under-reservation -> SILENT TRUNCATION (the failure R5b exists to prevent).
+#: A single source makes that impossible. Re-exported for the consumers that already read
+#: it from here.
 from retry_feedback import MAX_RETRY_FEEDBACK_TOKENS as MAX_RETRY_FEEDBACK_TOKENS
 
 PREFLIGHT_RETRIES = 2

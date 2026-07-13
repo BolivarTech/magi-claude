@@ -48,7 +48,7 @@ if _SCRIPT_DIR not in sys.path:
 from validate import MAX_INPUT_FILE_SIZE  # noqa: E402
 from verdict_markers import VerdictSentinel  # noqa: E402
 
-#: El sentinel es **sin estado** (solo lleva el par de marcas): una instancia basta.
+#: The sentinel is **stateless** (it only carries the marker pair): one instance is enough.
 _SENTINEL = VerdictSentinel()
 
 
@@ -103,14 +103,14 @@ def _extract_text(data: object) -> str:
     if isinstance(data, str):
         return data
 
-    # Bare-verdict dict (Ollama pre-MS2: ``choices[0].message.content`` ya decodificado).
+    # Bare-verdict dict (Ollama pre-MS2: ``choices[0].message.content`` already decoded).
     #
-    # MS2 lo RECHAZA -- un veredicto sin marcas no se acepta (R15) -- pero la rama se
-    # CONSERVA a proposito: re-serializar el objeto lo manda al sentinel, que levanta
-    # ``MissingVerdictMarkers``, y ese es el feedback CORRECTO ("olvidaste las marcas").
-    # Borrarla lo dejaria caer al ``ValueError`` de abajo -> "Unrecognised agent output
-    # shape", un mensaje que no le dice al modelo NADA sobre como corregirse. Mismo
-    # rechazo, mejor instruccion: el reintento existe para que el modelo se arregle.
+    # MS2 REJECTS it -- a verdict with no markers is not accepted (R15) -- but the branch is
+    # KEPT on purpose: re-serialising the object sends it to the sentinel, which raises
+    # ``MissingVerdictMarkers``, and that is the CORRECT feedback ("you forgot the markers").
+    # Deleting it would let it fall through to the ``ValueError`` below -> "Unrecognised
+    # agent output shape", a message that tells the model NOTHING about how to correct
+    # itself. Same rejection, better instruction: the retry exists so the model can fix itself.
     if isinstance(data, dict) and "agent" in data and "verdict" in data:
         return json.dumps(data)
 
@@ -121,55 +121,55 @@ def _extract_text(data: object) -> str:
 
 
 def _loads_lenient(text: str) -> Any:
-    """Extrae el veredicto de entre las marcas y lo decodifica. **No busca: extrae.**
+    """Extract the verdict from between the markers and decode it. **Extracts, never searches.**
 
-    Reemplaza a la recuperacion heuristica que MS2 borro. El nombre se conserva por el
-    contrato interno del modulo, pero **ya no hay nada "lenient" en el fondo**: lo unico
-    que se tolera es la NORMALIZACION dentro de una region **ya delimitada** (quitar un
-    fence). **Fuera de las marcas no se mira nada, nunca.**
+    Replaces the heuristic recovery MS2 deleted. The name is kept for the module's internal
+    contract, but **there is nothing "lenient" left underneath**: the only thing tolerated is
+    NORMALIZATION inside an **already-delimited** region (stripping a fence). **Outside the
+    markers nothing is ever looked at, ever.**
 
-    Lo que se borro, y por que no vuelve: el escaner decodificaba cada objeto JSON que
-    encontraba en la salida y se quedaba con el que "parecia" un veredicto. Como toda
-    heuristica tenia falsos positivos (recuperar algo que no era el veredicto -- el
-    ejemplo del propio system prompt, produciendo un ``approve`` **fabricado** en el
-    asiento adversarial) y falsos negativos (descartar un veredicto real por hallar dos
-    candidatos). Un fallback "por si acaso" **reintroduce el residual entero**.
+    What was deleted, and why it does not come back: the scanner decoded every JSON object it
+    found in the output and kept whichever one "looked like" a verdict. Like every heuristic
+    it had false positives (recovering something that was not the verdict -- the system
+    prompt's own example, producing a **fabricated** ``approve`` in the adversarial seat) and
+    false negatives (discarding a real verdict because it found two candidates). A fallback
+    "just in case" **reintroduces the entire residual**.
 
     Args:
-        text: El contenido crudo del archivo del agente (ya desenvuelto del transporte).
+        text: The raw content of the agent's file (already unwrapped from the transport).
 
     Returns:
-        El objeto JSON de entre las marcas.
+        The JSON object from between the markers.
 
     Raises:
-        MissingVerdictMarkers: No hay marcas. Hereda de ``ValidationError``, asi que el
-            orquestador reintenta con feedback correctivo.
-        UnterminatedVerdictBlock: Falta la marca de cierre (salida truncada).
-        AmbiguousVerdictMarkers: Hay mas de un bloque delimitado.
-        json.JSONDecodeError: El contenido **entre** las marcas no es JSON decodable.
-            Toda forma en que el decoder puede rechazar el payload llega como esta
-            excepcion -- error de sintaxis, anidamiento profundo (``RecursionError``), o
-            un entero mas largo que ``int_max_str_digits``. Es el contrato del que depende
-            el orquestador: reintenta ante ``(ValidationError, JSONDecodeError)``, asi que
-            cualquier otra cosa que escape le cuesta al mago su segundo intento.
+        MissingVerdictMarkers: There are no markers. Inherits from ``ValidationError``, so
+            the orchestrator retries with corrective feedback.
+        UnterminatedVerdictBlock: The closing marker is missing (truncated output).
+        AmbiguousVerdictMarkers: There is more than one delimited block.
+        json.JSONDecodeError: The content **between** the markers is not decodable JSON.
+            Every way the decoder can reject the payload arrives as this exception --
+            syntax error, deep nesting (``RecursionError``), or an integer longer than
+            ``int_max_str_digits``. This is the contract the orchestrator depends on: it
+            retries on ``(ValidationError, JSONDecodeError)``, so anything else escaping
+            here costs the mage its second attempt.
     """
     block = _SENTINEL.extract(text)
     try:
         return json.loads(block)
     except RecursionError as exc:
-        # CPython lanza RecursionError (no JSONDecodeError) ante anidamiento profundo.
-        # Mapearlo mantiene la salida adversarial en el camino fail-closed/retry en vez
-        # de escapar como un error no capturado que le costaria al mago su reintento.
+        # CPython raises RecursionError (not JSONDecodeError) on deep nesting. Mapping it
+        # keeps the adversarial output on the fail-closed/retry path instead of escaping as
+        # an uncaught error that would cost the mage its retry.
         raise json.JSONDecodeError(
             "Input nesting exceeds the JSON decoder limit", block, 0
         ) from exc
     except ValueError as exc:
         if isinstance(exc, json.JSONDecodeError):
             raise
-        # Un ValueError del decoder que NO es JSONDecodeError: hoy eso significa un
-        # literal entero por encima de ``int_max_str_digits`` (4300). Debe salir como
-        # JSONDecodeError o el guard de reintento del orquestador no lo captura y el mago
-        # se descarta sin segundo intento.
+        # A ValueError from the decoder that is NOT a JSONDecodeError: today that means an
+        # integer literal above ``int_max_str_digits`` (4300). It must come out as a
+        # JSONDecodeError or the orchestrator's retry guard does not catch it and the mage
+        # is dropped without a second attempt.
         raise json.JSONDecodeError(f"Agent output is not decodable JSON: {exc}", block, 0) from exc
 
 

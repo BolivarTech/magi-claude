@@ -138,30 +138,30 @@ MAX_HISTORY_RUNS = 5
 VALID_MODES = ("code-review", "design", "analysis")
 
 
-#: Intentos por modelo, por defecto: el original + 1 reintento con feedback correctivo.
+#: Attempts per model, by default: the original + 1 retry with corrective feedback.
 DEFAULT_MAX_ATTEMPTS = 2
 MIN_ATTEMPTS = 1
 
-#: Cota superior. **No es paranoia:** sin ella, un ``--max-attempts 1000`` (un cero de mas)
-#: convierte un mago obstinado en **mil llamadas** -- caras en Ollama (`:cloud` es de pago)
-#: y **cientos de dolares en Claude**, con un run que no termina nunca. El proyecto ya
-#: valida asi los enteros del TOML (NR3 de MS1: valor invalido -> error, sin fallback
-#: silencioso); esto es la misma regla en el flag.
+#: Upper bound. **This is not paranoia:** without it, a ``--max-attempts 1000`` (one zero
+#: too many) turns a stubborn mage into **a thousand calls** -- expensive on Ollama
+#: (`:cloud` is paid) and **hundreds of dollars on Claude**, with a run that never ends. The
+#: project already validates the TOML integers this way (NR3 of MS1: invalid value -> error,
+#: no silent fallback); this is the same rule on the flag.
 MAX_ATTEMPTS_CAP = 10
 
 
 def _max_attempts(raw: str) -> int:
-    """Valida ``--max-attempts``: entero en ``[MIN_ATTEMPTS, MAX_ATTEMPTS_CAP]``.
+    """Validate ``--max-attempts``: an integer in ``[MIN_ATTEMPTS, MAX_ATTEMPTS_CAP]``.
 
     Args:
-        raw: El valor tal como llega de la linea de comandos.
+        raw: The value exactly as it arrives from the command line.
 
     Returns:
-        El entero validado.
+        The validated integer.
 
     Raises:
-        argparse.ArgumentTypeError: Si no es un entero, o cae fuera del rango. **Falla
-            cerrado**: nunca degrada a un default silencioso.
+        argparse.ArgumentTypeError: If it is not an integer, or falls outside the range.
+            **Fails closed**: it never degrades to a silent default.
     """
     try:
         value = int(raw)
@@ -407,27 +407,28 @@ async def launch_agent(
     parse_raw_output(raw_file, parsed_file)
     payload = load_agent_output(parsed_file)
 
-    # --- Los dos guards que corren DESPUES de que el schema valide (MS2) ---
+    # --- The two guards that run AFTER the schema validates (MS2) ---
     #
-    # Ambos levantan subclases de ``ValidationError``, asi que el guard de reintento del
-    # orquestador los captura: el modelo recibe feedback correctivo y puede arreglarse.
+    # Both raise ``ValidationError`` subclasses, so the orchestrator's retry guard catches
+    # them: the model gets corrective feedback and can fix itself.
 
-    # R6 -- canario anti-eco. El ULTIMO cinturon: el sentinel ya impide que se extraiga
-    # cualquier cosa de fuera de las marcas, y el prompt no pone nada valido ENTRE ellas.
-    # Queda un solo camino teorico: que el modelo tome el ejemplo trabajado de FUERA y lo
-    # envuelva EL MISMO en marcas. Su huella dactilar lo delata.
+    # R6 -- anti-echo canary. The LAST belt: the sentinel already prevents anything from
+    # outside the markers being extracted, and the prompt puts nothing valid BETWEEN them.
+    # One theoretical path is left: the model taking the worked example from OUTSIDE and
+    # wrapping it in markers ITSELF. Its fingerprint gives it away.
     if all(payload.get(key) == value for key, value in ECHO_CANARY.items()):
         raise EchoedExampleRejected(
             "the verdict is a verbatim copy of the prompt's example, not your analysis"
         )
 
-    # R10 -- identidad. ``load_agent_output`` valida que ``agent`` este en el ENUM, pero
-    # nadie validaba que fuera el mago que se LANZO. Un nombre duplicado mata el run
-    # entero; uno unico pero equivocado mete el texto de un mago en el asiento de otro, y
-    # el consenso lo cuenta como una perspectiva independiente **que nunca existio**.
+    # R10 -- identity. ``load_agent_output`` validates that ``agent`` is in the ENUM, but
+    # nobody validated that it was the mage that was LAUNCHED. A duplicate name kills the
+    # whole run; a unique but wrong one puts one mage's text in another's seat, and the
+    # consensus counts it as an independent perspective **that never existed**.
     #
-    # Case-insensitive: un modelo que escribe "Caspar" EMITIO bien su veredicto. Matarlo
-    # por una mayuscula es un reintento regalado, y el enum ya se valida aparte.
+    # Case-insensitive: a model that writes "Caspar" DID emit its verdict correctly. Killing
+    # it over a capital letter is a retry given away for free, and the enum is validated
+    # separately anyway.
     claimed = str(payload["agent"]).strip()
     if claimed.casefold() != agent_name.casefold():
         raise AgentIdentityError(
@@ -1239,18 +1240,18 @@ def _record_extraction_failure(
     agent: str,
     error: ValidationError | json.JSONDecodeError,
 ) -> None:
-    """Anota la CAUSA del fallo de extraccion en la telemetria de adherencia (R18).
+    """Record the CAUSE of the extraction failure in the adherence telemetry (R18).
 
-    Reutiliza el mismo dispatcher que elige el feedback del reintento
-    (``retry_feedback.retry_feedback_cause``), asi que la telemetria y la instruccion
-    correctiva **no pueden discrepar**: si el modelo recibe "te faltaron las marcas", el
-    contador que sube es ``missing_markers``. Duplicar la clasificacion seria plantar la
-    semilla de que un dia el reporte diga una cosa y el prompt otra.
+    Reuses the same dispatcher that picks the retry's feedback
+    (``retry_feedback.retry_feedback_cause``), so the telemetry and the corrective
+    instruction **cannot disagree**: if the model is told "you were missing the markers",
+    the counter that goes up is ``missing_markers``. Duplicating the classification would
+    plant the seed of the report saying one thing and the prompt another, one day.
 
     Args:
-        tally: El acumulador por agente.
-        agent: El mago cuyo intento fallo.
-        error: La excepcion que lo tumbo.
+        tally: The per-agent accumulator.
+        agent: The mage whose attempt failed.
+        error: The exception that took it down.
     """
     tally[agent][retry_feedback_cause(error)] += 1
 
@@ -1310,13 +1311,14 @@ async def run_orchestrator(
     if max_attempts < 1:
         raise RuntimeError(f"max_attempts must be >= 1 (got {max_attempts})")
 
-    # El guard del contrato de prompts vive AQUI, no solo en ``main()`` (hallazgo del gate
-    # MAGI, Balthasar): esta es la funcion que de verdad entrega los ``.md`` a un modelo, asi
-    # que es la puerta que hay que cerrar. Con el guard solo en el CLI, cualquier otro caller
-    # -- un test, una integracion -- corria con prompts rancios o con un veredicto fabricable
-    # ENTRE las marcas, que es justo el ultimo camino de fabricacion que MS2 cierra.
-    # ``main()`` lo sigue llamando antes para abortar cuanto antes (sin crear el temp dir ni
-    # pagar el preflight); repetirlo aqui cuesta tres lecturas de fichero y es idempotente.
+    # The prompt-contract guard lives HERE, not only in ``main()`` (MAGI gate finding,
+    # Balthasar): this is the function that actually hands the ``.md`` files to a model, so
+    # this is the door that has to be shut. With the guard only in the CLI, any other caller
+    # -- a test, an integration -- ran with stale prompts or with a fabricable verdict
+    # BETWEEN the markers, which is precisely the last fabrication path MS2 closes.
+    # ``main()`` still calls it earlier to abort as soon as possible (without creating the
+    # temp dir or paying for the preflight); repeating it here costs three file reads and is
+    # idempotent.
     AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
 
     # Back-compat (BDD-30): KEEP `model` so the ~40 existing call sites in
@@ -1336,10 +1338,10 @@ async def run_orchestrator(
     # cohorts: ``retried - failed`` is "retry recovered",
     # ``retried & failed`` is "retry also failed".
     retried: set[str] = set()
-    # R18 -- telemetria de adherencia. R17 mide UNA vez, con los modelos de HOY; los
-    # modelos derivan bajo el mismo tag. Sin esto, el dia que uno empiece a omitir las
-    # marcas se veria como "MAGI va lento y rota mucho" -- un sintoma que nadie sabria
-    # leer. Aditivo y fail-soft: ``consensus`` no lo lee.
+    # R18 -- adherence telemetry. R17 measures ONCE, with TODAY's models; models drift under
+    # the same tag. Without this, the day one starts omitting the markers it would look like
+    # "MAGI is slow and rotates a lot" -- a symptom nobody would know how to read. Additive
+    # and fail-soft: ``consensus`` does not read it.
     extraction_failures: dict[str, Counter[str]] = defaultdict(Counter)
     # Rotation telemetry (T10): agent -> its final AgentRotationState. Registered
     # up-front in the rotation path so even a mage that DIES appears, giving Task 13 a
@@ -1391,16 +1393,16 @@ async def run_orchestrator(
         """
         _safe_display_update(display, name, "running", log_gate)
         try:
-            # N intentos (MS2/R13): el camino Claude tenia un retry SINGLE-SHOT fijo; ahora
-            # lo gobierna ``--max-attempts`` (default 2 = el comportamiento previo, exacto).
+            # N attempts (MS2/R13): the Claude path had a fixed SINGLE-SHOT retry; it is now
+            # governed by ``--max-attempts`` (default 2 = the previous behaviour, exactly).
             #
-            # Dispara ante deriva de schema (ValidationError -- que incluye TODOS los fallos
-            # de extraccion del sentinel) y ante JSON no parseable (json.JSONDecodeError).
-            # NUNCA ante timeout / fallo de subproceso / cancelacion / ValueError. Cada
-            # reintento recibe un ``timeout`` FRESCO (no el residuo del anterior) y lleva el
-            # feedback correctivo ESPECIFICO DE LA CAUSA: el tipo de excepcion selecciona la
-            # instruccion, asi que un modelo que olvido las marcas recibe "te faltaron las
-            # marcas" y no un mensaje generico de schema.
+            # It fires on schema drift (ValidationError -- which includes ALL the sentinel's
+            # extraction failures) and on unparseable JSON (json.JSONDecodeError). NEVER on
+            # timeout / subprocess failure / cancellation / ValueError. Each retry gets a
+            # FRESH ``timeout`` (not the leftover of the previous one) and carries the
+            # CAUSE-SPECIFIC corrective feedback: the exception type selects the instruction,
+            # so a model that forgot the markers is told "you were missing the markers" and
+            # not a generic schema message.
             attempt_prompt = prompt
             for attempt in range(max_attempts):
                 try:
@@ -1578,12 +1580,12 @@ async def run_orchestrator(
             successful.append(result)
 
     if len(successful) < 2:
-        # R18 tiene que SOBREVIVIR a la muerte del run, y este es el unico sitio donde puede.
-        # Un run que muere bajo el suelo de 2 magos NO escribe ``magi-report.json`` -- y con
-        # el se iria el unico dato que explica la muerte. El dia que un modelo empiece a
-        # omitir las marcas, MAGI moriria diciendo "solo 0 magos tuvieron exito" y nadie
-        # sabria por que: exactamente el sintoma ilegible que esta telemetria existe para
-        # eliminar. Sale por stderr porque es el unico canal que queda cuando no hay reporte.
+        # R18 has to SURVIVE the run's death, and this is the only place where it can. A run
+        # that dies below the 2-mage floor does NOT write ``magi-report.json`` -- and with it
+        # would go the only data that explains the death. The day a model starts omitting the
+        # markers, MAGI would die saying "only 0 mages succeeded" and nobody would know why:
+        # exactly the unreadable symptom this telemetry exists to eliminate. It goes to
+        # stderr because that is the only channel left when there is no report.
         if extraction_failures:
             causes = {agent: dict(counts) for agent, counts in sorted(extraction_failures.items())}
             print(
@@ -1620,10 +1622,10 @@ async def run_orchestrator(
     if retried:
         report["retried_agents"] = sorted(retried)
     if extraction_failures:
-        # R18. ADITIVO y FAIL-SOFT: ``consensus`` no lo lee, y un reporte sin este
-        # campo sigue siendo valido (NR3). Es lo unico que va a VER la deriva de un
-        # modelo en produccion -- donde la tasa real, con una muestra de 5+2, solo se
-        # puede conocer ahi.
+        # R18. ADDITIVE and FAIL-SOFT: ``consensus`` does not read it, and a report without
+        # this field is still valid (NR3). It is the only thing that will SEE a model's
+        # drift in production -- which, with a sample of 5+2, is the only place the real
+        # rate can be known.
         report["extraction_failures"] = {
             agent: dict(causes) for agent, causes in sorted(extraction_failures.items())
         }
@@ -1955,22 +1957,22 @@ def main() -> None:
         print("ERROR: 'claude' CLI not found in PATH", file=sys.stderr)
         sys.exit(1)
 
-    # --- Guard de arranque del contrato de prompts (R9, MS2) -------------------------
+    # --- Prompt-contract startup guard (R9, MS2) -------------------------------------
     #
-    # Corre ANTES de gastar un solo token, sobre el ``agents_dir`` que el run va a usar
-    # DE VERDAD (no una ruta fija). Cubre lo que ningun test nuestro puede ver: **la
-    # instalacion del usuario**. El test de anclaje corre en el repo del desarrollador;
-    # el bug de la copia rancia (``mklink /D`` degradando silenciosamente a copia en
-    # Windows) produce prompts viejos con parser nuevo en la maquina del usuario.
+    # Runs BEFORE spending a single token, against the ``agents_dir`` the run will ACTUALLY
+    # use (not a fixed path). It covers what no test of ours can see: **the user's
+    # installation**. The anchoring test runs in the developer's repo; the stale-copy bug
+    # (``mklink /D`` silently degrading to a copy on Windows) produces old prompts with a
+    # new parser on the user's machine.
     #
-    # Y cierra el ULTIMO camino de fabricacion: un usuario que "mejora" el prompt metiendo
-    # un ejemplo completo ENTRE las marcas permite que el modelo lo copie y su copia se
-    # acepte como veredicto -- ni el canario (no es el ejemplo shippeado) ni el test de
-    # anclaje (corre en NUESTRO repo) lo verian.
+    # And it closes the LAST fabrication path: a user who "improves" the prompt by putting a
+    # complete example BETWEEN the markers lets the model copy it and lets that copy be
+    # accepted as a verdict -- neither the canary (it is not the shipped example) nor the
+    # anchoring test (it runs in OUR repo) would see it.
     #
-    # ``PromptContractError`` es HERMANA de ``ValidationError``, no hija: un prompt rancio
-    # NO se arregla reintentando, asi que el guard de reintento no debe tragarsela. Aqui
-    # se captura y se aborta -- exactamente como ``OllamaConfigError``.
+    # ``PromptContractError`` is a SIBLING of ``ValidationError``, not a child: a stale
+    # prompt is NOT fixed by retrying, so the retry guard must not swallow it. Here it is
+    # caught and the run aborts -- exactly like ``OllamaConfigError``.
     try:
         AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
     except PromptContractError as exc:
