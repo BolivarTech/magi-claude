@@ -21,7 +21,13 @@ from ollama_config import ModelSpec
 from rotation_harness import FALLBACK, REQUIRED, TRIO, _rotation, _run, _valid
 from validate import ValidationError
 from prompt_guard import PromptContractError
-from verdict_markers import MissingVerdictMarkers
+from verdict_markers import (
+    AgentIdentityError,
+    AmbiguousVerdictMarkers,
+    EchoedExampleRejected,
+    MissingVerdictMarkers,
+    UnterminatedVerdictBlock,
+)
 
 
 async def _preflight_ok(config, prompt=""):
@@ -5096,18 +5102,36 @@ def test_retry_feedback_truncates_a_huge_error():
     assert "..." in out
 
 
-def test_retry_feedback_bound_holds_for_NON_ASCII_errors():
-    # Truncating CHARS does not bound TOKENS. Exercise the TRUE worst case: an emoji
-    # is 4 UTF-8 bytes, and a byte-level BPE emits up to one token per byte (C2-3).
+@pytest.mark.parametrize(
+    "error",
+    [
+        MissingVerdictMarkers("\U0001f525" * 10_000),
+        UnterminatedVerdictBlock("\U0001f525" * 10_000),
+        AmbiguousVerdictMarkers("\U0001f525" * 10_000),
+        EchoedExampleRejected("\U0001f525" * 10_000),
+        AgentIdentityError("\U0001f525" * 10_000),
+        ValidationError("\U0001f525" * 10_000),
+        json.JSONDecodeError("\U0001f525" * 10_000, "{", 0),
+    ],
+    ids=["missing", "unterminated", "ambiguous", "echoed", "identity", "schema", "invalid_json"],
+)
+def test_the_feedback_bound_holds_for_EVERY_cause(error):
+    """A bound the code does not impose is not a bound -- and it must hold for ALL SEVEN.
+
+    Truncating CHARS does not bound TOKENS: an emoji is 4 UTF-8 bytes, and a byte-level BPE
+    emits up to one token per byte. This was pinned for one template only (the schema one) while
+    the bound is DERIVED from the longest of seven -- so the six that were never exercised were
+    trusted, not tested (MAGI gate, Melchior). Each cause selects a different template, and each
+    template is a different length: the one that is longest today is not the one that will be
+    longest tomorrow.
+    """
     from model_context import MAX_RETRY_FEEDBACK_TOKENS
     from run_magi import _build_retry_prompt
-    from validate import ValidationError
 
-    err = ValidationError("\U0001f525" * 10_000)
-    block = _build_retry_prompt("", err)
+    block = _build_retry_prompt("", error)
+
     # UTF-8 byte count is a strict upper bound on tokens for any byte-level BPE.
-    worst_case_tokens = len(block.encode("utf-8"))
-    assert worst_case_tokens <= MAX_RETRY_FEEDBACK_TOKENS
+    assert len(block.encode("utf-8")) <= MAX_RETRY_FEEDBACK_TOKENS
 
 
 @pytest.mark.parametrize(
