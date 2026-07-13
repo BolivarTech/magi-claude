@@ -111,6 +111,12 @@ OK_TALLY_KEY = "ok"
 #: exact blindness this instrument exists to prevent.
 CAUSES: tuple[str, ...] = tuple(FEEDBACK_TEMPLATES)
 
+#: How many runs had to be measured through the BLIND fallback (no ``magi-report.json``,
+#: so only each mage's last attempt is on disk). It is carried INTO the artifact and it
+#: forbids a green verdict: ``make release-check`` reads the artifact and nothing else, so
+#: a warning printed during ``measure`` governs nothing by the time the gate runs.
+fallback_measured: int = 0
+
 #: Per-agent tally. Keys are :data:`OK_TALLY_KEY` or one of :data:`CAUSES` -- the same
 #: vocabulary ``magi-report.json``'s ``extraction_failures`` uses, so the two sources
 #: fold together without translation.
@@ -208,7 +214,9 @@ def uninstall_spy() -> None:
 
 def reset_tally() -> None:
     """Clear all accumulated counts. Call between independent measurement runs."""
+    global fallback_measured
     tally.clear()
+    fallback_measured = 0
 
 
 @contextmanager
@@ -281,8 +289,11 @@ def measure_run_report(report_path: Path) -> None:
     AFTER ``parse_agent_output`` has already returned).
 
     ``ok`` is counted once per mage that delivered a verdict in this run: a mage stops
-    attempting as soon as it succeeds, so ``ok + failures`` is exactly that seat's attempt
-    count for the run.
+    attempting as soon as it succeeds. So ``ok + failures`` is that seat's attempts **that
+    reached the parser** -- NOT its attempt count: a transport retry (5xx, timeout) never
+    reaches the sentinel and is deliberately not tallied here. A rate computed from these
+    numbers is therefore the marker-omission rate per PARSED attempt, which is the quantity
+    R17 is about; counting a timed-out attempt as a clean one would understate it.
 
     Args:
         report_path: Path to a run's ``magi-report.json``.
@@ -313,14 +324,24 @@ def measure_output_dir(output_dir: Path) -> None:
     Args:
         output_dir: The ``--output-dir`` a real ``run_magi.py`` invocation was given.
     """
+    global fallback_measured
+
     report_path = output_dir / RUN_REPORT_FILENAME
     if report_path.exists():
         measure_run_report(report_path)
         return
 
+    # The fallback is BLIND in two ways, so it is recorded and it forbids a green verdict
+    # (:func:`build_artifact`): the raws hold only each mage's LAST attempt, and an ``ok``
+    # here is signed by the sentinel plus ``json.loads`` alone -- ``load_agent_output``, the
+    # echo canary and the identity check never run, so it would count as clean a verdict the
+    # real run REJECTED. A stderr warning cannot carry that: ``check`` (what
+    # ``make release-check`` runs) reads the artifact and nothing else.
+    fallback_measured += 1
     print(
         f"WARNING: no {RUN_REPORT_FILENAME} in {output_dir} (the run died before writing "
-        "one) -- falling back to the raw files, which only hold each mage's LAST attempt",
+        "one) -- falling back to the raw files, which only hold each mage's LAST attempt. "
+        "This run CANNOT certify the release; the artifact will not be green.",
         file=sys.stderr,
     )
     for agent in AGENT_NAMES:
@@ -464,11 +485,17 @@ def build_artifact(
                 "from zero samples for a seat cannot certify anything"
             )
 
+    if fallback_measured:
+        # A blind measurement cannot certify anything -- not even when it saw no failure.
+        # This is the one place the instrument used to hand out a green it had not earned.
+        verdict = "red"
+
     return {
         "git_sha": _git_head_sha(repo_root),
         "prompts_sha256": _prompts_sha256(agents_dir),
         "measured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "runs": dict(runs),
+        "fallback_measured": fallback_measured,
         "per_seat": per_seat,
         "verdict": verdict,
     }
@@ -519,6 +546,15 @@ def check_release_gate(
             "stale marker-adherence report: agents/*.md changed since it was measured "
             f"(measured {report.get('prompts_sha256')!r}, current {current_prompts_sha!r}) "
             "-- re-run the measurement"
+        )
+
+    blind = report.get("fallback_measured", 0)
+    if blind:
+        return False, (
+            f"{blind} of the measured runs died before writing {RUN_REPORT_FILENAME}, so they "
+            "were measured through the BLIND fallback (each mage's LAST attempt only, with no "
+            "canary or identity check) -- that cannot certify a release. Fix the runs that "
+            "died and re-measure"
         )
 
     if report.get("verdict") != "green":

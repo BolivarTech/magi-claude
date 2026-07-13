@@ -241,7 +241,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-attempts",
         type=_max_attempts,
-        default=DEFAULT_MAX_ATTEMPTS,
+        # A None sentinel, not the default value: "was it passed?" and "what is it worth?"
+        # are different questions, and answering the first with ``!= DEFAULT`` gets it wrong
+        # for exactly one value -- the default -- so ``--ollama --max-attempts 2`` would be
+        # overridden by the TOML in silence, which is the polite lie the warning exists to
+        # kill. Resolved to DEFAULT_MAX_ATTEMPTS below, so callers still read an int.
+        default=None,
         help=(
             f"Attempts per model, {MIN_ATTEMPTS}..{MAX_ATTEMPTS_CAP} "
             f"(default: {DEFAULT_MAX_ATTEMPTS}). With --ollama, the TOML's "
@@ -307,7 +312,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "--model does not apply with --ollama; per-mage models are "
             "configured in magi-ollama.toml / MAGI_OLLAMA_MODEL_*."
         )
-    if args.ollama and args.max_attempts != DEFAULT_MAX_ATTEMPTS:
+    if args.ollama and args.max_attempts is not None:
         # R13: with --ollama the TOML wins. It used to win SILENTLY, which is a polite
         # lie: the user who passed the flag believes they configured something. Warn, do
         # not error -- the flag is legal, it is simply overridden.
@@ -316,6 +321,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "max_attempts_per_model in magi-ollama.toml (it governs the Ollama backend)",
             file=sys.stderr,
         )
+    if args.max_attempts is None:
+        args.max_attempts = DEFAULT_MAX_ATTEMPTS
     # INVARIANT: --model must stay None when --ollama is set. Do NOT collapse
     # this into `args.model or MODE_DEFAULT_MODELS[...]` — that would silently
     # re-enable `--ollama --model` and feed Ollama a Claude-shaped model name.
@@ -1292,8 +1299,17 @@ async def run_orchestrator(
         'degraded' and 'failed_agents' when < 3 agents succeed.
 
     Raises:
-        RuntimeError: If fewer than 2 agents succeed.
+        RuntimeError: If fewer than 2 agents succeed, or if ``max_attempts`` is < 1.
     """
+    # Validated HERE, at the entry point, not inside the per-agent coroutine: raised in
+    # there it would be captured by the ``gather`` and reported as "Only 0 agent(s)
+    # succeeded", burying its own cause. NOT an assert (``python -O`` strips those, and the
+    # attempt loop would then fall through to an UnboundLocalError on ``result``). The CLI
+    # cannot produce this -- ``_max_attempts`` enforces the range -- but ``run_orchestrator``
+    # is a public entry point with many direct callers.
+    if max_attempts < 1:
+        raise RuntimeError(f"max_attempts must be >= 1 (got {max_attempts})")
+
     # Back-compat (BDD-30): KEEP `model` so the ~40 existing call sites in
     # tests keep working untouched; derive agent_models from it when not
     # supplied. Values are ModelSpec now (launch_agent takes a spec); the
@@ -1377,13 +1393,6 @@ async def run_orchestrator(
             # instruccion, asi que un modelo que olvido las marcas recibe "te faltaron las
             # marcas" y no un mensaje generico de schema.
             attempt_prompt = prompt
-            if max_attempts < 1:
-                # NOT an assert: ``python -O`` strips asserts, and the loop below would
-                # then fall through to an UnboundLocalError on ``result``. The CLI cannot
-                # produce this (``_max_attempts`` enforces >= 1), but ``run_orchestrator``
-                # is a public entry point. The rotation path hardens the mirror case the
-                # same way -- one guard on each side, no silent asymmetry.
-                raise RuntimeError(f"max_attempts must be >= 1 (got {max_attempts})")
             for attempt in range(max_attempts):
                 try:
                     result = await launch_agent(

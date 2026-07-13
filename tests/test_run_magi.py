@@ -6473,6 +6473,47 @@ class TestMaxAttemptsFlag:
 
         assert capsys.readouterr().err == ""
 
+    def test_passing_the_DEFAULT_VALUE_explicitly_still_warns(self, capsys):
+        """*"Lo pasaste?"* y *"cuanto vale?"* son preguntas DISTINTAS.
+
+        Contestar la primera con ``!= DEFAULT`` la falla para exactamente un valor: el
+        default. Un usuario que escribe ``--ollama --max-attempts 2`` **paso el flag**, el
+        TOML se lo pisa igual (y su ``max_attempts_per_model`` puede no ser 2), y se
+        quedaba sin aviso -- la misma mentira educada, sobreviviendo en el unico hueco.
+        """
+        import run_magi
+
+        run_magi.parse_args(
+            [
+                "code-review",
+                "x.md",
+                "--ollama",
+                "--max-attempts",
+                str(run_magi.DEFAULT_MAX_ATTEMPTS),
+            ]
+        )
+
+        assert "max_attempts_per_model" in capsys.readouterr().err
+
+    @pytest.mark.asyncio
+    async def test_max_attempts_below_one_fails_with_ITS_OWN_cause(self, tmp_path):
+        """El guard vive en la ENTRADA, no dentro de la corrutina por-mago.
+
+        Dentro, el ``gather`` lo captura y el usuario lee *"Only 0 agent(s) succeeded"* --
+        el error entierra su propia causa.
+        """
+        from run_magi import run_orchestrator
+
+        with pytest.raises(RuntimeError, match="max_attempts must be >= 1"):
+            await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="x",
+                output_dir=str(tmp_path),
+                timeout=10,
+                show_status=False,
+                max_attempts=0,
+            )
+
 
 # ---------------------------------------------------------------------------
 # MS2 -- T9: telemetria de adherencia (R18)
