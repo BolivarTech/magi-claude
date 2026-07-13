@@ -14,6 +14,8 @@ lineage -- two mages of one lineage, a consensus that only LOOKS like three inde
 perspectives. So the validator reports and never rewrites.
 """
 
+import os
+
 import pytest
 
 import validate_magi_toml
@@ -210,8 +212,17 @@ def test_validator_warns_that_env_overrides_are_not_in_the_verdict(tmp_path, mon
 
 
 def test_validator_is_silent_about_the_environment_when_it_is_clean(tmp_path, monkeypatch, capsys):
-    """No overrides exported -> no warning. A guard that always fires teaches you to ignore it."""
-    monkeypatch.delenv("MAGI_OLLAMA_MODEL_CASPAR", raising=False)
+    """No overrides exported -> no warning. A guard that always fires teaches you to ignore it.
+
+    The environment must be CLEARED, not assumed clean: deleting one known var left the
+    test at the mercy of whatever the developer had exported (``MAGI_OLLAMA_HOST`` is a
+    perfectly ordinary thing to have), so it asserted "silent" on a machine where the tool
+    would rightly speak. That is the same non-hermeticity the validator itself was fixed
+    for -- in the test that guards it (finding: Balthasar, MAGI gate 2026-07-12).
+    """
+    for name in [key for key in os.environ if key.startswith("MAGI_OLLAMA_")]:
+        monkeypatch.delenv(name)
+
     path = tmp_path / "magi-ollama.toml"
     path.write_text(render_template(), encoding="utf-8")
     monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
