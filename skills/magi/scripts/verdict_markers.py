@@ -55,13 +55,14 @@ _STRIPPED_CATEGORIES = frozenset({"Cf", "Mn"})
 #: fail closed.
 _LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
-#: Opening fence: ``` or ~~~, with or without an info-string, with spaces around it.
-#: The info-string is accepted **permissively** (any token with no spaces) and NOT as an
-#: allow-list: a list **enumerates** what is permitted, so every language carrying a dot or
-#: a hash (``json5``, ``c#``, ``asp.net``) would be a future failure. Being permissive here
-#: is **free**: the fence is only stripped if the first **AND** the last line are fences,
-#: and what is inside **is decided by ``json.loads``**. Permissive where it does not matter,
-#: strict where it does (the markers).
+#: Opening fence: ``` or ~~~, with or without an info string. The info string is accepted
+#: PERMISSIVELY -- any text after the marker, spaces included (``json``, ``json schema``,
+#: ``json title="x"``). A whitelist would enumerate what is allowed, so every language with an
+#: odd character (``c#``, ``asp.net``) and every model that writes two words would be a future
+#: failure -- and each one costs a retry on a verdict that was never wrong (MAGI gate, Caspar,
+#: twice). Permissiveness is FREE here: the fence is stripped only when the FIRST and the LAST
+#: line are both fences, and what is inside is still decided by ``json.loads``.
+#: **Permissive where it does not matter, strict where it does (the markers).**
 _FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)[^`~]*$")
 
 #: The CLOSING fence tolerates an info string too, because models echo the opening one on the

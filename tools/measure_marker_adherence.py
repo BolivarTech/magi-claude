@@ -195,6 +195,14 @@ def _spy(self, text: str) -> str:  # type: ignore[no-untyped-def]
     except json.JSONDecodeError as exc:
         tally[_current_agent][retry_feedback_cause(exc)] += 1
         raise
+    except ValueError:
+        # A PLAIN ValueError, not a JSONDecodeError: ``json.loads`` raises one when a number
+        # exceeds ``int_max_str_digits``. The production parser maps it so the mage keeps its
+        # retry; the instrument must survive it for the same reason it survives a RecursionError
+        # -- an instrument that dies on a pathological completion leaves the release with no
+        # artifact at all (MAGI gate, Caspar).
+        tally[_current_agent][CAUSE_INVALID_JSON] += 1
+        raise
     except RecursionError:
         # CPython raises RecursionError, NOT JSONDecodeError, on deeply nested JSON -- the
         # production parser has guarded that since 4.0.6, and the spy must not be the one
@@ -283,18 +291,18 @@ def measure_raw_file(raw_path: Path, agent: str) -> None:
         with agent_context(agent):
             try:
                 _parse_agent_output(str(raw_path), str(parsed_path))
-            except RecursionError:
-                # Already tallied by ``_spy`` as invalid content. Caught HERE too, because the
-                # spy re-raises it and this was the only place left where it could escape --
-                # and an escape takes down the whole release measurement, leaving no artifact
-                # at all, which is the one outcome this instrument must never produce. The spy's
-                # comment promised the measurement carries on; this is what makes that true.
-                return
-            except (VerdictExtractionError, json.JSONDecodeError):
-                # Already tallied by ``_spy`` (VerdictExtractionError: marker omission
-                # / ambiguity; JSONDecodeError: invalid JSON inside the markers, or an
-                # unrecognised envelope shape that ``parse_agent_output`` remaps to
-                # JSONDecodeError). Either way this measurement run continues.
+            except (VerdictExtractionError, ValueError, RecursionError):
+                # ONE clause, because ``json.JSONDecodeError`` IS a ``ValueError`` and listing
+                # both invites the reader to think the second adds something. What each is:
+                # ``VerdictExtractionError`` -- the markers were missing, doubled or unterminated;
+                # ``ValueError`` -- the content between them did not decode (a syntax error, or a
+                # number over ``int_max_str_digits``, which raises a PLAIN ValueError);
+                # ``RecursionError`` -- it was nested too deep to decode at all.
+                #
+                # All of them were already TALLIED by ``_spy``, which re-raises; catching them
+                # here is what keeps the measurement going. An instrument that dies on one
+                # pathological completion leaves the release with NO artifact -- the single
+                # outcome it must never produce (MAGI gate, Balthasar and Caspar, two cycles).
                 return
 
 

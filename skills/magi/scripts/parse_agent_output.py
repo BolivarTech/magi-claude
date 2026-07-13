@@ -83,13 +83,17 @@ def _is_transport_envelope(data: dict[str, Any]) -> bool:
 def _extract_text(data: object) -> str:
     """Extract the meaningful text payload from a backend's raw output.
 
-    Supports every shape a backend can produce:
+    Handles the TRANSPORT shapes, and only those:
         - ``{"result": "..."}``                              (Claude CLI envelope)
         - ``{"content": [{"type": "text", "text": "..."}]}`` (Claude CLI envelope)
         - Plain string                                       (incl. fenced or
           prose-wrapped content, which reaches here as raw text when the file is
           not JSON at the top level — the Ollama path, 4.0.6)
-        - Bare 7-key verdict dict                            (Ollama, unwrapped)
+
+    A bare verdict dict is NOT among them any more: the caller routes every non-envelope
+    object to the raw text, so it arrives here as a string or not at all. The docstring said
+    otherwise until the MAGI gate caught it (Balthasar) -- and a docstring is what an IDE
+    shows first, so one that advertises a deleted branch is how it gets rebuilt.
 
     Args:
         data: A decoded Claude CLI envelope, or — since 4.0.6 — the raw model text
