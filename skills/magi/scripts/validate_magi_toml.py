@@ -15,13 +15,19 @@ assigns a silently incorrect lineage -- two mages of one lineage produce a conse
 that only LOOKS like three independent perspectives. Failing with an actionable message
 is strictly better than guessing.
 
+The verdict is about the FILE you pass -- nothing else. Neither the global
+``~/.claude/magi-ollama.toml`` nor the ``MAGI_OLLAMA_*`` environment overrides are
+applied, so the answer does not change with the shell you happen to be in. (Those
+overrides do apply to a real run, and they fail loudly there if invalid.)
+
 Usage:
     python skills/magi/scripts/validate_magi_toml.py [path]   # default: .claude/magi-ollama.toml
 
 Exit codes:
-    0: the config is valid for v5.
-    1: the config is invalid (the offending key is named).
-    2: CLI misuse (no such file).
+    0: the config is valid for v5 (the resolved trio is echoed, so you can see it was read).
+    1: the config is rejected -- unparseable TOML, a v4 schema entry, or a lineage that
+       breaks the one-lineage-one-mage invariant. The offending key is named.
+    2: CLI misuse -- the path is missing, is not a file, or cannot be read.
 """
 
 import argparse
