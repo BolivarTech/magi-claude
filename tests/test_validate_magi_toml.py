@@ -188,6 +188,38 @@ def test_validator_reports_an_unreadable_file_without_a_traceback(tmp_path, monk
     assert "Permission denied" in capsys.readouterr().err
 
 
+def test_validator_warns_that_env_overrides_are_not_in_the_verdict(tmp_path, monkeypatch, capsys):
+    """The echoed trio is what the FILE says -- say so when the environment disagrees.
+
+    The verdict is deliberately hermetic (a global config or an env var must not change
+    the answer about your file). But the OK output now prints a trio, which reads as a
+    claim about what MAGI will run -- and with ``MAGI_OLLAMA_MODEL_CASPAR`` exported, it
+    is not. Silence would make the tool's one moment of authority quietly wrong, so it
+    names the overrides it is NOT applying (finding: Caspar, MAGI gate 2026-07-12).
+    """
+    monkeypatch.setenv("MAGI_OLLAMA_MODEL_CASPAR", "some-other-model:cloud")
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(render_template(), encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+
+    assert validate_magi_toml.main() == 0
+
+    err = capsys.readouterr().err
+    assert "MAGI_OLLAMA_MODEL_CASPAR" in err
+    assert "not applied" in err
+
+
+def test_validator_is_silent_about_the_environment_when_it_is_clean(tmp_path, monkeypatch, capsys):
+    """No overrides exported -> no warning. A guard that always fires teaches you to ignore it."""
+    monkeypatch.delenv("MAGI_OLLAMA_MODEL_CASPAR", raising=False)
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(render_template(), encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+
+    assert validate_magi_toml.main() == 0
+    assert "MAGI_OLLAMA" not in capsys.readouterr().err
+
+
 def test_validator_reports_a_missing_path_as_cli_misuse(tmp_path, monkeypatch, capsys):
     """A missing file is CLI misuse (exit 2), pinned -- it must never be a silent OK.
 
