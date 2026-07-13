@@ -6204,3 +6204,119 @@ def test_write_report_file_cleans_temp_and_raises_on_failure(tmp_path, monkeypat
         _write_report_file("verdict", str(out))
     assert not out.exists(), "target untouched on failure"
     assert not list(tmp_path.glob("r.txt*.tmp")), "temp cleaned up on failure"
+
+
+# ---------------------------------------------------------------------------
+# MS2 -- canario anti-eco (R6), identidad del agente (R10), clasificacion (R14)
+# ---------------------------------------------------------------------------
+
+
+class TestEchoCanaryAndAgentIdentity:
+    """Los dos guards que corren DESPUES de que el schema valide."""
+
+    @staticmethod
+    def _marked(obj: dict) -> bytes:
+        return f"<MAGI_VERDICT>\n{json.dumps(obj)}\n</MAGI_VERDICT>".encode()
+
+    @staticmethod
+    def _verdict(**over):
+        base = {
+            "agent": "caspar",
+            "verdict": "reject",
+            "confidence": 0.9,
+            "summary": "un veredicto real",
+            "reasoning": "razonamiento real",
+            "findings": [],
+            "recommendation": "arregla X",
+        }
+        base.update(over)
+        return base
+
+    async def _launch(self, tmp_path, raw: bytes, agent: str = "caspar"):
+        import run_magi
+        from backend import AgentBackend
+
+        class _Fake(AgentBackend):
+            async def run(self, *a, **k):
+                return raw
+
+        (tmp_path / f"{agent}.md").write_text("SYS", encoding="utf-8")
+        return await run_magi.launch_agent(
+            agent, str(tmp_path), "P", str(tmp_path), 900, backend=_Fake()
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_verdict_passes_both_guards(self, tmp_path):
+        got = await self._launch(tmp_path, self._marked(self._verdict()))
+        assert got["verdict"] == "reject"
+
+    @pytest.mark.asyncio
+    async def test_the_ECHOED_example_is_rejected(self, tmp_path):
+        """R6: el ejemplo del system prompt, copiado, NO es un veredicto.
+
+        Es el ultimo cinturon: si el modelo copia el ejemplo de FUERA de las marcas y lo
+        envuelve el mismo, el canario lo caza por su huella dactilar.
+        """
+        from verdict_markers import ECHO_CANARY, EchoedExampleRejected
+
+        echo = self._verdict(**ECHO_CANARY)
+        with pytest.raises(EchoedExampleRejected):
+            await self._launch(tmp_path, self._marked(echo))
+
+    @pytest.mark.asyncio
+    async def test_a_verdict_claiming_ANOTHER_mage_is_rejected(self, tmp_path):
+        """R10: cierra la SUPLANTACION.
+
+        ``load_agent_output`` valida que ``agent`` este en el enum, pero **nadie** validaba
+        que fuera el mago que se lanzo. Un nombre duplicado mata el run entero; uno unico
+        pero equivocado mete el texto de un mago en el asiento de otro, y el consenso lo
+        cuenta como una perspectiva independiente **que nunca existio**.
+        """
+        from verdict_markers import AgentIdentityError
+
+        impostor = self._verdict(agent="melchior")
+        with pytest.raises(AgentIdentityError):
+            await self._launch(tmp_path, self._marked(impostor), agent="caspar")
+
+    @pytest.mark.asyncio
+    async def test_a_capitalised_agent_name_is_caught_UPSTREAM_by_the_schema(self, tmp_path):
+        """MEDIDO, no supuesto: ``validate.py`` ya rechaza "Caspar" en el ENUM.
+
+        Yo habia escrito la comparacion de identidad como *case-insensitive* asumiendo que
+        una mayuscula llegaria hasta ahi. **No llega**: el enum de ``load_agent_output``
+        corre ANTES y devuelve *"Unknown agent 'Caspar'. Must be one of [...]"* -- que es
+        un ``ValidationError``, o sea **reintento con un feedback perfectamente accionable**.
+
+        El ``casefold()`` del guard de identidad se conserva como cinturon (cuesta cero y
+        sigue siendo correcto si el enum se relajara), pero **hoy es inalcanzable**, y eso
+        se dice aqui en vez de fingir que lo prueba.
+        """
+        from validate import ValidationError
+
+        with pytest.raises(ValidationError, match="Unknown agent"):
+            await self._launch(tmp_path, self._marked(self._verdict(agent="Caspar")))
+
+
+@pytest.mark.parametrize(
+    "exc_name",
+    [
+        "MissingVerdictMarkers",
+        "UnterminatedVerdictBlock",
+        "AmbiguousVerdictMarkers",
+        "EchoedExampleRejected",
+        "AgentIdentityError",
+    ],
+)
+def test_every_extraction_failure_is_classified_as_SCHEMA(exc_name):
+    """R14: el modelo RESPONDIO -- lo que no pudo fue con el contrato.
+
+    Por tanto el fallo es **local al mago**: lleva feedback correctivo y, al agotar los
+    intentos, ROTA (Ollama) o muere (Claude). **No condena el linaje run-wide** (eso es
+    para transporte). Sale "gratis" porque los errores heredan de ``ValidationError``... y
+    "sale gratis" es exactamente la clase de suposicion que este proyecto ya pago cara.
+    """
+    import run_magi
+    import verdict_markers
+
+    exc = getattr(verdict_markers, exc_name)("x")
+    assert run_magi._classify(exc) == run_magi._FAIL_SCHEMA
