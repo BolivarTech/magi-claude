@@ -42,7 +42,6 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from model_context import (  # noqa: E402
-    MAX_ERROR_CHARS,
     ProbeTokensFn,
     compute_required_tokens,
     make_probe,
@@ -94,6 +93,11 @@ from review_context import enrich_code_review_context, resolve_diff  # noqa: E40
 from cost import aggregate_cost  # noqa: E402
 from input_size import WARN_INPUT_TOKENS, check_input_size, estimate_tokens  # noqa: E402
 from finding_validation import parse_diff_ranges, validate_findings  # noqa: E402
+from retry_feedback import (  # noqa: E402
+    FEEDBACK_TEMPLATES,
+    MAX_ERROR_CHARS,
+    _retry_feedback_cause,
+)
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
 from verdict_markers import (  # noqa: E402
     ECHO_CANARY,
@@ -500,56 +504,57 @@ def _classify(exc: BaseException) -> str:
     return _FAIL_UNEXPECTED
 
 
+#: The retry causes that map to a KNOWN, distinct corrective instruction. Every
+#: :class:`verdict_markers.VerdictExtractionError` subclass gets its own entry, plus
+#: the two causes ``verdict_markers`` does not raise: a JSON-decode failure INSIDE an
+#: otherwise well-formed block, and the generic 7-key schema contract.
+
+
 def _build_retry_prompt(
     original_prompt: str,
     error: ValidationError | json.JSONDecodeError,
     *,
     api_key: str | None = None,
 ) -> str:
-    """Return the retry prompt with corrective feedback appended.
+    """Return the retry prompt with CAUSE-SPECIFIC corrective feedback appended.
 
-    When :func:`launch_agent` raises :class:`ValidationError` (schema
-    fail) or :class:`json.JSONDecodeError` (output is not parseable JSON)
-    on the first attempt, :func:`run_orchestrator` calls this helper to
-    build the replacement prompt for the single retry. The original
-    user prompt is preserved verbatim so the agent's task is unchanged;
-    the parser/validator error message is appended so the model can
-    self-correct the specific defect — a missing key, a stray comma, a
-    truncated output, an unbalanced brace, etc. The envelope delimiter
-    ``---RETRY-FEEDBACK---`` is intentionally distinct from user input
-    so the model can identify the corrective block even if the original
-    prompt already contains arbitrary markdown.
+    When :func:`launch_agent` raises a schema-scoped exception (a
+    :class:`ValidationError` -- including every :mod:`verdict_markers` extraction
+    failure -- or a :class:`json.JSONDecodeError`) on an attempt, :func:`_attempt_model`
+    calls this helper to build the replacement prompt for the retry. The original
+    user prompt is preserved verbatim so the agent's task is unchanged; the
+    template picked by :func:`_retry_feedback_cause` names the SPECIFIC defect --
+    missing markers, an unterminated block, more than one block, a copied example,
+    a wrong agent identity, undecodable JSON, or a missing schema key -- so the
+    model spends its one retry on the instruction that actually applies. Handing a
+    model that emitted NO markers the "emit exactly one block" instruction (the old,
+    single-template behaviour) wastes the retry on a FALSE diagnosis and the mage
+    dies. The envelope delimiter ``---RETRY-FEEDBACK---`` is intentionally distinct
+    from user input so the model can identify the corrective block even if the
+    original prompt already contains arbitrary markdown.
 
     Args:
-        original_prompt: The exact prompt sent on the first attempt.
-        error: The exception that triggered the retry. Currently either
-            :class:`ValidationError` (schema mismatch) or
-            :class:`json.JSONDecodeError` (output not parseable as JSON).
+        original_prompt: The exact prompt sent on the failed attempt.
+        error: The exception that triggered the retry. A :class:`ValidationError`
+            (schema mismatch, or any :mod:`verdict_markers` extraction failure) or
+            a :class:`json.JSONDecodeError` (content between the markers is not
+            parseable JSON).
         api_key: The Ollama api_key, if any. The error is REDACTED against it
             before being embedded -- the retry prompt is written to
             ``{agent}.prompt.txt``, and NR3b requires the key to appear on no
-            surface (MAG gate, Caspar): the error is redacted at every other
+            surface (MAGI gate, Caspar): the error is redacted at every other
             boundary, so this one must not be the exception.
 
     Returns:
         A new prompt string that concatenates the original prompt with a
-        feedback block describing the failure and restating the schema
-        contract.
+        cause-specific feedback block.
     """
     detail = redact_secrets(str(error), api_key)
     if len(detail) > MAX_ERROR_CHARS:
         detail = detail[:MAX_ERROR_CHARS] + "..."
-    return (
-        f"{original_prompt}\n\n"
-        f"---RETRY-FEEDBACK---\n"
-        f"Your previous response was rejected by the parsing pipeline:\n"
-        f"{detail}\n\n"
-        f"Re-emit your response as a complete, syntactically valid JSON "
-        f"object containing ALL seven required top-level keys: agent, "
-        f"verdict, confidence, summary, reasoning, findings, "
-        f"recommendation. Do not omit any key, do not truncate, do not "
-        f"emit anything outside the JSON object."
-    )
+    cause = _retry_feedback_cause(error)
+    feedback = FEEDBACK_TEMPLATES[cause].format(error=detail)
+    return f"{original_prompt}\n\n{feedback}"
 
 
 @dataclass(frozen=True)

@@ -86,7 +86,6 @@ _KNOWN_TOP_KEYS = {
     "base_url",
     "api_key",
     "models",
-    "structured",
     "fallback",
     "max_attempts_per_model",
     "max_rotations",
@@ -112,7 +111,6 @@ class OllamaConfig:
         base_url: Base URL of the OpenAI-compatible endpoint.
         api_key: Bearer token for authentication, or None for no auth.
         models: Mapping of mage name to its :class:`ModelSpec` (tag + lineage).
-        structured: Output structure mode ("schema" | "object" | "off").
         fallback: Ordered fallback specs (strong->weak); () disables rotation (R4).
         max_attempts_per_model: Attempts per active model before rotating (R1).
         max_rotations: Max rotations per mage; 0 disables rotation (R6/R17).
@@ -128,7 +126,6 @@ class OllamaConfig:
     base_url: str
     api_key: str | None
     models: Mapping[str, ModelSpec]
-    structured: str = "schema"  # "schema" | "object" | "off" (R16)
     fallback: Sequence[ModelSpec] = ()
     max_attempts_per_model: int = DEFAULT_MAX_ATTEMPTS_PER_MODEL
     max_rotations: int = DEFAULT_MAX_ROTATIONS
@@ -611,11 +608,6 @@ def resolve_config(
     else:
         api_key = None
 
-    # structured mode (R16)
-    structured = (
-        env.get("MAGI_OLLAMA_STRUCTURED") or r.get("structured") or g.get("structured") or "schema"
-    )
-
     # models per mage (presence-based; per-key fallback to DEFAULT_MODELS).
     # Repo/global entries are now tables parsed into ModelSpec (R3, BREAKING);
     # a bare string raises the migration error. An env MODEL_* override forces
@@ -658,7 +650,6 @@ def resolve_config(
         base_url=base_url,
         api_key=api_key,
         models=models,
-        structured=structured,
         fallback=fallback,
         **scalars,
     )

@@ -13,7 +13,6 @@ import urllib.error
 import urllib.request
 from typing import Any, cast  # mypy strict: used by dict[str, Any] annotations below
 
-from agent_schema import AGENT_OUTPUT_JSON_SCHEMA
 from backend import AgentBackend
 from ollama_config import OllamaConfig
 
@@ -31,34 +30,18 @@ TRANSPORT_HTTP_PATTERN = r"HTTP \d|at chat-time"
 TRANSPORT_CONNECTION_MARKERS = ("Cannot reach Ollama",)
 
 
-class _ResponseFormatRejected(Exception):
-    """Internal signal: server returned 400 rejecting response_format -> R15 downgrade."""
-
-
 class OllamaBackend(AgentBackend):
     """Runs an agent via POST {base_url}/chat/completions (no new deps)."""
 
     def __init__(self, config: OllamaConfig) -> None:
         self._config = config
 
-    def _response_format(self) -> dict[str, Any] | None:
-        # R16: structured ∈ {"schema","object","off"}.
-        if self._config.structured == "off":
-            return None
-        if self._config.structured == "object":
-            return {"type": "json_object"}
-        return {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "magi_agent_output",
-                "strict": False,  # R7/F-A: portability over strict enforcement
-                "schema": AGENT_OUTPUT_JSON_SCHEMA,
-            },
-        }
-
-    def _build_request(
-        self, system_prompt: str, prompt: str, model: str, *, with_format: bool = True
-    ) -> urllib.request.Request:
+    def _build_request(self, system_prompt: str, prompt: str, model: str) -> urllib.request.Request:
+        # MS2 (R7): no ``response_format`` on the wire. A model constrained to a raw
+        # JSON object cannot ALSO emit the ``<MAGI_VERDICT>`` sentinel markers -- the
+        # two are mutually exclusive. json_schema also never guaranteed prose
+        # suppression in the first place (glm-5.2 fenced its output while
+        # response_format was active), so it bought nothing the sentinel needs.
         body: dict[str, Any] = {
             "model": model,
             "messages": [
@@ -67,9 +50,6 @@ class OllamaBackend(AgentBackend):
             ],
             "stream": False,
         }
-        rf = self._response_format() if with_format else None
-        if rf is not None:
-            body["response_format"] = rf
         headers = {"Content-Type": "application/json"}
         if self._config.api_key:
             headers["Authorization"] = f"Bearer {self._config.api_key}"
@@ -96,12 +76,6 @@ class OllamaBackend(AgentBackend):
         except urllib.error.HTTPError as exc:
             # exc.fp is single-consumption (Caspar): read the body ONCE up front.
             detail = exc.read().decode("utf-8", "replace") if exc.fp else ""
-            low = detail.lower()
-            # R15 downgrade trigger: 400 rejecting response_format/json_schema.
-            # Trigger only on the specific field tokens — NOT bare "schema"
-            # (Caspar ciclo 3: bare "schema" over-matches unrelated 400s).
-            if exc.code == 400 and ("response_format" in low or "json_schema" in low):
-                raise _ResponseFormatRejected() from None
             if exc.code == 404:
                 raise RuntimeError(
                     self._redact(
@@ -139,8 +113,9 @@ class OllamaBackend(AgentBackend):
             output_dir: Directory for debug artifacts (unused; present for ABC compat).
 
         Returns:
-            Raw UTF-8 bytes of ``choices[0].message.content`` — the JSON verdict
-            string produced by the model, ready for ``parse_agent_output``.
+            Raw UTF-8 bytes of ``choices[0].message.content`` verbatim (may carry
+            the ``<MAGI_VERDICT>``/``</MAGI_VERDICT>`` sentinel markers, prose, or
+            a bare JSON verdict), ready for ``parse_agent_output``.
 
         Raises:
             TimeoutError: When the HTTP request exceeds *timeout* seconds.
@@ -150,13 +125,7 @@ class OllamaBackend(AgentBackend):
         with open(system_prompt_path, encoding="utf-8") as f:
             system_prompt = f.read()
         req = self._build_request(system_prompt, prompt, model)
-        try:
-            body = await asyncio.to_thread(self._call, req, timeout)
-        except _ResponseFormatRejected:
-            # R15 single-shot downgrade: retry once WITHOUT response_format; the
-            # backstop parser/retry enforces the 7-key contract from the content.
-            req2 = self._build_request(system_prompt, prompt, model, with_format=False)
-            body = await asyncio.to_thread(self._call, req2, timeout)
+        body = await asyncio.to_thread(self._call, req, timeout)
         try:
             envelope = json.loads(body)
             content = envelope["choices"][0]["message"]["content"]

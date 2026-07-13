@@ -248,14 +248,13 @@ def _default_probe(config: OllamaConfig) -> ProbeFn:
     return _post
 
 
-MAX_ERROR_CHARS = 400
-#: Fixed block ~355 chars (~90 tok) + 400 error chars priced at the TRUE worst ratio.
-#: That ratio is 4 TOKENS PER CHARACTER, not 1 and not 3: an EMOJI is 4 UTF-8 bytes,
-#: and a byte-level BPE that fails to merge them emits one token per byte. This bound
-#: has now been wrong twice (1 tok/char, then 3) -- each time by assuming a comfortable
-#: ratio instead of the worst one that actually exists. 400 * 4 + 90 + reserve = 2048.
-#: Bounding CHARS does not bound TOKENS.
-MAX_RETRY_FEEDBACK_TOKENS = 2048
+#: La cota del bloque de feedback la DERIVA ``retry_feedback`` de las plantillas reales.
+#: Hardcodearla aqui era una bomba: si una plantilla crece, este guard seguiria
+#: reservando el valor viejo -> infra-reserva -> TRUNCAMIENTO SILENCIOSO (el fallo que
+#: R5b existe para prevenir). Una sola fuente lo hace imposible.
+from retry_feedback import (  # noqa: E402
+    MAX_RETRY_FEEDBACK_TOKENS as MAX_RETRY_FEEDBACK_TOKENS,  # re-export explicito
+)
 
 #: Percent-to-fraction base for the input-margin sizing (no bare ``100`` in the body).
 #: ``(_PERCENT + input_margin_pct) / _PERCENT`` == ``1 + margin%``.
