@@ -47,6 +47,14 @@ _REQUIRED_KEYS = frozenset(
     }
 )
 
+#: Alias **publico** de :data:`_REQUIRED_KEYS`, para ``prompt_guard`` (R9b, MS2).
+#:
+#: Cambio **puramente aditivo**: no altera ni una linea de comportamiento. Las
+#: alternativas eran peores -- importar un privado cruzando modulos (que ``ruff`` marca,
+#: y con razon), o **duplicar las 7 claves**, lo que romperia el invariante de **fuente
+#: unica** del contrato.
+REQUIRED_KEYS = _REQUIRED_KEYS
+
 _REQUIRED_FINDING_KEYS = frozenset({"severity", "title", "detail"})
 #: Upper bound (bytes) for any on-disk input MAGI will ingest — user prompts,
 #: Claude CLI outputs, and agent JSON files. Centralised here so every module
