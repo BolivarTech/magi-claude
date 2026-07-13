@@ -740,6 +740,7 @@ async def _attempt_model(
     env: LaunchEnv,
     prompt: str,
     on_retry: Callable[[], None],
+    on_extraction_failure: Callable[[ValidationError | json.JSONDecodeError], None],
 ) -> dict[str, Any]:
     """Run ONE model until it succeeds or spends its attempt budget.
 
@@ -759,6 +760,10 @@ async def _attempt_model(
         env: Launch environment (agents dir, output dir, timeout, backend, api key).
         prompt: The original user prompt.
         on_retry: Called once per retry, for the "retrying" display state.
+        on_extraction_failure: Called once per SCHEMA failure (R18 adherence telemetry),
+            including the last one -- the attempt that kills the model is a data point
+            like any other. Injected, not read from a closure, for the same reason
+            ``on_retry`` is: this loop must not know what a report or a display is.
 
     Returns:
         The validated agent output.
@@ -796,14 +801,21 @@ async def _attempt_model(
                 # behind a degraded run (Balthasar, Checkpoint 2). Fail loud.
                 raise
             last = exc
-            if attempt + 1 >= ctx.config.max_attempts_per_model:
-                break
             # isinstance (not ``_classify(exc) == _FAIL_SCHEMA``) so mypy narrows exc to
-            # the type _build_retry_prompt accepts -- the two are equivalent by
-            # construction (_classify returns schema iff it is one of these).
+            # the type _build_retry_prompt and on_extraction_failure accept -- the two are
+            # equivalent by construction (_classify returns schema iff it is one of these).
             if isinstance(exc, (ValidationError, json.JSONDecodeError)):
+                # R18: tally BEFORE the budget check. The attempt that EXHAUSTS the model
+                # is exactly the one a marker-adherence gate must see; counting only the
+                # attempts that got retried reports a rate that is systematically
+                # optimistic -- the instrument would be blind to the failures that matter.
+                on_extraction_failure(exc)
+                if attempt + 1 >= ctx.config.max_attempts_per_model:
+                    break
                 # the model needs correcting; redact the api_key from the embedded error
                 attempt_prompt = _build_retry_prompt(prompt, exc, api_key=env.api_key)
+            elif attempt + 1 >= ctx.config.max_attempts_per_model:
+                break
             else:
                 attempt_prompt = prompt  # nothing to correct
                 await asyncio.sleep(ctx.config.retry_backoff_seconds)
@@ -1408,11 +1420,23 @@ async def run_orchestrator(
             retried.add(name)
             _safe_display_update(display, name, "retrying", log_gate)
 
+        def on_extraction_failure(err: ValidationError | json.JSONDecodeError) -> None:
+            """Tally a schema failure of THIS mage into the run's adherence telemetry (R18).
+
+            The rotation path is the one R18 exists for: a model that starts omitting the
+            markers shows up here as a cause, instead of as an unreadable "MAGI is slow
+            and rotates a lot". The mage's seat is what is counted -- a rotated model's
+            failures belong to the same seat.
+            """
+            _record_extraction_failure(extraction_failures, name, err)
+
         _safe_display_update(display, name, "running", log_gate)
         async with ctx.registry.agent_slot(name, state) as slot:
             while True:
                 try:
-                    result = await _attempt_model(name, spec, ctx, env, prompt, on_retry)
+                    result = await _attempt_model(
+                        name, spec, ctx, env, prompt, on_retry, on_extraction_failure
+                    )
                 except _AttemptsExhausted as exc:
                     # The model spent its budget. Route the failure by scope (schema
                     # local / transport run-wide) then propose the next model.
