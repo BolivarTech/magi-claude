@@ -11,11 +11,21 @@ from between two marker lines instead of scanning the whole response for whateve
 emit the markers -- and that has to be MEASURED before it ships, not discovered in
 production.
 
-This tool drives *N* real MAGI runs over real code bundles and INSTRUMENTS THE REAL
-PARSER: it wraps :meth:`verdict_markers.VerdictSentinel.extract` and tallies the
-exception TYPE it raises. It never reimplements the sentinel's matching rules --
-reimplementing them would measure a COPY of the parser, not the code that actually ships
-and runs in production.
+This tool drives *N* real MAGI runs over real code bundles and reads back **the run's own
+adherence tally** (``extraction_failures`` in ``magi-report.json``, R18) -- the count each
+run keeps, per ATTEMPT, at the point where it classifies the failure.
+
+That indirection is the whole design, and the obvious alternative is a trap: re-parsing
+each mage's ``{agent}.raw.json`` cannot see a marker omission that the retry then
+recovered, because ``launch_agent`` rewrites that file on every attempt, so only the LAST
+one survives on disk. An instrument blind to the recovered omissions reports a rate that
+is systematically optimistic -- and it would have read GREEN on exactly the drift this
+gate exists to catch.
+
+The raw-file path survives as a FALLBACK for a run that died before writing a report, and
+it still INSTRUMENTS THE REAL PARSER (it wraps :meth:`verdict_markers.VerdictSentinel.extract`
+rather than reimplementing the sentinel's matching rules -- reimplementing them would
+measure a COPY of the parser, not the code that ships).
 
 Why this lives in ``tools/`` and not ``skills/magi/scripts/`` (the plugin that ships to
 users) or ``scripts/`` (this project's gitignored, per-developer tooling): ``make
@@ -70,14 +80,9 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from parse_agent_output import parse_agent_output as _parse_agent_output  # noqa: E402
+from retry_feedback import FEEDBACK_TEMPLATES, retry_feedback_cause  # noqa: E402
 from run_magi import AGENTS  # noqa: E402
-from verdict_markers import (  # noqa: E402
-    AmbiguousVerdictMarkers,
-    MissingVerdictMarkers,
-    UnterminatedVerdictBlock,
-    VerdictExtractionError,
-    VerdictSentinel,
-)
+from verdict_markers import VerdictExtractionError, VerdictSentinel  # noqa: E402
 
 #: The three mage seats, in a fixed order. Single source of truth for BOTH the
 #: measurement tally and the ``prompts_sha256`` concatenation below (NR6b DRY):
@@ -92,26 +97,23 @@ DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_REPORT_FILENAME = "marker-adherence-report.json"
 DEFAULT_MODE = "code-review"
 
-#: The two tally keys ``_spy`` uses that are NOT a :class:`VerdictExtractionError`
-#: subclass name.
+#: The report a real ``run_magi.py`` invocation writes into its ``--output-dir``. It
+#: carries ``extraction_failures`` -- the run's OWN per-attempt tally (R18), which is the
+#: only place a marker omission that a retry later recovered is still visible.
+RUN_REPORT_FILENAME = "magi-report.json"
+
+#: The one tally key that is not a failure cause.
 OK_TALLY_KEY = "ok"
-INVALID_JSON_TALLY_KEY = "InvalidJSON"
 
-#: Maps a tally key (an exception class name, or :data:`INVALID_JSON_TALLY_KEY`) to the
-#: snake_case cause label used in the artifact's ``per_seat`` section -- the same
-#: vocabulary ``magi-report.json``'s ``extraction_failures`` field already uses
-#: (``retry_feedback._retry_feedback_cause``), so a human reading both never has to
-#: mentally translate between two names for the same failure.
-_CAUSE_LABELS: dict[str, str] = {
-    MissingVerdictMarkers.__name__: "missing_markers",
-    UnterminatedVerdictBlock.__name__: "unterminated_block",
-    AmbiguousVerdictMarkers.__name__: "ambiguous_markers",
-    INVALID_JSON_TALLY_KEY: "invalid_json",
-}
+#: The failure vocabulary, taken from the retry contract (R12) rather than re-declared
+#: here. Enumerating causes locally would mean a cause added to the contract has no
+#: column in the artifact -- and a real failure would be reported as a zero, which is the
+#: exact blindness this instrument exists to prevent.
+CAUSES: tuple[str, ...] = tuple(FEEDBACK_TEMPLATES)
 
-#: Per-agent tally of the sentinel's REAL behaviour, filled in by :func:`_spy`. Keys are
-#: ``OK_TALLY_KEY``, ``INVALID_JSON_TALLY_KEY``, or a :class:`VerdictExtractionError`
-#: subclass's ``__name__``.
+#: Per-agent tally. Keys are :data:`OK_TALLY_KEY` or one of :data:`CAUSES` -- the same
+#: vocabulary ``magi-report.json``'s ``extraction_failures`` uses, so the two sources
+#: fold together without translation.
 tally: "collections.defaultdict[str, collections.Counter[str]]" = collections.defaultdict(
     collections.Counter
 )
@@ -175,13 +177,13 @@ def _spy(self, text: str) -> str:  # type: ignore[no-untyped-def]
     try:
         block = _real_extract(self, text)
     except VerdictExtractionError as exc:
-        tally[_current_agent][type(exc).__name__] += 1
+        tally[_current_agent][retry_feedback_cause(exc)] += 1
         raise
 
     try:
         json.loads(block)
-    except json.JSONDecodeError:
-        tally[_current_agent][INVALID_JSON_TALLY_KEY] += 1
+    except json.JSONDecodeError as exc:
+        tally[_current_agent][retry_feedback_cause(exc)] += 1
         raise
 
     tally[_current_agent][OK_TALLY_KEY] += 1
@@ -261,16 +263,66 @@ def measure_raw_file(raw_path: Path, agent: str) -> None:
                 return
 
 
-def measure_output_dir(output_dir: Path) -> None:
-    """Measure every mage's raw completion found in one completed run's output dir.
+def measure_run_report(report_path: Path) -> None:
+    """Fold ONE run's own adherence tally (``extraction_failures``, R18) into :data:`tally`.
 
-    A mage that died before ever producing a raw file (e.g. the preflight rejected the
-    whole run) simply contributes no data point for that seat in that run -- silently
-    skipped, not fabricated as a zero.
+    **This is the source of truth, and the raw files are not.** ``launch_agent`` writes
+    ``{agent}.raw.json`` in ``"wb"`` on EVERY attempt and every rotation, so on disk only
+    the LAST attempt survives. A mage that omitted the markers on attempt 1 and got it
+    right on the retry therefore leaves a spotless raw behind: re-parsing it would tally
+    ``ok`` and the artifact would read green with a real omission inside it. With
+    ``max_attempts = 2`` and a true 5% per-attempt omission rate, such an artifact would
+    report about 0.25% -- systematically optimistic about the single number the milestone's
+    success criterion hangs on.
+
+    The run's own tally does not have that blind spot: it is written where the failure is
+    classified, once per ATTEMPT, and it also carries the two causes the spy structurally
+    cannot see (``echoed_example`` and ``agent_identity`` are raised by ``launch_agent``
+    AFTER ``parse_agent_output`` has already returned).
+
+    ``ok`` is counted once per mage that delivered a verdict in this run: a mage stops
+    attempting as soon as it succeeds, so ``ok + failures`` is exactly that seat's attempt
+    count for the run.
+
+    Args:
+        report_path: Path to a run's ``magi-report.json``.
+
+    Raises:
+        json.JSONDecodeError: If the report is not valid JSON -- an infrastructure problem
+            with the sample, never silently swallowed into a zero.
+    """
+    report: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
+    failures: Mapping[str, Mapping[str, int]] = report.get("extraction_failures", {})
+    delivered = {agent.get("agent") for agent in report.get("agents", [])}
+
+    for agent in AGENT_NAMES:
+        for cause, count in failures.get(agent, {}).items():
+            tally[agent][cause] += count
+        if agent in delivered:
+            tally[agent][OK_TALLY_KEY] += 1
+
+
+def measure_output_dir(output_dir: Path) -> None:
+    """Measure one completed run: its own tally when it wrote a report, its raws otherwise.
+
+    A run that dies below the two-agent floor never reaches the report-writing step. The
+    raw files its mages did produce are still real samples, so they are measured through
+    the production parser -- what is never done is fabricating a zero for a seat that
+    produced no data at all (:func:`build_artifact` raises on that).
 
     Args:
         output_dir: The ``--output-dir`` a real ``run_magi.py`` invocation was given.
     """
+    report_path = output_dir / RUN_REPORT_FILENAME
+    if report_path.exists():
+        measure_run_report(report_path)
+        return
+
+    print(
+        f"WARNING: no {RUN_REPORT_FILENAME} in {output_dir} (the run died before writing "
+        "one) -- falling back to the raw files, which only hold each mage's LAST attempt",
+        file=sys.stderr,
+    )
     for agent in AGENT_NAMES:
         raw_path = output_dir / f"{agent}.raw.json"
         if raw_path.exists():
@@ -386,7 +438,7 @@ def build_artifact(
     Returns:
         A JSON-serialisable dict matching the artifact schema: ``git_sha``,
         ``prompts_sha256``, ``measured_at``, ``runs``, ``per_seat`` (per agent: ``ok``
-        plus each cause in :data:`_CAUSE_LABELS`), and ``verdict`` -- ``"green"`` only
+        plus each cause in :data:`CAUSES`), and ``verdict`` -- ``"green"`` only
         if every seat has zero extraction failures, ``"red"`` otherwise.
 
     Raises:
@@ -399,14 +451,14 @@ def build_artifact(
     for agent in AGENT_NAMES:
         counts = tally.get(agent, collections.Counter())
         seat: dict[str, int] = {OK_TALLY_KEY: counts.get(OK_TALLY_KEY, 0)}
-        for tally_key, label in _CAUSE_LABELS.items():
-            count = counts.get(tally_key, 0)
-            seat[label] = count
+        for cause in CAUSES:
+            count = counts.get(cause, 0)
+            seat[cause] = count
             if count:
                 verdict = "red"
         per_seat[agent] = seat
 
-        if seat[OK_TALLY_KEY] == 0 and all(seat[label] == 0 for label in _CAUSE_LABELS.values()):
+        if seat[OK_TALLY_KEY] == 0 and all(seat[cause] == 0 for cause in CAUSES):
             raise RuntimeError(
                 f"no raw output was measured for agent {agent!r} -- an artifact built "
                 "from zero samples for a seat cannot certify anything"

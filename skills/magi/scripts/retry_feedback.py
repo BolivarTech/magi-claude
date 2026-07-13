@@ -69,7 +69,7 @@ def _feedback_template(intro: str, corrective: str) -> str:
 
 
 #: One entry per verdict-extraction/schema failure cause -- picked by
-#: :func:`_retry_feedback_cause` from ``type(error)``, NEVER from the error's message
+#: :func:`retry_feedback_cause` from ``type(error)``, NEVER from the error's message
 #: text. Mixing up the instruction is not cosmetic: telling a model that emitted NO
 #: markers to "emit exactly one block" is a FALSE instruction that burns the retry
 #: and kills the mage for a bug in the algorithm that exists to save it (found as
@@ -142,7 +142,7 @@ MAX_RETRY_FEEDBACK_TOKENS = (
 )
 
 
-def _retry_feedback_cause(error: ValidationError | json.JSONDecodeError) -> str:
+def retry_feedback_cause(error: ValidationError | json.JSONDecodeError) -> str:
     """Pick the :data:`FEEDBACK_TEMPLATES` key for *error*, by its TYPE alone.
 
     Order matters: every verdict-marker exception is a :class:`ValidationError`

@@ -98,7 +98,7 @@ from prompt_guard import AgentPromptGuard, PromptContractError  # noqa: E402
 from retry_feedback import (  # noqa: E402
     FEEDBACK_TEMPLATES,
     MAX_ERROR_CHARS,
-    _retry_feedback_cause,
+    retry_feedback_cause,
 )
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
 from verdict_markers import (  # noqa: E402
@@ -574,7 +574,7 @@ def _build_retry_prompt(
     failure -- or a :class:`json.JSONDecodeError`) on an attempt, :func:`_attempt_model`
     calls this helper to build the replacement prompt for the retry. The original
     user prompt is preserved verbatim so the agent's task is unchanged; the
-    template picked by :func:`_retry_feedback_cause` names the SPECIFIC defect --
+    template picked by :func:`retry_feedback_cause` names the SPECIFIC defect --
     missing markers, an unterminated block, more than one block, a copied example,
     a wrong agent identity, undecodable JSON, or a missing schema key -- so the
     model spends its one retry on the instruction that actually applies. Handing a
@@ -603,7 +603,7 @@ def _build_retry_prompt(
     detail = redact_secrets(str(error), api_key)
     if len(detail) > MAX_ERROR_CHARS:
         detail = detail[:MAX_ERROR_CHARS] + "..."
-    cause = _retry_feedback_cause(error)
+    cause = retry_feedback_cause(error)
     feedback = FEEDBACK_TEMPLATES[cause].format(error=detail)
     return f"{original_prompt}\n\n{feedback}"
 
@@ -1226,7 +1226,7 @@ def _record_extraction_failure(
     """Anota la CAUSA del fallo de extraccion en la telemetria de adherencia (R18).
 
     Reutiliza el mismo dispatcher que elige el feedback del reintento
-    (``retry_feedback._retry_feedback_cause``), asi que la telemetria y la instruccion
+    (``retry_feedback.retry_feedback_cause``), asi que la telemetria y la instruccion
     correctiva **no pueden discrepar**: si el modelo recibe "te faltaron las marcas", el
     contador que sube es ``missing_markers``. Duplicar la clasificacion seria plantar la
     semilla de que un dia el reporte diga una cosa y el prompt otra.
@@ -1236,7 +1236,7 @@ def _record_extraction_failure(
         agent: El mago cuyo intento fallo.
         error: La excepcion que lo tumbo.
     """
-    tally[agent][_retry_feedback_cause(error)] += 1
+    tally[agent][retry_feedback_cause(error)] += 1
 
 
 async def run_orchestrator(

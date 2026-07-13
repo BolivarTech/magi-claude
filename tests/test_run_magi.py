@@ -6477,14 +6477,14 @@ class TestAdherenceTelemetry:
         from collections import Counter, defaultdict
 
         import run_magi
-        from retry_feedback import _retry_feedback_cause
+        from retry_feedback import retry_feedback_cause
         from verdict_markers import MissingVerdictMarkers
 
         err = MissingVerdictMarkers("x")
         tally: dict[str, Counter[str]] = defaultdict(Counter)
         run_magi._record_extraction_failure(tally, "caspar", err)
 
-        assert tally["caspar"][_retry_feedback_cause(err)] == 1
+        assert tally["caspar"][retry_feedback_cause(err)] == 1
         assert dict(tally["caspar"]) == {"missing_markers": 1}
 
     def test_every_cause_lands_in_its_own_counter(self):
