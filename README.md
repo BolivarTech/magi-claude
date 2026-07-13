@@ -129,6 +129,28 @@ to fix it). Full rationale, evidence, and the alternatives considered and reject
 > marketplace copy first (`/plugin uninstall magi@bolivartech-plugins`) to avoid running
 > two copies of the plugin at once.
 
+#### What the sentinel does *not* protect you from
+
+Stated plainly, because a guarantee you misunderstand is worse than one you don't have:
+
+- **A mage that copies the prompt's worked example and edits a word.** The anti-echo canary
+  matches that example's exact fingerprint, so a *verbatim* copy is rejected — a *modified*
+  copy is not. This is deliberate: widening the fingerprint would shrink a false-positive
+  rate already measured at 0 in 170 real verdicts while enlarging the evasion, and every
+  past attempt in this codebase to "tighten" a check by widening an exclusion shipped a
+  fail-open. The real protection is upstream: **between the markers the prompt shows a
+  placeholder, never a valid verdict**, so there is nothing there worth copying. A mage that
+  emits an altered copy of the example is not a parser failure — it is a **degraded seat**,
+  indistinguishable from a mage that simply reasons badly, and no parser can catch that.
+  Rotate the model; don't argue with it.
+- **A verdict that is well-formed and worthless.** The sentinel guarantees the verdict came
+  from *that mage, between its own markers*. It cannot tell you the reasoning behind it was
+  any good.
+- **Silence.** Watch `extraction_failures` in `magi-report.json`. If a seat's marker-omission
+  rate climbs past ~10% of attempts, iterate that prompt or rotate that model — the answer is
+  never to restore a heuristic that guesses. If a run dies before it can write a report, the
+  same counts are printed to stderr, so the cause survives the run.
+
 ---
 
 ## Agents
