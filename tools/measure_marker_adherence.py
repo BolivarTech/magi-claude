@@ -195,29 +195,20 @@ def _spy(self, text: str) -> str:  # type: ignore[no-untyped-def]
         tally[_current_agent][retry_feedback_cause(exc)] += 1
         raise
 
+    # TALLY the content, do NOT decide on it. ``extract`` RETURNS the block -- the JSON inside is
+    # decoded later, by the parser -- so an earlier version of this spy that decoded here and
+    # RAISED was sending the parser down a path it never takes in production: an instrument
+    # perturbing its subject, while its docstring promised the opposite (MAGI gate, Balthasar).
+    # The parser now goes on to fail exactly the way it always would have, and this only counts.
     try:
         json.loads(block)
-    except json.JSONDecodeError as exc:
-        tally[_current_agent][retry_feedback_cause(exc)] += 1
-        raise
-    except ValueError:
-        # A PLAIN ValueError, not a JSONDecodeError: ``json.loads`` raises one when a number
-        # exceeds ``int_max_str_digits``. The production parser maps it so the mage keeps its
-        # retry; the instrument must survive it for the same reason it survives a RecursionError
-        # -- an instrument that dies on a pathological completion leaves the release with no
-        # artifact at all (MAGI gate, Caspar).
+    except (ValueError, RecursionError):
+        # Every way ``json.loads`` refuses a payload: a syntax error, a number over
+        # ``int_max_str_digits`` (a PLAIN ValueError), or nesting too deep (RecursionError).
         tally[_current_agent][CAUSE_INVALID_JSON] += 1
-        raise
-    except RecursionError:
-        # CPython raises RecursionError, NOT JSONDecodeError, on deeply nested JSON -- the
-        # production parser has guarded that since 4.0.6, and the spy must not be the one
-        # place that forgets it: an uncaught RecursionError here takes down the instrument
-        # mid-measurement and leaves the release with no artifact at all. It is content the
-        # real parser rejects, so it is tallied as such and the measurement carries on.
-        tally[_current_agent][CAUSE_INVALID_JSON] += 1
-        raise
+    else:
+        tally[_current_agent][OK_TALLY_KEY] += 1
 
-    tally[_current_agent][OK_TALLY_KEY] += 1
     return block
 
 

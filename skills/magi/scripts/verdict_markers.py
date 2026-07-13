@@ -277,8 +277,10 @@ class VerdictSentinel:
             )
         if closes[0] < opens[0]:
             raise AmbiguousVerdictMarkers(
-                f"close marker precedes the open marker (open at line {opens[0]}, "
-                f"close at line {closes[0]})"
+                # +1: the message says "line N" to a person who is about to open the file at
+                # line N, and every editor, grep and human counts from 1 (MAGI gate, Balthasar).
+                f"close marker precedes the open marker (open at line {opens[0] + 1}, "
+                f"close at line {closes[0] + 1})"
             )
 
         return self._strip_fence(lines[opens[0] + 1 : closes[0]])
