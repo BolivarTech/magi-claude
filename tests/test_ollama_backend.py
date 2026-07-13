@@ -13,19 +13,16 @@ import pytest
 from ollama_config import OllamaConfig
 from ollama_backend import OllamaBackend
 
-_OK_BODY = json.dumps(
-    {
-        "choices": [
-            {
-                "message": {
-                    "content": '{"agent":"melchior","verdict":"approve",'
-                    '"confidence":0.8,"summary":"s","reasoning":"r","findings":[],'
-                    '"recommendation":"go"}'
-                }
-            }
-        ]
-    }
-).encode()
+# MS2: el contenido del modelo lleva el bloque delimitado. Sin marcas, el sentinel lo
+# rechaza -- que es justo el punto: un veredicto pelado ya no se acepta (R15).
+_OK_CONTENT = (
+    "<MAGI_VERDICT>\n"
+    '{"agent":"melchior","verdict":"approve","confidence":0.8,"summary":"s",'
+    '"reasoning":"r","findings":[],"recommendation":"go"}\n'
+    "</MAGI_VERDICT>"
+)
+
+_OK_BODY = json.dumps({"choices": [{"message": {"content": _OK_CONTENT}}]}).encode()
 
 
 class _Resp(io.BytesIO):
@@ -88,7 +85,7 @@ def test_auth_header_present_only_with_key(monkeypatch, tmp_path):
 def test_extracts_message_content(monkeypatch, tmp_path):
     _backend_with(monkeypatch)
     raw = _run(_cfg(), tmp_path)
-    assert json.loads(raw)["verdict"] == "approve"
+    assert raw.decode() == _OK_CONTENT  # MS2: el contenido llega VERBATIM, con marcas
 
 
 def test_http_error_maps_to_runtimeerror_redacted(monkeypatch, tmp_path):
@@ -131,7 +128,7 @@ def test_downgrade_on_400_response_format(monkeypatch, tmp_path):  # BDD-25
     monkeypatch.setattr("ollama_backend.urllib.request.urlopen", fake_urlopen)
     raw = _run(_cfg(), tmp_path)
     assert calls["n"] == 2  # downgraded then retried without response_format
-    assert json.loads(raw)["verdict"] == "approve"
+    assert raw.decode() == _OK_CONTENT  # MS2: el contenido llega VERBATIM, con marcas
 
 
 def test_structured_off_omits_response_format(monkeypatch, tmp_path):  # BDD-28

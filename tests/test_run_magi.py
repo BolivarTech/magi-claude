@@ -1360,19 +1360,18 @@ class TestLaunchAgentTimeoutReaping:
         assert not (tmp_path / "melchior.stderr.log").exists()
 
 
-_FAKE_AGENT_JSON = (
+# MS2: el veredicto va entre marcas ancladas a linea. Un mock SIN marcas ya no pasa el
+# parser -- que es exactamente el punto (R15): un veredicto pelado no se acepta.
+_FAKE_VERDICT_OBJECT = (
     '{"agent": "melchior", "verdict": "approve", "confidence": 0.8, '
     '"summary": "ok", "reasoning": "looks fine", "findings": [], '
     '"recommendation": "merge"}'
 )
-# The ``claude -p --output-format json`` envelope wraps the agent JSON
-# as a string under ``result`` — match that shape so the real
-# ``parse_agent_output`` pipeline accepts the mock.
-_FAKE_CLAUDE_ENVELOPE = (
-    '{"result": "{\\"agent\\": \\"melchior\\", \\"verdict\\": \\"approve\\", '
-    '\\"confidence\\": 0.8, \\"summary\\": \\"ok\\", \\"reasoning\\": '
-    '\\"looks fine\\", \\"findings\\": [], \\"recommendation\\": \\"merge\\"}"}'
-).encode("utf-8")
+_FAKE_AGENT_JSON = f"<MAGI_VERDICT>\n{_FAKE_VERDICT_OBJECT}\n</MAGI_VERDICT>"
+
+# The ``claude -p --output-format json`` envelope wraps the agent's TEXT as a string
+# under ``result`` — y ese texto, desde MS2, es el bloque delimitado.
+_FAKE_CLAUDE_ENVELOPE = json.dumps({"result": _FAKE_AGENT_JSON}).encode("utf-8")
 
 
 class _FakeSuccessProc:
@@ -4943,12 +4942,14 @@ def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
             out: str,
         ) -> bytes:
             seen[name] = model
-            return (
-                b'{"agent":"' + name.encode() + b'",'
-                b'"verdict":"approve","confidence":0.5,'
-                b'"summary":"s","reasoning":"r","findings":[],'
-                b'"recommendation":"ok"}'
+            # MS2: el backend devuelve el TEXTO del modelo, que lleva el bloque delimitado.
+            verdict = (
+                '{"agent":"' + name + '",'
+                '"verdict":"approve","confidence":0.5,'
+                '"summary":"s","reasoning":"r","findings":[],'
+                '"recommendation":"ok"}'
             )
+            return f"<MAGI_VERDICT>\n{verdict}\n</MAGI_VERDICT>".encode()
 
     for a in ("melchior", "balthasar", "caspar"):
         (tmp_path / f"{a}.md").write_text("S", encoding="utf-8")

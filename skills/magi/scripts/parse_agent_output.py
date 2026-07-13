@@ -26,8 +26,8 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
+
 from pathlib import Path
 from typing import Any
 
@@ -39,28 +39,10 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from validate import MAX_INPUT_FILE_SIZE  # noqa: E402
+from verdict_markers import VerdictSentinel  # noqa: E402
 
-
-# Regex to strip leading ```json (case-insensitive, optional whitespace) or bare ```
-_FENCE_START = re.compile(r"^```(?:json)?\s*\n?", re.IGNORECASE)
-_FENCE_END = re.compile(r"\n?```\s*$")
-
-
-def _strip_code_fences(text: str) -> str:
-    """Remove markdown code fences wrapping the text.
-
-    Handles variants such as ```json, ```JSON, ``` json, and bare ```.
-
-    Args:
-        text: Raw text potentially wrapped in code fences.
-
-    Returns:
-        Text with leading/trailing fences removed and whitespace trimmed.
-    """
-    text = text.strip()
-    text = _FENCE_START.sub("", text)
-    text = _FENCE_END.sub("", text)
-    return text.strip()
+#: El sentinel es **sin estado** (solo lleva el par de marcas): una instancia basta.
+_SENTINEL = VerdictSentinel()
 
 
 def _extract_text(data: object) -> str:
@@ -114,9 +96,14 @@ def _extract_text(data: object) -> str:
     if isinstance(data, str):
         return data
 
-    # Bare-verdict dict: Ollama backend returns ``choices[0].message.content``
-    # already decoded as the 7-key agent JSON object.  Serialize it back so the
-    # rest of the pipeline (fence-strip → lenient parse → validate) is unchanged.
+    # Bare-verdict dict (Ollama pre-MS2: ``choices[0].message.content`` ya decodificado).
+    #
+    # MS2 lo RECHAZA -- un veredicto sin marcas no se acepta (R15) -- pero la rama se
+    # CONSERVA a proposito: re-serializar el objeto lo manda al sentinel, que levanta
+    # ``MissingVerdictMarkers``, y ese es el feedback CORRECTO ("olvidaste las marcas").
+    # Borrarla lo dejaria caer al ``ValueError`` de abajo -> "Unrecognised agent output
+    # shape", un mensaje que no le dice al modelo NADA sobre como corregirse. Mismo
+    # rechazo, mejor instruccion: el reintento existe para que el modelo se arregle.
     if isinstance(data, dict) and "agent" in data and "verdict" in data:
         return json.dumps(data)
 
@@ -126,240 +113,57 @@ def _extract_text(data: object) -> str:
     )
 
 
-# Minimal keys that identify an agent verdict among other JSON objects an
-# agent might echo (config files, schema examples, quoted payloads). Kept to
-# the two discriminating keys rather than the full 7-key schema so a verdict
-# merely missing a key (e.g. ``recommendation``) is still recovered and then
-# rejected by ``load_agent_output``'s full check — preserving the retry path.
-_VERDICT_KEYS = ("agent", "verdict")
-
-# Lenient recovery is a fallback for prose-wrapped output, which is a few KB
-# in practice. Above this budget the scan is skipped: a multi-MB blob is
-# almost certainly echoed tool-use content, not a clean verdict, and scanning
-# it risks the O(n^2) ``raw_decode`` worst case. The agent is dropped and
-# retried instead.
-_LENIENT_RECOVERY_MAX_CHARS = 1_000_000
-
-# Hard cap on candidate ``{`` positions probed, bounding the scan within the
-# size budget against adversarial deeply-nested-unterminated input. The real
-# verdict is found within the first few probes; a legitimate output never
-# approaches this.
-_MAX_BRACE_PROBES = 2_000
-
-
-def _is_verdict_shaped(candidate: object) -> bool:
-    """Whether *candidate* has the shape of an agent verdict: the two keys, no further conditions.
-
-    Deliberately **key-only**. Every attempt to make it smarter has been a fail-open,
-    and 4.0.6 made three of them in three consecutive review rounds before the
-    evidence settled it. This docstring is the record, because the next person to
-    "harden" this function will feel exactly as certain as I did.
-
-    **The trap.** This predicate does not only *select* the verdict — it also feeds the
-    **ambiguity guard** (``_embedded_verdict_object``: two candidates ⇒ fail closed).
-    So every exclusion added here narrows the guard: fewer candidates ⇒ fewer ambiguity
-    trips ⇒ **more single-match fabrications**. *Widening the exclusion looks like
-    tightening the check*, because the guard you are disarming is invisible in the line
-    you are editing.
-
-    **The three attempts, all rejected:**
-
-    ================  ===============================  ==============================
-    Attempt           Exclusion added                  What stopped being a rival
-    ================  ===============================  ==============================
-    enum member       ``verdict in VALID_VERDICTS``    ``"Reject"`` (case drift)
-    pipe-union regex  any ``a | b`` union              ``"approve | conditional"``
-    type guard        ``isinstance(verdict, str)``     ``null``, ``["reject"]``, ``0``
-    ================  ===============================  ==============================
-
-    In each one the excluded object was **the mage's real verdict**; the echoed
-    system-prompt example (which literally carries ``"verdict": "approve"``) became the
-    sole match; and consensus received a schema-perfect fabricated ``approve`` **from
-    the adversarial seat** — where the previous behaviour was a clean fail-closed drop
-    and a retry.
-
-    **Why no exclusion at all, not even a "correct" one.** The three attempts were all
-    trying to disqualify a *schema restatement* — the object a thinking model emits when
-    it quotes its own schema (``"verdict": "approve | reject | conditional"``), which
-    counts as a rival candidate and drops the mage. A restatement exclusion derived from
-    ``VALID_VERDICTS`` was written, and it was correct as far as it went. It was removed
-    anyway, on evidence:
-
-    * Across **171 captured agent outputs** from the real default trio, it changed the
-      outcome of **zero**. Not one payload contained a restatement rival.
-    * Reverting it left the **entire suite green** — it was unpinned by any positive test.
-    * It matched only **one of six** plausible spellings of a restatement (the agent
-      prompts actually teach the comma form, ``"approve", "reject", or "conditional"``).
-    * And it had a **real, verified cost**: it removed an *accidental* rival, so a
-      payload with a restatement beside an echoed example — which used to fail closed —
-      fabricated an ``approve`` instead.
-
-    A guard-narrowing whose benefit no test and no artifact can demonstrate, paid for in
-    the one currency this system cannot afford, is not a hardening. The mage drop it
-    aimed at **fails closed** (degraded run ⇒ by the Integrity rule, approves nothing);
-    the fabrication it introduced fails **open**, and silently. Given the choice, take
-    the loud failure every time.
-
-    The durable fix for both is the verdict **sentinel** (MS2): stop *searching* for the
-    verdict and *extract* it from between markers. Then a restatement, an echo, and a
-    tool-use blob are all simply outside the markers, and none of this is a judgement
-    call. See :func:`_embedded_verdict_object` and ``CLAUDE.techdebt.md``.
-
-    Args:
-        candidate: A JSON value decoded from the agent's output.
-
-    Returns:
-        True if it has the shape of a genuine verdict, False otherwise.
-    """
-    if not isinstance(candidate, dict):
-        return False
-    # ONE condition. Do not add a second — see the table above; each of the three
-    # attempts read as a harmless tightening and each one fabricated an ``approve``.
-    return all(key in candidate for key in _VERDICT_KEYS)
-
-
-def _embedded_verdict_object(text: str) -> dict[str, Any] | None:
-    """Return the *sole* embedded JSON object that looks like an agent verdict.
-
-    Scans for ``{`` and attempts ``json.JSONDecoder().raw_decode`` from each
-    position — which parses one complete JSON value and reports where it
-    ended, so nested braces and braces inside strings are handled without
-    hand-rolled counting.
-
-    Selection is **schema-aware, not span-based**: only objects carrying the
-    verdict discriminator keys (:data:`_VERDICT_KEYS`) qualify, so a large
-    JSON document an agent echoes from tool use — ``package.json``, an API
-    payload — cannot be mistaken for the verdict even when it out-spans it.
-
-    Recovery succeeds **only when exactly one** qualifying object decodes
-    *within the probe budget* (:data:`_MAX_BRACE_PROBES`). If two or more do
-    (the agent quoted the schema example — which is a complete valid verdict,
-    see ``agents/*.md`` — beside its real verdict, or content under review
-    embedded one), the choice is ambiguous: picking either risks a fabricated
-    ``approve`` entering consensus, which ``load_agent_output`` cannot catch
-    because both are well-formed. We return ``None`` so the caller fails
-    closed and the orchestrator retries rather than guessing. (2.4.2 pass-2
-    review — consensus integrity.) Note the budget bound: a second qualifying
-    object beyond the probe cap would not be seen, so a verdict followed by
-    >2000 brace positions then a second verdict is the one ambiguity shape the
-    guard cannot observe — acceptable, as that input is already pathological.
-
-    The scan is bounded by :data:`_MAX_BRACE_PROBES` so adversarial
-    deeply-nested-unterminated input cannot degrade to O(n^2). A
-    :class:`RecursionError` from a deeply nested candidate is treated like a
-    decode failure (skip the candidate) rather than aborting the scan.
-
-    Known residual (single-match fabrication): when exactly one verdict-shaped
-    object decodes but it is NOT the real verdict — a quoted example beside a
-    truncated real verdict, an early echo with the real verdict beyond the
-    probe cap, or a lone echoed example — it is recovered and a fabricated
-    ``approve`` can reach consensus. The durable fix is the verdict
-    **sentinel** — scheduled as **MS2** (``sbtdd/spec-behavior-base-MS2.md``;
-    debt in ``CLAUDE.techdebt.md``). Do not add more heuristic tuning here, and
-    do not try to make :func:`_is_verdict_shaped` smarter either: 4.0.6 attempted
-    that three times and produced a fail-open every time. The next change here is
-    the sentinel.
-
-    Args:
-        text: Text that may contain a verdict object embedded in prose.
-
-    Returns:
-        The single qualifying verdict ``dict``, or ``None`` if zero qualify or more than
-        one qualifies (ambiguous ⇒ fail closed). **Not** ``None`` merely because the
-        probe budget ran out: if exactly one object qualified before the cap, it is
-        returned — which is precisely how a *second*, real verdict beyond the cap can go
-        unseen, and why an early echo can win. That is the residual described above, not
-        an oversight in this clause.
-    """
-    decoder = json.JSONDecoder()
-    matches: list[dict[str, Any]] = []
-    index = 0
-    length = len(text)
-    probes = 0
-    while index < length and probes < _MAX_BRACE_PROBES:
-        brace = text.find("{", index)
-        if brace == -1:
-            break
-        probes += 1
-        try:
-            candidate, end = decoder.raw_decode(text, brace)
-        # ValueError, not just JSONDecodeError: the decoder has more than one way to
-        # refuse a payload (an integer literal past ``int_max_str_digits`` raises a bare
-        # ValueError), and every one of them means the same thing here — this candidate
-        # does not decode, skip it. JSONDecodeError IS a ValueError, so this only widens.
-        except (ValueError, RecursionError):
-            index = brace + 1
-            continue
-        if _is_verdict_shaped(candidate):
-            matches.append(candidate)
-            if len(matches) > 1:
-                return None  # ambiguous — fail closed rather than guess
-        # Advance past the decoded value so the next iteration looks for a
-        # later object; guard against a zero-width decode pinning the scan.
-        index = end if end > brace else brace + 1
-    return matches[0] if len(matches) == 1 else None
-
-
 def _loads_lenient(text: str) -> Any:
-    """Parse JSON from *text*, tolerating natural-language prose around it.
+    """Extrae el veredicto de entre las marcas y lo decodifica. **No busca: extrae.**
 
-    The fast path is a strict :func:`json.loads`: in the common case the
-    text *is* the JSON object (optionally after fence stripping) and the
-    behaviour is byte-for-byte identical to before 2.4.2. When that raises —
-    which happens when an agent doing multi-turn tool use prepends a
-    transitional sentence before the JSON verdict (the 2.4.2 exit-1 root
-    cause) — the embedded verdict object is recovered via
-    :func:`_embedded_verdict_object`.
+    Reemplaza a la recuperacion heuristica que MS2 borro. El nombre se conserva por el
+    contrato interno del modulo, pero **ya no hay nada "lenient" en el fondo**: lo unico
+    que se tolera es la NORMALIZACION dentro de una region **ya delimitada** (quitar un
+    fence). **Fuera de las marcas no se mira nada, nunca.**
 
-    Recovery is skipped for input larger than
-    :data:`_LENIENT_RECOVERY_MAX_CHARS` (likely echoed tool-use content, and
-    a scan hazard). If nothing qualifies, the original
-    :class:`json.JSONDecodeError` is re-raised so output with no JSON object,
-    a truncated verdict (whose stray complete sub-objects lack the verdict
-    keys), an ambiguous multi-verdict output, or only echoed non-verdict
-    objects still fails closed at this layer. The orchestrator relies on that
-    exception to drive its single retry and degraded-mode handling; the full
-    7-key schema is still enforced downstream by ``load_agent_output``.
-
-    A :class:`RecursionError` (CPython's ``json`` raises it, not
-    ``JSONDecodeError``, on deeply nested input) is mapped to a
-    ``JSONDecodeError`` so deeply-nested echoed/adversarial output stays on
-    the same fail-closed/retry path instead of escaping as an uncaught error.
+    Lo que se borro, y por que no vuelve: el escaner decodificaba cada objeto JSON que
+    encontraba en la salida y se quedaba con el que "parecia" un veredicto. Como toda
+    heuristica tenia falsos positivos (recuperar algo que no era el veredicto -- el
+    ejemplo del propio system prompt, produciendo un ``approve`` **fabricado** en el
+    asiento adversarial) y falsos negativos (descartar un veredicto real por hallar dos
+    candidatos). Un fallback "por si acaso" **reintroduce el residual entero**.
 
     Args:
-        text: Candidate JSON text, possibly wrapped in prose.
+        text: El contenido crudo del archivo del agente (ya desenvuelto del transporte).
 
     Returns:
-        The parsed JSON value.
+        El objeto JSON de entre las marcas.
 
     Raises:
-        json.JSONDecodeError: If *text* yields no qualifying verdict object. **Every**
-            way the decoder can refuse the payload arrives here as this one exception —
-            a syntax error, deep nesting (``RecursionError``), or an integer literal
-            past CPython's ``int_max_str_digits``. That is the contract the orchestrator
-            depends on: it retries on ``(ValidationError, JSONDecodeError)``, so
-            anything else escaping costs the mage its second attempt.
+        MissingVerdictMarkers: No hay marcas. Hereda de ``ValidationError``, asi que el
+            orquestador reintenta con feedback correctivo.
+        UnterminatedVerdictBlock: Falta la marca de cierre (salida truncada).
+        AmbiguousVerdictMarkers: Hay mas de un bloque delimitado.
+        json.JSONDecodeError: El contenido **entre** las marcas no es JSON decodable.
+            Toda forma en que el decoder puede rechazar el payload llega como esta
+            excepcion -- error de sintaxis, anidamiento profundo (``RecursionError``), o
+            un entero mas largo que ``int_max_str_digits``. Es el contrato del que depende
+            el orquestador: reintenta ante ``(ValidationError, JSONDecodeError)``, asi que
+            cualquier otra cosa que escape le cuesta al mago su segundo intento.
     """
+    block = _SENTINEL.extract(text)
     try:
-        return json.loads(text)
-    except (ValueError, RecursionError) as exc:
-        if len(text) <= _LENIENT_RECOVERY_MAX_CHARS:
-            verdict = _embedded_verdict_object(text)
-            if verdict is not None:
-                return verdict
-        if isinstance(exc, RecursionError):
-            raise json.JSONDecodeError(
-                "Input nesting exceeds the JSON decoder limit", text, 0
-            ) from exc
-        if not isinstance(exc, json.JSONDecodeError):
-            # A decoder ValueError that is NOT a JSONDecodeError — today that means an
-            # integer literal past CPython's ``int_max_str_digits`` (4300). It must still
-            # leave as a JSONDecodeError or the orchestrator's retry guard misses it and
-            # the mage is dropped without a second attempt.
-            raise json.JSONDecodeError(
-                f"Agent output is not decodable JSON: {exc}", text, 0
-            ) from exc
-        raise
+        return json.loads(block)
+    except RecursionError as exc:
+        # CPython lanza RecursionError (no JSONDecodeError) ante anidamiento profundo.
+        # Mapearlo mantiene la salida adversarial en el camino fail-closed/retry en vez
+        # de escapar como un error no capturado que le costaria al mago su reintento.
+        raise json.JSONDecodeError(
+            "Input nesting exceeds the JSON decoder limit", block, 0
+        ) from exc
+    except ValueError as exc:
+        if isinstance(exc, json.JSONDecodeError):
+            raise
+        # Un ValueError del decoder que NO es JSONDecodeError: hoy eso significa un
+        # literal entero por encima de ``int_max_str_digits`` (4300). Debe salir como
+        # JSONDecodeError o el guard de reintento del orquestador no lo captura y el mago
+        # se descarta sin segundo intento.
+        raise json.JSONDecodeError(f"Agent output is not decodable JSON: {exc}", block, 0) from exc
 
 
 def parse_agent_output(input_path: str, output_path: str) -> None:
@@ -488,8 +292,6 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         raise json.JSONDecodeError(
             "Agent output is nested too deeply to re-serialise", raw, 0
         ) from exc
-
-    text = _strip_code_fences(text)
 
     # Validate that the cleaned text is valid JSON. Agents that do
     # multi-turn tool use sometimes wrap the verdict in prose, so a strict
