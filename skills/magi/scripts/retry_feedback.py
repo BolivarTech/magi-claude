@@ -1,23 +1,23 @@
 # Author: Julian Bolivar
 # Version: 1.0.0
 # Date: 2026-07-13
-"""Feedback correctivo del reintento, y su COTA -- fuente UNICA (MS2, R12).
+"""The retry's corrective feedback, and its BOUND -- the SINGLE source (MS2, R12).
 
-Este modulo existe por una razon muy concreta: la cota del bloque de feedback la necesitan
-**dos** consumidores que no se pueden importar entre si.
+This module exists for one very concrete reason: the feedback block's bound is needed by
+**two** consumers that cannot import each other.
 
-* ``run_magi`` la usa para **construir** el prompt del reintento.
-* ``model_context`` la usa para **reservar ventana** en el guard de contexto (R5b de MS1).
+* ``run_magi`` uses it to **build** the retry prompt.
+* ``model_context`` uses it to **reserve window** in the context guard (R5b of MS1).
 
-Tenerla dos veces --hardcodeada en uno, derivada en el otro-- es una bomba de relojeria: si
-alguien alarga una plantilla, el valor derivado sube y el guard **sigue reservando el viejo**
--> infra-reserva -> **truncamiento silencioso**, que es exactamente el fallo que R5b existe
-para prevenir. Una sola fuente lo hace **imposible**.
+Holding it twice --hardcoded in one, derived in the other-- is a time bomb: if someone
+lengthens a template, the derived value rises and the guard **keeps reserving the old one**
+-> under-reservation -> **silent truncation**, which is exactly the failure R5b exists to
+prevent. A single source makes that **impossible**.
 
-La cota se **DERIVA** de las plantillas reales. En MS1 esta constante estuvo **mal tres
-veces** (1024, 1536, 2048), siempre por asumir un factor de conversion comodo o un texto
-fijo que luego cambio. **Una cota que hay que acordarse de actualizar es una cota que se va
-a olvidar.**
+The bound is **DERIVED** from the real templates. In MS1 this constant was **wrong three
+times** (1024, 1536, 2048), always by assuming a comfortable conversion factor or a fixed
+text that later changed. **A bound you have to remember to update is a bound that WILL be
+forgotten.**
 """
 
 from __future__ import annotations
@@ -35,12 +35,12 @@ from verdict_markers import (
     VERDICT_OPEN,
 )
 
-#: El mensaje de error se trunca a esta longitud antes de insertarlo en el prompt.
+#: The error message is truncated to this length before being inserted into the prompt.
 MAX_ERROR_CHARS = 400
 
-#: Las 7 causas. Una por CADA error que el orquestador puede reintentar: un error
-#: sin plantilla degrada a un mensaje generico y le quita al modelo justo lo que
-#: necesitaba para auto-corregirse -- o sea, un reintento a ciegas.
+#: The 7 causes. One for EVERY error the orchestrator can retry: an error with no
+#: template degrades to a generic message and takes from the model exactly what it
+#: needed in order to correct itself -- that is, a blind retry.
 _CAUSE_MISSING_MARKERS = "missing_markers"
 _CAUSE_UNTERMINATED_BLOCK = "unterminated_block"
 _CAUSE_AMBIGUOUS_MARKERS = "ambiguous_markers"
@@ -48,6 +48,13 @@ _CAUSE_ECHOED_EXAMPLE = "echoed_example"
 _CAUSE_AGENT_IDENTITY = "agent_identity"
 _CAUSE_INVALID_JSON = "invalid_json"
 _CAUSE_SCHEMA = "schema"
+
+#: **Public** alias of :data:`_CAUSE_INVALID_JSON`, for the measurement gate
+#: (``tools/measure_marker_adherence.py``): a ``RecursionError`` never becomes a
+#: ``JSONDecodeError``, so ``retry_feedback_cause`` cannot classify it -- but it IS
+#: invalid content inside the markers, and that is where it counts. Publishing it keeps the
+#: tool from importing a private, or worse, **duplicating the string**.
+CAUSE_INVALID_JSON = _CAUSE_INVALID_JSON
 
 
 def _feedback_template(intro: str, corrective: str) -> str:

@@ -80,7 +80,11 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from parse_agent_output import parse_agent_output as _parse_agent_output  # noqa: E402
-from retry_feedback import FEEDBACK_TEMPLATES, retry_feedback_cause  # noqa: E402
+from retry_feedback import (  # noqa: E402
+    CAUSE_INVALID_JSON,
+    FEEDBACK_TEMPLATES,
+    retry_feedback_cause,
+)
 from run_magi import AGENTS  # noqa: E402
 from verdict_markers import VerdictExtractionError, VerdictSentinel  # noqa: E402
 
@@ -190,6 +194,14 @@ def _spy(self, text: str) -> str:  # type: ignore[no-untyped-def]
         json.loads(block)
     except json.JSONDecodeError as exc:
         tally[_current_agent][retry_feedback_cause(exc)] += 1
+        raise
+    except RecursionError:
+        # CPython raises RecursionError, NOT JSONDecodeError, on deeply nested JSON -- the
+        # production parser has guarded that since 4.0.6, and the spy must not be the one
+        # place that forgets it: an uncaught RecursionError here takes down the instrument
+        # mid-measurement and leaves the release with no artifact at all. It is content the
+        # real parser rejects, so it is tallied as such and the measurement carries on.
+        tally[_current_agent][CAUSE_INVALID_JSON] += 1
         raise
 
     tally[_current_agent][OK_TALLY_KEY] += 1
@@ -549,10 +561,10 @@ def check_release_gate(
         )
 
     if "fallback_measured" not in report:
-        # Un gate fail-closed no puede leer un campo AUSENTE como "no hubo ceguera": eso es
-        # inferir una garantia de un silencio. Hoy es inalcanzable (el chequeo de frescura
-        # rechaza antes cualquier artefacto viejo), y precisamente por eso el default seguro
-        # es explicito: el dia que la frescura cambie, esto no se convierte en un fail-open.
+        # A fail-closed gate cannot read an ABSENT field as "there was no blindness": that is
+        # inferring a guarantee from a silence. Today it is unreachable (the freshness check
+        # rejects any old artifact first), and precisely for that reason the safe default is
+        # explicit: the day freshness changes, this does not turn into a fail-open.
         return False, (
             f"marker-adherence report at {report_path} predates the blind-measurement check "
             "(no 'fallback_measured' field) -- re-run the measurement"
