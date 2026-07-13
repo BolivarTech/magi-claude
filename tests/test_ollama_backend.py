@@ -13,8 +13,8 @@ import pytest
 from ollama_config import OllamaConfig
 from ollama_backend import OllamaBackend
 
-# MS2: el contenido del modelo lleva el bloque delimitado. Sin marcas, el sentinel lo
-# rechaza -- que es justo el punto: un veredicto pelado ya no se acepta (R15).
+# MS2: the model's content carries the delimited block. With no markers, the sentinel
+# rejects -- which is exactly the point: a bare verdict is no longer accepted (R15).
 _OK_CONTENT = (
     "<MAGI_VERDICT>\n"
     '{"agent":"melchior","verdict":"approve","confidence":0.8,"summary":"s",'
@@ -84,7 +84,7 @@ def test_auth_header_present_only_with_key(monkeypatch, tmp_path):
 def test_extracts_message_content(monkeypatch, tmp_path):
     _backend_with(monkeypatch)
     raw = _run(_cfg(), tmp_path)
-    assert raw.decode() == _OK_CONTENT  # MS2: el contenido llega VERBATIM, con marcas
+    assert raw.decode() == _OK_CONTENT  # MS2: the content arrives VERBATIM, markers and all
 
 
 def test_http_error_maps_to_runtimeerror_redacted(monkeypatch, tmp_path):
@@ -114,13 +114,13 @@ def test_missing_choices_maps_to_valueerror(monkeypatch, tmp_path):
 
 
 def test_the_request_body_NEVER_carries_response_format(monkeypatch, tmp_path):
-    """R7: ``response_format`` y las marcas son MUTUAMENTE EXCLUYENTES.
+    """R7: ``response_format`` and the markers are MUTUALLY EXCLUSIVE.
 
-    Un modelo que **honra** ``json_schema`` esta constrenido a emitir un objeto JSON y por
-    tanto **no puede** emitir ``<MAGI_VERDICT>``. Y lo que ``response_format`` compraba
-    --suprimir la prosa-- es justo lo que el sentinel vuelve irrelevante: **todo lo que
-    esta fuera de las marcas se ignora**. (Y nunca lo garantizo: glm-5.2 fenceo su salida
-    **teniendo** ``json_schema`` activo.)
+    A model that **honours** ``json_schema`` is constrained to emit a JSON object and so
+    **cannot** emit ``<MAGI_VERDICT>``. And what ``response_format`` bought -- suppressing
+    the prose -- is exactly what the sentinel makes irrelevant: **everything outside the
+    markers is ignored**. (And it never guaranteed it anyway: glm-5.2 fenced its output
+    **with** ``json_schema`` active.)
     """
     cap = _backend_with(monkeypatch)
     _run(_cfg(), tmp_path)

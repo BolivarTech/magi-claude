@@ -130,14 +130,14 @@ def test_unknown_keys_warn_and_proceed(tmp_path, capsys):
 
 
 def test_the_inert_structured_key_is_GONE_and_the_toml_says_so(tmp_path, capsys):
-    """MS2/R7: ``structured`` gobernaba ``response_format``, que ya no se envia.
+    """MS2/R7: ``structured`` governed ``response_format``, which is no longer sent.
 
-    Dejar el campo habria sido **una clave de config que MIENTE**: el usuario la pone, MAGI
-    la acepta... y la ignora. Este proyecto prohibe los *silent failures*, y la intencion
-    del usuario descartada en silencio es uno.
+    Keeping the field would have been **a config key that LIES**: the user sets it, MAGI
+    accepts it... and ignores it. This project forbids *silent failures*, and a user's
+    intent discarded in silence is one.
 
-    Quitarla NO rompe a nadie: el resolver **ya avisa** ante claves desconocidas, asi que un
-    TOML con ``structured`` recibe un aviso **accionable** en vez de un no-op mudo.
+    Removing it breaks NOBODY: the resolver **already warns** on unknown keys, so a TOML
+    carrying ``structured`` gets an **actionable** warning instead of a mute no-op.
     """
     from ollama_config import _load_toml
 
