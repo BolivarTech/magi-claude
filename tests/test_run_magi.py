@@ -6413,3 +6413,113 @@ def test_retry_feedback_bound_holds_for_every_template_under_NON_ASCII_errors(ca
     block = FEEDBACK_TEMPLATES[cause].format(error=detail)
     worst_case_tokens = len(block.encode("utf-8"))
     assert worst_case_tokens <= MAX_RETRY_FEEDBACK_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# MS2 -- T8: --max-attempts backend-agnostico (R13)
+# ---------------------------------------------------------------------------
+
+
+class TestMaxAttemptsFlag:
+    """El camino Claude tenia un retry SINGLE-SHOT fijo; ahora es configurable.
+
+    **Por que un FLAG y no leer el TOML de Ollama desde Claude:** ``magi-ollama.toml`` es,
+    por diseno, la config **del backend Ollama**. Que ``ClaudeBackend`` la lea significa o
+    **invertir el acoplamiento** (el backend por defecto dependiendo del opcional) o
+    inventar una config file para Claude, que **no existe** (el camino Claude es 100 %
+    flags de CLI, sin estado en disco).
+    """
+
+    def test_the_default_is_two_attempts(self):
+        import run_magi
+
+        args = run_magi.parse_args(["code-review", "x.md"])
+        assert args.max_attempts == 2
+
+    @pytest.mark.parametrize("bad", ["0", "-1", "11"])
+    def test_out_of_range_is_rejected_fail_closed(self, bad):
+        """Sin cota superior, un ``--max-attempts 1000`` (un cero de mas) son **mil
+        llamadas**: caras en Ollama (`:cloud` es de pago) y **cientos de dolares en
+        Claude**. El proyecto ya valida asi los enteros del TOML."""
+        import run_magi
+
+        with pytest.raises(SystemExit):
+            run_magi.parse_args(["code-review", "x.md", "--max-attempts", bad])
+
+    def test_the_cap_is_a_named_constant(self):
+        import run_magi
+
+        assert run_magi.MAX_ATTEMPTS_CAP == 10
+
+
+# ---------------------------------------------------------------------------
+# MS2 -- T9: telemetria de adherencia (R18)
+# ---------------------------------------------------------------------------
+
+
+class TestAdherenceTelemetry:
+    """R17 mide UNA vez, con los modelos de HOY. Los modelos derivan bajo el mismo tag.
+
+    Sin esta telemetria, el dia que un modelo empiece a omitir las marcas se veria como
+    *"MAGI va lento y rota mucho"* -- un sintoma que **nadie sabria leer**. Y con una
+    muestra de 5+2 en el gate, **la tasa real solo se va a conocer en produccion**: esto es
+    lo unico que la va a ver.
+    """
+
+    def test_the_recorder_reuses_the_SAME_dispatcher_as_the_retry_feedback(self):
+        """Telemetria y feedback **no pueden discrepar**.
+
+        Si el modelo recibe *"te faltaron las marcas"*, el contador que sube es
+        ``missing_markers``. Duplicar la clasificacion seria plantar la semilla de que un
+        dia el reporte diga una cosa y el prompt otra.
+        """
+        from collections import Counter, defaultdict
+
+        import run_magi
+        from retry_feedback import _retry_feedback_cause
+        from verdict_markers import MissingVerdictMarkers
+
+        err = MissingVerdictMarkers("x")
+        tally: dict[str, Counter[str]] = defaultdict(Counter)
+        run_magi._record_extraction_failure(tally, "caspar", err)
+
+        assert tally["caspar"][_retry_feedback_cause(err)] == 1
+        assert dict(tally["caspar"]) == {"missing_markers": 1}
+
+    def test_every_cause_lands_in_its_own_counter(self):
+        from collections import Counter, defaultdict
+
+        import run_magi
+        from verdict_markers import (
+            AgentIdentityError,
+            AmbiguousVerdictMarkers,
+            EchoedExampleRejected,
+            MissingVerdictMarkers,
+            UnterminatedVerdictBlock,
+        )
+
+        tally: dict[str, Counter[str]] = defaultdict(Counter)
+        for err in (
+            MissingVerdictMarkers("a"),
+            UnterminatedVerdictBlock("b"),
+            AmbiguousVerdictMarkers("c"),
+            EchoedExampleRejected("d"),
+            AgentIdentityError("e"),
+        ):
+            run_magi._record_extraction_failure(tally, "caspar", err)
+
+        assert dict(tally["caspar"]) == {
+            "missing_markers": 1,
+            "unterminated_block": 1,
+            "ambiguous_markers": 1,
+            "echoed_example": 1,
+            "agent_identity": 1,
+        }
+
+    def test_the_field_is_ADDITIVE_and_fail_soft(self):
+        """``consensus`` no lo lee, y un reporte SIN el campo sigue siendo valido (NR3)."""
+        import inspect
+
+        import consensus
+
+        assert "extraction_failures" not in inspect.getsource(consensus)
