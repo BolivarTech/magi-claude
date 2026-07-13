@@ -239,6 +239,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Disable the live status tree display",
     )
     parser.add_argument(
+        "--check-prompts",
+        action="store_true",
+        help=(
+            "Validate the agent prompts against the verdict-marker contract and exit. "
+            "Costs no tokens; use it after customising a prompt. Handled before the "
+            "positional arguments are required (see main)."
+        ),
+    )
+    parser.add_argument(
         "--max-attempts",
         type=_max_attempts,
         # A None sentinel, not the default value: "was it passed?" and "what is it worth?"
@@ -1235,6 +1244,47 @@ async def select_backend(
     return OllamaBackend(config), dict(config.models), rotation
 
 
+def _default_agents_dir() -> str:
+    """The shipped ``agents/`` directory, next to this script's package.
+
+    ONE definition, used by both the run and the ``--check-prompts`` dry run: two copies of
+    this path is how the dry run ends up validating a directory the run never reads.
+
+    Returns:
+        Absolute path to ``skills/magi/agents``.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(os.path.dirname(script_dir), "agents")
+
+
+def check_prompts(agents_dir: str) -> None:
+    """Validate a directory of agent prompts and exit. The dry run of the startup guard.
+
+    The guard is strict on purpose: a prompt carrying a complete verdict BETWEEN the markers
+    lets the model copy it, and the copy would be accepted -- fabrication, reintroduced in the
+    user's own installation, where none of this repo's tests can see it. But strictness owes
+    the user a way to check their work: until now the only way to discover that an edit was
+    rejected was to START A RUN and watch it abort (MAGI gate, Balthasar, four cycles running).
+
+    This costs no tokens, touches no network, and is the same guard the run itself uses -- not
+    a second implementation that could drift from it.
+
+    Args:
+        agents_dir: The directory of ``{mage}.md`` prompts to validate.
+
+    Raises:
+        SystemExit: Always. ``0`` if every prompt honours the contract, ``1`` otherwise (with
+            the offending file and the reason on stderr).
+    """
+    try:
+        AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
+    except PromptContractError as exc:
+        print(f"[FATAL] {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"OK: the prompts in {agents_dir} honour the verdict-marker contract.")
+    sys.exit(0)
+
+
 def announce_extraction_failures(failures: Mapping[str, Mapping[str, int]]) -> None:
     """Say out loud that a mage failed to deliver its verdict on some attempt (R18).
 
@@ -1940,6 +1990,11 @@ def main() -> None:
         print(f"Wrote Ollama config template to {path}")
         sys.exit(0)
 
+    # Same short-circuit shape as --ollama-init, and for the same reason: a dry run of the
+    # prompt guard needs neither a mode nor an input, so it must not have to invent them.
+    if "--check-prompts" in sys.argv[1:]:
+        check_prompts(_default_agents_dir())
+
     args = parse_args()
 
     try:
@@ -1977,9 +2032,7 @@ def main() -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    skill_dir = os.path.dirname(script_dir)
-    agents_dir = os.path.join(skill_dir, "agents")
+    agents_dir = _default_agents_dir()
 
     # Hard prerequisite check: only required for the Claude path. When --ollama
     # is set the claude CLI is not used, so skip the gate entirely to allow the

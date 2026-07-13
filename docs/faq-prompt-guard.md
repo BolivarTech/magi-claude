@@ -187,6 +187,38 @@ single shared predicate failed twice, in both directions, before this split was 
 
 ---
 
+## Customising a prompt: check it before you run it
+
+The guard is strict, and a rejected prompt aborts the run. You do not have to discover that by
+starting one:
+
+```bash
+python skills/magi/scripts/run_magi.py --check-prompts
+```
+
+It validates the shipped `agents/` directory against the marker contract and exits — `0` if
+every prompt is fine, `1` with the offending file and the reason if not. No tokens, no
+network, and it is the *same* guard the run uses, not a second implementation that could drift
+from it.
+
+---
+
+## Line breaks: which separators count
+
+A marker must be alone on its line, and "a line" means what JSON escapes inside a string:
+`\n`, `\r\n`, `\r`. It deliberately does **not** include `U+2028` (LINE SEPARATOR) or `U+2029`
+(PARAGRAPH SEPARATOR), because those are **legal raw inside a JSON string** — `json.loads`
+accepts them. Splitting on them would mean that a verdict quoting `</MAGI_VERDICT>` in one of
+its own fields (which is exactly what MAGI produces when it reviews itself) could have its
+block cut short, and a perfectly valid verdict would be thrown away.
+
+Trailing or leading separators are harmless: `U+2028`/`U+2029` are whitespace, and a candidate
+line is stripped before it is compared, so `<MAGI_VERDICT>` followed by a `U+2028` is still the
+marker. The only case that fails is a model that uses `U+2028` as its *sole* line terminator —
+and that fails **closed**, with a retry whose feedback shows the model the exact ASCII to emit.
+
+---
+
 ## Characters that *look* like the markers but are not
 
 The parser normalises **invisible** characters out of a candidate line before comparing it —
