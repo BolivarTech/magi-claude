@@ -548,7 +548,17 @@ def check_release_gate(
             "-- re-run the measurement"
         )
 
-    blind = report.get("fallback_measured", 0)
+    if "fallback_measured" not in report:
+        # Un gate fail-closed no puede leer un campo AUSENTE como "no hubo ceguera": eso es
+        # inferir una garantia de un silencio. Hoy es inalcanzable (el chequeo de frescura
+        # rechaza antes cualquier artefacto viejo), y precisamente por eso el default seguro
+        # es explicito: el dia que la frescura cambie, esto no se convierte en un fail-open.
+        return False, (
+            f"marker-adherence report at {report_path} predates the blind-measurement check "
+            "(no 'fallback_measured' field) -- re-run the measurement"
+        )
+
+    blind = report["fallback_measured"]
     if blind:
         return False, (
             f"{blind} of the measured runs died before writing {RUN_REPORT_FILENAME}, so they "

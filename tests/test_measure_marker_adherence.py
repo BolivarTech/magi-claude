@@ -360,11 +360,30 @@ def _write_report(path: Path, **overrides) -> None:
         "prompts_sha256": mma._prompts_sha256(mma._AGENTS_DIR),
         "measured_at": "2026-07-13T00:00:00Z",
         "runs": {"ollama": 5, "claude": 2},
+        "fallback_measured": 0,
         "per_seat": {a: {"ok": 5, "missing_markers": 0} for a in mma.AGENT_NAMES},
         "verdict": "green",
     }
     report.update(overrides)
     path.write_text(json.dumps(report), encoding="utf-8")
+
+
+def test_check_rejects_an_artifact_with_no_blindness_field_at_all(tmp_path):
+    """Un gate fail-closed no infiere una garantia de un SILENCIO.
+
+    Leer un campo ausente como *"no hubo ceguera"* es exactamente la forma de fail-open que
+    este proyecto ya pago tres veces: la ausencia de evidencia convertida en evidencia.
+    """
+    report_path = tmp_path / "legacy.json"
+    _write_report(report_path)
+    stale = json.loads(report_path.read_text(encoding="utf-8"))
+    del stale["fallback_measured"]
+    report_path.write_text(json.dumps(stale), encoding="utf-8")
+
+    passed, message = mma.check_release_gate(report_path, mma._REPO_ROOT, mma._AGENTS_DIR)
+
+    assert not passed
+    assert "fallback_measured" in message
 
 
 def test_check_release_gate_accepts_a_fresh_green_report(tmp_path):
