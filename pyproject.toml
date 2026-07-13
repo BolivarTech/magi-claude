@@ -17,7 +17,7 @@ target-version = "py312"
 [tool.mypy]
 python_version = "3.12"
 strict = true
-mypy_path = "skills/magi/scripts"
+mypy_path = "skills/magi/scripts,tools"
 explicit_package_bases = true
 # Local developer tooling (gitignored, from BolivarTech/AI_Tools) is not held to
 # the plugin's strict typecheck. Harmless in the public repo (the dir is absent).
