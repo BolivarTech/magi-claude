@@ -23,6 +23,13 @@ from fallback_policy import ModelCapability
 from ollama_config import OllamaConfig
 from redaction import redact_secrets
 
+#: La cota del bloque de feedback la DERIVA ``retry_feedback`` de las plantillas reales.
+#: Hardcodearla aqui era una bomba: si una plantilla crece, este guard seguiria reservando
+#: el valor viejo -> infra-reserva -> TRUNCAMIENTO SILENCIOSO (el fallo que R5b existe para
+#: prevenir). Una sola fuente lo hace imposible. Se re-exporta para los consumidores que ya
+#: la leian desde aqui.
+from retry_feedback import MAX_RETRY_FEEDBACK_TOKENS as MAX_RETRY_FEEDBACK_TOKENS
+
 PREFLIGHT_RETRIES = 2
 CAPABILITY_COMPLETION = "completion"
 _WINDOW_KEYS = ("context_length", "context_window")
@@ -247,14 +254,6 @@ def _default_probe(config: OllamaConfig) -> ProbeFn:
 
     return _post
 
-
-#: La cota del bloque de feedback la DERIVA ``retry_feedback`` de las plantillas reales.
-#: Hardcodearla aqui era una bomba: si una plantilla crece, este guard seguiria
-#: reservando el valor viejo -> infra-reserva -> TRUNCAMIENTO SILENCIOSO (el fallo que
-#: R5b existe para prevenir). Una sola fuente lo hace imposible.
-from retry_feedback import (  # noqa: E402
-    MAX_RETRY_FEEDBACK_TOKENS as MAX_RETRY_FEEDBACK_TOKENS,  # re-export explicito
-)
 
 #: Percent-to-fraction base for the input-margin sizing (no bare ``100`` in the body).
 #: ``(_PERCENT + input_margin_pct) / _PERCENT`` == ``1 + margin%``.

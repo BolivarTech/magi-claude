@@ -4,10 +4,17 @@
 # Date: 2026-07-11
 """Parse and validate an agent's JSON verdict from any supported backend.
 
-Extracts the structured verdict from every shape a backend can produce —
-the Claude CLI's transport envelopes, and the Ollama backend's *unwrapped*
-content, whether bare or wrapped in a markdown fence (4.0.6) — strips those
-fences, and recovers the verdict even when an agent buries it in prose (2.4.2).
+Unwraps the TRANSPORT envelope a backend may add (the Claude CLI's shapes; the Ollama
+backend's content arrives unwrapped), then EXTRACTS the verdict from between the
+``<MAGI_VERDICT>`` / ``</MAGI_VERDICT>`` marker lines and reads **nothing else** (MS2,
+v5.1.0 — see ``verdict_markers.VerdictSentinel``).
+
+It does not SEARCH for the verdict, and there is deliberately no fallback that does. The
+heuristic that used to scan the whole response for whatever object "looked like" a verdict
+is DELETED: it could return the worked example baked into the agent's own system prompt —
+a fabricated ``approve`` in the adversarial seat. An output with no markers has no verdict,
+however clean its JSON looks; it fails closed and the mage is retried with corrective
+feedback. Any change that reintroduces a search outside the markers reverts that fix.
 
 It does NOT validate the schema. The 7-key contract and the verdict enum are
 enforced downstream by ``load_agent_output`` -- deliberately, because an object
@@ -186,10 +193,21 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
 
     Raises:
         FileNotFoundError: If *input_path* does not exist.
-        json.JSONDecodeError: If the extracted text contains no decodable
-            JSON object (after both a strict parse and embedded-object
-            recovery).
+        MissingVerdictMarkers: The output carries no marker line at all -- there is no
+            verdict, however clean its JSON looks.
+        UnterminatedVerdictBlock: Exactly one of the two markers is missing -- the
+            signature of a TRUNCATED response.
+        AmbiguousVerdictMarkers: The marker count is not exactly one open and one close,
+            or the close precedes the open. There is no tie-break rule, by design.
+        json.JSONDecodeError: The text BETWEEN the markers does not decode as JSON.
         ValueError: If content extraction fails or file exceeds size limit.
+
+    Note:
+        The three extraction errors are ``ValidationError`` subclasses, and the
+        orchestrator picks the retry's corrective instruction from the exception TYPE
+        (``retry_feedback``). An incomplete ``Raises:`` here is therefore not a
+        documentation nit: it is how a future caller ends up spending a retry on the
+        wrong instruction.
     """
     file_size = os.path.getsize(input_path)
     if file_size > MAX_INPUT_FILE_SIZE:
@@ -293,10 +311,10 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
             "Agent output is nested too deeply to re-serialise", raw, 0
         ) from exc
 
-    # Validate that the cleaned text is valid JSON. Agents that do
-    # multi-turn tool use sometimes wrap the verdict in prose, so a strict
-    # parse falls back to recovering the embedded object; output with no
-    # JSON object at all still raises (fail closed). See ``_loads_lenient``.
+    # Extract the verdict from between the marker lines and decode ONLY that. Prose,
+    # <think> blocks, tool-use JSON and the prompt's own worked example all live OUTSIDE
+    # the markers, so none of them is ever a candidate -- there is nothing left to
+    # disambiguate. No markers -> no verdict (fail closed). See ``_loads_lenient``.
     parsed = _loads_lenient(text)
 
     try:

@@ -6452,6 +6452,27 @@ class TestMaxAttemptsFlag:
 
         assert run_magi.MAX_ATTEMPTS_CAP == 10
 
+    def test_passing_it_WITH_ollama_says_out_loud_that_the_toml_wins(self, capsys):
+        """El TOML gana (R13) -- pero hoy ganaba **en silencio**.
+
+        Un usuario que pide ``--max-attempts 5 --ollama`` cree que configuro algo. No
+        configuro nada, y no hay forma de que se entere: el flag se ignora sin una linea.
+        Un override silencioso es una mentira educada.
+        """
+        import run_magi
+
+        run_magi.parse_args(["code-review", "x.md", "--ollama", "--max-attempts", "5"])
+
+        assert "max_attempts_per_model" in capsys.readouterr().err
+
+    def test_NOT_passing_it_with_ollama_stays_quiet(self, capsys):
+        """El aviso es por un override REAL, no por el default: si no, seria ruido."""
+        import run_magi
+
+        run_magi.parse_args(["code-review", "x.md", "--ollama"])
+
+        assert capsys.readouterr().err == ""
+
 
 # ---------------------------------------------------------------------------
 # MS2 -- T9: telemetria de adherencia (R18)

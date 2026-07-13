@@ -307,6 +307,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "--model does not apply with --ollama; per-mage models are "
             "configured in magi-ollama.toml / MAGI_OLLAMA_MODEL_*."
         )
+    if args.ollama and args.max_attempts != DEFAULT_MAX_ATTEMPTS:
+        # R13: with --ollama the TOML wins. It used to win SILENTLY, which is a polite
+        # lie: the user who passed the flag believes they configured something. Warn, do
+        # not error -- the flag is legal, it is simply overridden.
+        print(
+            f"[!] WARNING: --max-attempts {args.max_attempts} is overridden by "
+            "max_attempts_per_model in magi-ollama.toml (it governs the Ollama backend)",
+            file=sys.stderr,
+        )
     # INVARIANT: --model must stay None when --ollama is set. Do NOT collapse
     # this into `args.model or MODE_DEFAULT_MODELS[...]` — that would silently
     # re-enable `--ollama --model` and feed Ollama a Claude-shaped model name.
@@ -1368,6 +1377,13 @@ async def run_orchestrator(
             # instruccion, asi que un modelo que olvido las marcas recibe "te faltaron las
             # marcas" y no un mensaje generico de schema.
             attempt_prompt = prompt
+            if max_attempts < 1:
+                # NOT an assert: ``python -O`` strips asserts, and the loop below would
+                # then fall through to an UnboundLocalError on ``result``. The CLI cannot
+                # produce this (``_max_attempts`` enforces >= 1), but ``run_orchestrator``
+                # is a public entry point. The rotation path hardens the mirror case the
+                # same way -- one guard on each side, no silent asymmetry.
+                raise RuntimeError(f"max_attempts must be >= 1 (got {max_attempts})")
             for attempt in range(max_attempts):
                 try:
                     result = await launch_agent(
