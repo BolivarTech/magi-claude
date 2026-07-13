@@ -261,6 +261,39 @@ def test_a_run_that_died_without_a_report_falls_back_to_the_raw_files(tmp_path):
     assert "melchior" not in mma.tally
 
 
+def test_a_run_measured_by_the_BLIND_fallback_can_NEVER_certify_green(tmp_path):
+    """El camino ciego no puede firmar el release -- ni aunque no vea ni un fallo.
+
+    El fallback re-parsea los raws, que solo guardan el ULTIMO intento de cada mago: es
+    **exactamente** el instrumento optimista que este gate acaba de eliminar. Peor: el
+    ``ok`` del fallback lo firma el sentinel + ``json.loads``, sin canario ni identidad,
+    asi que cuenta como bueno un veredicto que el run real habria **rechazado**.
+
+    El WARNING a stderr no basta: ``make release-check`` corre ``check``, que lee **solo el
+    artefacto** -- y para entonces el warning ya no existe. Lo que no queda escrito en el
+    artefacto, no gobierna nada.
+    """
+    for agent in mma.AGENT_NAMES:  # tres raws impecables, ningun reporte
+        _write_raw(tmp_path, agent, f'<MAGI_VERDICT>\n{{"agent": "{agent}"}}\n</MAGI_VERDICT>')
+    mma.install_spy()
+
+    mma.measure_output_dir(tmp_path)
+    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+
+    assert artifact["fallback_measured"] == 1, "el artefacto DICE que midio a ciegas"
+    assert artifact["verdict"] != "green", "una medicion ciega no certifica nada"
+
+
+def test_check_rejects_an_artifact_that_was_measured_blind(tmp_path):
+    """Y el gate lo rechaza leyendo el artefacto, que es lo unico que ve."""
+    _write_report(tmp_path / "r.json", fallback_measured=1)
+
+    passed, message = mma.check_release_gate(tmp_path / "r.json", mma._REPO_ROOT, mma._AGENTS_DIR)
+
+    assert not passed
+    assert "blind" in message.lower() or "fallback" in message.lower()
+
+
 def test_every_cause_of_the_retry_contract_has_a_column_in_the_artifact():
     """El vocabulario de causas es UNO: el de ``FEEDBACK_TEMPLATES`` (R12).
 
