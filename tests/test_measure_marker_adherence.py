@@ -83,7 +83,7 @@ def test_spy_tallies_missing_markers_and_reraises():
         with pytest.raises(MissingVerdictMarkers):
             sentinel.extract("just some prose, no markers here")
 
-    assert mma.tally["caspar"]["MissingVerdictMarkers"] == 1
+    assert mma.tally["caspar"]["missing_markers"] == 1
 
 
 def test_spy_tallies_unterminated_block():
@@ -97,7 +97,7 @@ def test_spy_tallies_unterminated_block():
         with pytest.raises(UnterminatedVerdictBlock):
             sentinel.extract("<MAGI_VERDICT>\n{'truncated':")
 
-    assert mma.tally["melchior"]["UnterminatedVerdictBlock"] == 1
+    assert mma.tally["melchior"]["unterminated_block"] == 1
 
 
 def test_spy_tallies_invalid_json_inside_markers_and_reraises():
@@ -109,9 +109,9 @@ def test_spy_tallies_invalid_json_inside_markers_and_reraises():
         with pytest.raises(json.JSONDecodeError):
             sentinel.extract("<MAGI_VERDICT>\nnot valid json at all\n</MAGI_VERDICT>")
 
-    assert mma.tally["balthasar"][mma.INVALID_JSON_TALLY_KEY] == 1
+    assert mma.tally["balthasar"]["invalid_json"] == 1
     # The marker layer itself succeeded -- only the content tally fires.
-    assert "MissingVerdictMarkers" not in mma.tally["balthasar"]
+    assert "missing_markers" not in mma.tally["balthasar"]
 
 
 def test_spy_tallies_ok_on_a_clean_verdict():
@@ -141,7 +141,7 @@ def test_install_spy_instruments_the_module_level_sentinel_instance():
         with pytest.raises(MissingVerdictMarkers):
             pre_existing_instance.extract("no markers")
 
-    assert mma.tally["caspar"]["MissingVerdictMarkers"] == 1
+    assert mma.tally["caspar"]["missing_markers"] == 1
 
 
 # --- measure_raw_file / measure_output_dir -----------------------------------------
@@ -165,7 +165,7 @@ def test_measure_raw_file_tallies_missing_markers(tmp_path):
 
     mma.measure_raw_file(raw_path, "melchior")
 
-    assert mma.tally["melchior"]["MissingVerdictMarkers"] == 1
+    assert mma.tally["melchior"]["missing_markers"] == 1
 
 
 def test_measure_output_dir_skips_agents_with_no_raw_file(tmp_path):
@@ -178,6 +178,105 @@ def test_measure_output_dir_skips_agents_with_no_raw_file(tmp_path):
     assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1
     assert "melchior" not in mma.tally
     assert "balthasar" not in mma.tally
+
+
+# --- The run's OWN tally is the source of truth (R17/R18) -----------------------------
+
+
+def _write_run_report(tmp_path: Path, *, agents, extraction_failures=None) -> Path:
+    """Write a ``magi-report.json`` exactly as ``run_magi.main`` writes it."""
+    report: dict = {"agents": [{"agent": name} for name in agents], "consensus": {}}
+    if extraction_failures:
+        report["extraction_failures"] = extraction_failures
+    path = tmp_path / mma.RUN_REPORT_FILENAME
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return path
+
+
+def test_a_retry_recovered_omission_is_NOT_measured_as_clean(tmp_path):
+    """El fallo que el instrumento existe para contar, y que NO podia ver.
+
+    ``launch_agent`` reescribe ``{agent}.raw.json`` en CADA intento, asi que el archivo
+    solo guarda el ULTIMO. Un mago que omite las marcas y acierta en el reintento dejaba
+    un raw impecable -> el artefacto salia **verde** con una omision real dentro. Con
+    ``max_attempts=2`` y una tasa real del 5 %, el artefacto habria reportado ~0.25 %:
+    sistematicamente optimista, justo en el numero del que cuelga el criterio de exito.
+    """
+    for agent in mma.AGENT_NAMES:  # el raw del ULTIMO intento: limpio, del retry que acerto
+        _write_raw(tmp_path, agent, f'<MAGI_VERDICT>\n{{"agent": "{agent}"}}\n</MAGI_VERDICT>')
+    _write_run_report(
+        tmp_path,
+        agents=mma.AGENT_NAMES,
+        extraction_failures={"caspar": {"missing_markers": 1}},
+    )
+    mma.install_spy()
+
+    mma.measure_output_dir(tmp_path)
+
+    assert mma.tally["caspar"]["missing_markers"] == 1, "la omision del 1er intento SE VE"
+    assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1, "y el reintento que acerto tambien"
+    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    assert artifact["verdict"] == "red", "un run con una omision NO es un run verde"
+
+
+def test_the_report_carries_the_causes_the_spy_STRUCTURALLY_cannot_see(tmp_path):
+    """``EchoedExampleRejected`` y ``AgentIdentityError`` se lanzan DESPUES del parser.
+
+    El spy envuelve ``VerdictSentinel.extract``, asi que esos dos nunca pasan por el: un
+    artefacto construido solo con el spy certificaba 4 de las 6 causas. El contador del
+    run las tiene todas -- porque las clasifica donde se deciden.
+    """
+    for agent in mma.AGENT_NAMES:
+        _write_raw(tmp_path, agent, f'<MAGI_VERDICT>\n{{"agent": "{agent}"}}\n</MAGI_VERDICT>')
+    _write_run_report(
+        tmp_path,
+        agents=mma.AGENT_NAMES,
+        extraction_failures={
+            "caspar": {"echoed_example": 1},
+            "melchior": {"agent_identity": 2},
+        },
+    )
+    mma.install_spy()
+
+    mma.measure_output_dir(tmp_path)
+
+    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    assert artifact["per_seat"]["caspar"]["echoed_example"] == 1
+    assert artifact["per_seat"]["melchior"]["agent_identity"] == 2
+    assert artifact["verdict"] == "red"
+
+
+def test_a_run_that_died_without_a_report_falls_back_to_the_raw_files(tmp_path):
+    """Un run que muere bajo el suelo de 2 magos no escribe reporte.
+
+    Los raws que alcanzo a producir siguen siendo muestras validas: se miden con el
+    parser real, como antes. Lo que NUNCA se hace es fabricar un cero.
+    """
+    _write_raw(tmp_path, "caspar", "el modelo se olvido de las marcas")
+    mma.install_spy()
+
+    mma.measure_output_dir(tmp_path)
+
+    assert mma.tally["caspar"]["missing_markers"] == 1
+    assert "melchior" not in mma.tally
+
+
+def test_every_cause_of_the_retry_contract_has_a_column_in_the_artifact():
+    """El vocabulario de causas es UNO: el de ``FEEDBACK_TEMPLATES`` (R12).
+
+    Si el artefacto enumerase sus propias causas, una causa nueva en el contrato de
+    reintento no tendria columna -- y un fallo real se contaria como cero. Que es
+    exactamente la clase de ceguera que este ciclo esta arreglando.
+    """
+    from retry_feedback import FEEDBACK_TEMPLATES
+
+    for agent in mma.AGENT_NAMES:
+        mma.tally[agent][mma.OK_TALLY_KEY] = 1
+
+    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+
+    for agent in mma.AGENT_NAMES:
+        assert set(artifact["per_seat"][agent]) == {mma.OK_TALLY_KEY, *FEEDBACK_TEMPLATES}
 
 
 # --- build_artifact ------------------------------------------------------------------
@@ -202,7 +301,7 @@ def test_build_artifact_includes_git_sha_and_prompts_sha256():
 
 def test_build_artifact_verdict_red_when_any_failure_present():
     _fill_tally_all_ok()
-    mma.tally["caspar"]["MissingVerdictMarkers"] = 1
+    mma.tally["caspar"]["missing_markers"] = 1
 
     artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
 
