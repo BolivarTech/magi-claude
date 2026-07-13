@@ -61,6 +61,16 @@ _REQUIRED_FINDING_KEYS = frozenset({"severity", "title", "detail"})
 #: enforces the same ceiling; bump it in one place and the whole pipeline
 #: follows.
 MAX_INPUT_FILE_SIZE: int = 10 * 1024 * 1024  # 10 MB
+
+#: Bounds on how many attempts ONE model gets before its mage rotates or dies. They live here,
+#: with the other resource ceilings, because the budget can be set through TWO doors -- the
+#: ``--max-attempts`` CLI flag and the Ollama TOML's ``max_attempts_per_model`` -- and until the
+#: MAGI gate caught it, only the flag was bounded: the TOML accepted 1000, which is a thousand
+#: PAID calls from a single mistyped zero. **A bound that guards one of the two ways in is not a
+#: bound**, and the way to make it one is to give both doors the same lock, not two locks that
+#: someone has to remember to keep equal.
+MIN_ATTEMPTS: int = 1
+MAX_ATTEMPTS_CAP: int = 10
 _MAX_FINDINGS_PER_AGENT: int = 100
 _MAX_FIELD_LENGTH: int = 50_000  # 50,000 characters per top-level string field
 _MAX_TITLE_LENGTH: int = 500

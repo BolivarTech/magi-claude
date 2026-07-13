@@ -20,7 +20,7 @@ from functools import partial
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
-from validate import ValidationError
+from validate import MAX_ATTEMPTS_CAP, MIN_ATTEMPTS, ValidationError
 
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
 
@@ -374,14 +374,18 @@ def _require_bool(value: Any, *, key: str, path: str) -> bool:
     )
 
 
-def _require_int(value: Any, *, key: str, minimum: int, path: str) -> int:
-    """Coerce *value* to an int >= *minimum* or fail closed.
+def _require_int(
+    value: Any, *, key: str, minimum: int, path: str, maximum: int | None = None
+) -> int:
+    """Coerce *value* to an int within ``[minimum, maximum]`` or fail closed.
 
     Args:
         value: Raw value from TOML or env (str from env, int from TOML).
         key: Key name, for the error message.
         minimum: Inclusive lower bound.
         path: Config path, for the error message.
+        maximum: Inclusive upper bound, when the key has one. The attempt budget does:
+            it is spent on PAID calls, and a mistyped zero is a thousand of them.
 
     Returns:
         The validated integer.
@@ -416,6 +420,8 @@ def _require_int(value: Any, *, key: str, minimum: int, path: str) -> int:
         raise OllamaConfigError(f"{key} must be an integer (got {value!r})", path)
     if parsed < minimum:
         raise OllamaConfigError(f"{key} must be >= {minimum} (got {parsed})", path)
+    if maximum is not None and parsed > maximum:
+        raise OllamaConfigError(f"{key} must be <= {maximum} (got {parsed})", path)
     return parsed
 
 
@@ -426,7 +432,10 @@ _SCALAR_SPECS: tuple[tuple[str, str, Callable[..., Any], Any], ...] = (
     (
         "max_attempts_per_model",
         "MAGI_OLLAMA_MAX_ATTEMPTS",
-        partial(_require_int, minimum=1),
+        # The SAME bounds the --max-attempts flag enforces, from the same constants: the two
+        # set the same budget, and until the MAGI gate caught it only the flag was bounded --
+        # the TOML accepted 1000, i.e. a thousand paid calls from one mistyped zero.
+        partial(_require_int, minimum=MIN_ATTEMPTS, maximum=MAX_ATTEMPTS_CAP),
         DEFAULT_MAX_ATTEMPTS_PER_MODEL,
     ),
     (

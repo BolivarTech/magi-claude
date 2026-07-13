@@ -100,7 +100,12 @@ from retry_feedback import (  # noqa: E402
     MAX_ERROR_CHARS,
     retry_feedback_cause,
 )
-from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
+from validate import (  # noqa: E402
+    MAX_ATTEMPTS_CAP,
+    MAX_INPUT_FILE_SIZE,
+    MIN_ATTEMPTS,
+    ValidationError,
+)
 from verdict_markers import (  # noqa: E402
     ECHO_CANARY,
     VerdictSentinel,
@@ -140,14 +145,13 @@ VALID_MODES = ("code-review", "design", "analysis")
 
 #: Attempts per model, by default: the original + 1 retry with corrective feedback.
 DEFAULT_MAX_ATTEMPTS = 2
-MIN_ATTEMPTS = 1
 
-#: Upper bound. **This is not paranoia:** without it, a ``--max-attempts 1000`` (one zero
-#: too many) turns a stubborn mage into **a thousand calls** -- expensive on Ollama
-#: (`:cloud` is paid) and **hundreds of dollars on Claude**, with a run that never ends. The
-#: project already validates the TOML integers this way (NR3 of MS1: invalid value -> error,
-#: no silent fallback); this is the same rule on the flag.
-MAX_ATTEMPTS_CAP = 10
+#: The bounds themselves live in ``validate`` and are RE-EXPORTED here, because the budget has
+#: two doors -- this flag and the Ollama TOML's ``max_attempts_per_model`` -- and they must not
+#: be able to disagree. **This is not paranoia:** ``--max-attempts 1000`` (one zero too many)
+#: turns a stubborn mage into a thousand calls -- expensive on Ollama, where `:cloud` is a paid
+#: tier, and hundreds of dollars on Claude. The comment that used to sit here claimed the TOML
+#: "already validates this way". It did not: it accepted 1000 (MAGI gate, Balthasar).
 
 
 def _max_attempts(raw: str) -> int:
