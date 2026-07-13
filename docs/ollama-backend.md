@@ -98,6 +98,28 @@ it no longer does anything. Reliability instead comes from the marker contract
 itself, cause-specific retry feedback (`retry_feedback.py`), and — since fallback rotation
 landed in v5.0.0 — rotating a mage to a declared substitute model rather than losing it.
 
+**What to watch, and what to do about it.** Removing `response_format` means nothing but the
+prompt now pushes a model toward well-formed output, so the honest expectation is that some
+models drift more than they used to — and the drift is *visible* rather than silently
+"corrected" by a parser that guesses. The counter is `extraction_failures` in
+`magi-report.json`, broken down per mage and per cause (`missing_markers`,
+`unterminated_block`, `ambiguous_markers`, `invalid_json`, `echoed_example`,
+`agent_identity`, `schema`). If a run dies before it can write a report, the same counts go
+to stderr, so the cause outlives the run.
+
+| What you see | What it means | What to do |
+|---|---|---|
+| Occasional `missing_markers`, run still valid | the retry absorbed it — this is the system working | nothing |
+| One seat above ~10% of attempts, persistently | that model is drifting from the marker contract | iterate that agent's prompt, or move the model down its `[[fallback]]` list and promote a better one |
+| `unterminated_block` climbing | the model is being truncated | its window is too small for your payload — check `context_guard` in the report, raise `output_headroom_tokens`, or split the input |
+| `echoed_example` | the model copied the prompt's worked example | the seat is degraded, not the parser — rotate the model |
+| Every seat failing at once | this is not the models | check the endpoint before touching any prompt |
+
+What is *never* the answer is restoring a parser that searches for a verdict instead of
+reading the one the mage marked. That is not a safety valve, it is a switch that re-enables
+the silent fabrication of an `approve` — see the
+[ADR](adr/0001-no-runtime-heuristic-fallback.md).
+
 ### Preflight (fail-fast)
 Before launching agents, MAGI verifies that the host responds and that the trio is
 available. If the entire `:cloud` trio is missing and the daemon lists no `:cloud`
