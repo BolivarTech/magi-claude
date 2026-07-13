@@ -114,6 +114,26 @@ def test_spy_tallies_invalid_json_inside_markers_and_reraises():
     assert "missing_markers" not in mma.tally["balthasar"]
 
 
+def test_spy_survives_a_payload_too_deep_to_decode():
+    """MAGI gate finding (Balthasar, cycle 3): the spy could CRASH the release gate.
+
+    CPython raises ``RecursionError`` -- not ``JSONDecodeError`` -- on deeply nested JSON,
+    and the production parser has caught it since 4.0.6. The spy re-decoded the block without
+    that guard, so one pathological completion would take down the instrument mid-measurement
+    and leave the release with no artifact at all. It is content the parser rejects: tally it
+    as such and keep measuring.
+    """
+    mma.install_spy()
+    sentinel = VerdictSentinel()
+    too_deep = "[" * 20_000 + "]" * 20_000
+
+    with mma.agent_context("caspar"):
+        with pytest.raises((json.JSONDecodeError, RecursionError)):
+            sentinel.extract(f"<MAGI_VERDICT>\n{too_deep}\n</MAGI_VERDICT>")
+
+    assert mma.tally["caspar"]["invalid_json"] == 1
+
+
 def test_spy_tallies_ok_on_a_clean_verdict():
     """A well-formed delimited block increments the 'ok' bucket and returns the block."""
     mma.install_spy()
