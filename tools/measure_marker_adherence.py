@@ -98,6 +98,11 @@ _RUN_MAGI_PATH = _REPO_ROOT / "skills" / "magi" / "scripts" / "run_magi.py"
 
 #: Defaults for the CLI. Named, not magic (NR6).
 DEFAULT_TIMEOUT_SECONDS = 900
+
+#: How much longer than ONE mage's timeout the parent waits before calling a run hung. A
+#: rotation serialises what would otherwise be concurrent, so the child's own worst case is
+#: several times its per-mage bound -- this leaves room for that and for shutdown.
+PARENT_TIMEOUT_FACTOR = 6
 DEFAULT_REPORT_FILENAME = "marker-adherence-report.json"
 DEFAULT_MODE = "code-review"
 
@@ -428,7 +433,25 @@ def run_real_magi(
     ]
     if ollama:
         command.append("--ollama")
-    subprocess.run(command, check=False, cwd=_REPO_ROOT)
+    # The parent gets a bound of its own (MAGI gate, Balthasar). ``--timeout`` bounds each MAGE,
+    # which reads like the whole thing is bounded -- and it is not: a child that deadlocks before
+    # its own timeouts fire, or while shutting down, would hang the release measurement FOREVER,
+    # with no artifact and no error. A bound only the child enforces is not a bound on the parent.
+    #
+    # Generous on purpose: three mages can run concurrently but a rotation makes them serial, so
+    # the child's own worst case is several times its per-mage timeout. Killing a healthy run
+    # would be worse than waiting on a sick one; this is a deadlock guard, not a schedule.
+    try:
+        subprocess.run(
+            command, check=False, cwd=_REPO_ROOT, timeout=timeout * PARENT_TIMEOUT_FACTOR
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"WARNING: the run over {bundle} did not finish within "
+            f"{timeout * PARENT_TIMEOUT_FACTOR}s and was killed. Its mages contribute no data "
+            "point; the measurement carries on.",
+            file=sys.stderr,
+        )
 
 
 def _git_head_sha(repo_root: Path) -> str:
