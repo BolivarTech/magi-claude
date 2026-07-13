@@ -6538,6 +6538,36 @@ class TestAdherenceTelemetry:
     production**: this is the only thing that will see it.
     """
 
+    def test_a_marker_omission_is_ANNOUNCED_not_just_filed(self, capsys):
+        """MAGI gate (Caspar, cycle 6): a counter nobody reads is not a safety net.
+
+        This is not hypothetical. **That very gate run recorded the first real omission**
+        (``caspar: {missing_markers: 1}``): the mage forgot the markers, the retry recovered
+        it, the run came out valid -- and the only trace was a field in a JSON file that no
+        one opens. A model drifting under the same tag would look exactly like that, run after
+        run, until it stopped being recoverable. Telemetry that has to be gone looking for is
+        telemetry that gets found too late.
+
+        So a run that saw ANY extraction failure says so, on stderr, where the operator
+        already is -- with the counts and where to read about them.
+        """
+        from run_magi import announce_extraction_failures
+
+        announce_extraction_failures({"caspar": {"missing_markers": 2, "invalid_json": 1}})
+
+        err = capsys.readouterr().err
+        assert "caspar" in err
+        assert "missing_markers" in err
+        assert "docs/ollama-backend.md" in err, "tell them WHERE to read what to do about it"
+
+    def test_a_clean_run_stays_quiet(self, capsys):
+        """No failures, no noise: a warning that fires on every run is a warning nobody reads."""
+        from run_magi import announce_extraction_failures
+
+        announce_extraction_failures({})
+
+        assert capsys.readouterr().err == ""
+
     def test_the_recorder_reuses_the_SAME_dispatcher_as_the_retry_feedback(self):
         """Telemetry and feedback **cannot disagree**.
 
