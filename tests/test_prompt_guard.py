@@ -234,3 +234,38 @@ class TestCheckPromptsDryRun:
 
         with pytest.raises(SystemExit):
             run_magi.parse_args([])
+
+
+class TestTheMarkerCountMessageKnowsItsAudience:
+    """MAGI gate (Balthasar, cycle 9): one message for two audiences misdirects one of them."""
+
+    def test_ZERO_markers_reads_as_a_stale_install(self, tmp_path):
+        """Prompts that predate the sentinel: reinstalling IS the fix."""
+        from prompt_guard import AgentPromptGuard, PromptContractError
+        from verdict_markers import VerdictSentinel
+
+        (tmp_path / "caspar.md").write_text("an old prompt, no markers", encoding="utf-8")
+
+        with pytest.raises(PromptContractError, match="Reinstall the plugin"):
+            AgentPromptGuard(tmp_path, VerdictSentinel()).check()
+
+    def test_TOO_MANY_markers_reads_as_a_customization(self, tmp_path):
+        """Someone who documented the format twice. Telling THEM to reinstall would throw
+
+        their work away -- and would not even fix it.
+        """
+        from prompt_guard import AgentPromptGuard, PromptContractError
+        from verdict_markers import VerdictSentinel
+
+        twice = (
+            "## Output format\n<MAGI_VERDICT>\n{ ...placeholder... }\n</MAGI_VERDICT>\n\n"
+            "For example:\n<MAGI_VERDICT>\n{ ...placeholder... }\n</MAGI_VERDICT>\n"
+        )
+        (tmp_path / "caspar.md").write_text(twice, encoding="utf-8")
+
+        with pytest.raises(PromptContractError) as exc:
+            AgentPromptGuard(tmp_path, VerdictSentinel()).check()
+
+        message = str(exc.value)
+        assert "customised" in message
+        assert "Reinstall" not in message, "do not tell a customizer to throw their work away"
