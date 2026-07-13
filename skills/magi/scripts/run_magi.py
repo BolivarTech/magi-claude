@@ -95,6 +95,11 @@ from cost import aggregate_cost  # noqa: E402
 from input_size import WARN_INPUT_TOKENS, check_input_size, estimate_tokens  # noqa: E402
 from finding_validation import parse_diff_ranges, validate_findings  # noqa: E402
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
+from verdict_markers import (  # noqa: E402
+    ECHO_CANARY,
+    AgentIdentityError,
+    EchoedExampleRejected,
+)
 
 # Public star-import contract. Underscore-prefixed symbols from
 # ``stderr_shim`` (``_StderrBufferShim``, ``_BinaryStderrBufferShim``,
@@ -329,7 +334,36 @@ async def launch_agent(
         f.write(stdout)
 
     parse_raw_output(raw_file, parsed_file)
-    return load_agent_output(parsed_file)
+    payload = load_agent_output(parsed_file)
+
+    # --- Los dos guards que corren DESPUES de que el schema valide (MS2) ---
+    #
+    # Ambos levantan subclases de ``ValidationError``, asi que el guard de reintento del
+    # orquestador los captura: el modelo recibe feedback correctivo y puede arreglarse.
+
+    # R6 -- canario anti-eco. El ULTIMO cinturon: el sentinel ya impide que se extraiga
+    # cualquier cosa de fuera de las marcas, y el prompt no pone nada valido ENTRE ellas.
+    # Queda un solo camino teorico: que el modelo tome el ejemplo trabajado de FUERA y lo
+    # envuelva EL MISMO en marcas. Su huella dactilar lo delata.
+    if all(payload.get(key) == value for key, value in ECHO_CANARY.items()):
+        raise EchoedExampleRejected(
+            "the verdict is a verbatim copy of the prompt's example, not your analysis"
+        )
+
+    # R10 -- identidad. ``load_agent_output`` valida que ``agent`` este en el ENUM, pero
+    # nadie validaba que fuera el mago que se LANZO. Un nombre duplicado mata el run
+    # entero; uno unico pero equivocado mete el texto de un mago en el asiento de otro, y
+    # el consenso lo cuenta como una perspectiva independiente **que nunca existio**.
+    #
+    # Case-insensitive: un modelo que escribe "Caspar" EMITIO bien su veredicto. Matarlo
+    # por una mayuscula es un reintento regalado, y el enum ya se valida aparte.
+    claimed = str(payload["agent"]).strip()
+    if claimed.casefold() != agent_name.casefold():
+        raise AgentIdentityError(
+            f"verdict claims agent {claimed!r} but {agent_name!r} was launched"
+        )
+
+    return payload
 
 
 class _DisplayLogGate:
