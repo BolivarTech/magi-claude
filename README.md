@@ -377,6 +377,7 @@ make typecheck   # mypy
 |-----------|----------|-------|
 | Claude Code CLI (`claude -p`) | For parallel mode | Fallback available without it |
 | Python 3.12+ | Yes | Uses `asyncio`, `dict[str, Any]` syntax |
+| [`uv`](https://docs.astral.sh/uv/) | **To develop** (not to use) | Every `make` target runs through `uv run`, so the toolchain comes from `uv.lock` instead of from whichever venv is active. Using the plugin needs none of this. |
 
 ### Dev Dependencies
 
