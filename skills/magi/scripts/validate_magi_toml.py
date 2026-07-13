@@ -31,6 +31,7 @@ Exit codes:
 """
 
 import argparse
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -39,6 +40,11 @@ from ollama_config import OllamaConfigError, resolve_config
 from ollama_preflight import OllamaPreflightError, check_config_offline
 
 DEFAULT_CONFIG_PATH = ".claude/magi-ollama.toml"
+
+#: Env vars that override a real run's config. Not applied to the verdict (the answer must
+#: not depend on the shell) -- but named on success, because the echoed trio would
+#: otherwise read as a promise about what MAGI will run.
+ENV_PREFIX = "MAGI_OLLAMA_"
 
 #: Shown whenever a config is rejected: the whole point of refusing to guess a lineage
 #: is that the user is told exactly what to write instead.
@@ -110,6 +116,17 @@ def main() -> int:
     for agent, spec in config.models.items():
         print(f"  {agent:<9} = {spec.model} [{spec.lineage}]")
     print(f"  fallback  = {len(config.fallback)} model(s)")
+
+    # The trio above is what the FILE says. If the environment would override it at run
+    # time, that echo is a claim the tool cannot keep -- so name what it is not applying.
+    overrides = sorted(name for name in os.environ if name.startswith(ENV_PREFIX))
+    if overrides:
+        print(
+            f"NOTE: {', '.join(overrides)} is set in the environment but is not applied to "
+            "this verdict -- the answer is about this file alone. A real run WILL apply it, "
+            "so the trio above is not necessarily the trio that will run.",
+            file=sys.stderr,
+        )
     return 0
 
 
