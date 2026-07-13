@@ -52,6 +52,26 @@ from verdict_markers import VerdictSentinel  # noqa: E402
 _SENTINEL = VerdictSentinel()
 
 
+#: The keys that make a decoded object a TRANSPORT envelope (the CLI's wrapper) rather than
+#: the model's own words. The distinction decides which retry instruction the mage gets: a
+#: malformed envelope is the transport's fault -- telling the model "you left out the markers"
+#: would be a false instruction about text it never wrote -- while anything else IS the model's
+#: text, and there the missing markers are exactly the defect it can fix.
+_ENVELOPE_KEYS = ("result", "content")
+
+
+def _is_transport_envelope(data: dict[str, Any]) -> bool:
+    """Return True if *data* is a backend's transport wrapper, not the model's own output.
+
+    Args:
+        data: A decoded top-level JSON object.
+
+    Returns:
+        True if it carries an envelope key.
+    """
+    return any(key in data for key in _ENVELOPE_KEYS)
+
+
 def _extract_text(data: object) -> str:
     """Extract the meaningful text payload from a backend's raw output.
 
@@ -103,17 +123,12 @@ def _extract_text(data: object) -> str:
     if isinstance(data, str):
         return data
 
-    # Bare-verdict dict (Ollama pre-MS2: ``choices[0].message.content`` already decoded).
-    #
-    # MS2 REJECTS it -- a verdict with no markers is not accepted (R15) -- but the branch is
-    # KEPT on purpose: re-serialising the object sends it to the sentinel, which raises
-    # ``MissingVerdictMarkers``, and that is the CORRECT feedback ("you forgot the markers").
-    # Deleting it would let it fall through to the ``ValueError`` below -> "Unrecognised
-    # agent output shape", a message that tells the model NOTHING about how to correct
-    # itself. Same rejection, better instruction: the retry exists so the model can fix itself.
-    if isinstance(data, dict) and "agent" in data and "verdict" in data:
-        return json.dumps(data)
-
+    # There used to be a bare-verdict-dict branch here (``agent`` + ``verdict`` -> re-serialise
+    # -> the sentinel says "you forgot the markers"). It is gone because the caller now routes
+    # EVERY non-envelope object to the raw text, which reaches the same instruction by a rule
+    # that does not depend on guessing which keys make an object "verdict-shaped" -- and
+    # guessing that was the whole disease MS2 cured. What is left here is the transport
+    # contract, and nothing else.
     raise ValueError(
         f"Unexpected agent output type: {type(data).__name__}. "
         f"Expected dict with 'result' or 'content' key, or plain string."
@@ -268,6 +283,18 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         # envelope — but the honest claim is "no change for well-formed envelopes",
         # not "no change on the Claude path".
         data = raw  # not an envelope: fenced or prose-wrapped content
+
+    if isinstance(data, dict) and not _is_transport_envelope(data):
+        # Decoded, but NOT a transport envelope: it is the model's own text, so the RAW TEXT is
+        # the payload (BDD-8b) -- and with no markers in it there is no verdict, which is the
+        # instruction the model can actually act on ("you left out the markers"). Routing it to
+        # "unrecognised output shape" instead teaches it nothing and spends the retry on a
+        # message about a defect it cannot locate.
+        #
+        # This cannot fabricate: JSON escapes newlines inside strings, so a marker quoted
+        # anywhere in this object cannot appear alone on a line, and the sentinel needs a
+        # line-anchored pair. No markers, no verdict.
+        data = raw
 
     try:
         text = _extract_text(data)
