@@ -94,6 +94,7 @@ from review_context import enrich_code_review_context, resolve_diff  # noqa: E40
 from cost import aggregate_cost  # noqa: E402
 from input_size import WARN_INPUT_TOKENS, check_input_size, estimate_tokens  # noqa: E402
 from finding_validation import parse_diff_ranges, validate_findings  # noqa: E402
+from prompt_guard import AgentPromptGuard, PromptContractError  # noqa: E402
 from retry_feedback import (  # noqa: E402
     FEEDBACK_TEMPLATES,
     MAX_ERROR_CHARS,
@@ -102,6 +103,7 @@ from retry_feedback import (  # noqa: E402
 from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
 from verdict_markers import (  # noqa: E402
     ECHO_CANARY,
+    VerdictSentinel,
     AgentIdentityError,
     EchoedExampleRejected,
 )
@@ -1880,6 +1882,28 @@ def main() -> None:
     # Ollama backend to run even when claude is absent from PATH.
     if not args.ollama and not shutil.which("claude"):
         print("ERROR: 'claude' CLI not found in PATH", file=sys.stderr)
+        sys.exit(1)
+
+    # --- Guard de arranque del contrato de prompts (R9, MS2) -------------------------
+    #
+    # Corre ANTES de gastar un solo token, sobre el ``agents_dir`` que el run va a usar
+    # DE VERDAD (no una ruta fija). Cubre lo que ningun test nuestro puede ver: **la
+    # instalacion del usuario**. El test de anclaje corre en el repo del desarrollador;
+    # el bug de la copia rancia (``mklink /D`` degradando silenciosamente a copia en
+    # Windows) produce prompts viejos con parser nuevo en la maquina del usuario.
+    #
+    # Y cierra el ULTIMO camino de fabricacion: un usuario que "mejora" el prompt metiendo
+    # un ejemplo completo ENTRE las marcas permite que el modelo lo copie y su copia se
+    # acepte como veredicto -- ni el canario (no es el ejemplo shippeado) ni el test de
+    # anclaje (corre en NUESTRO repo) lo verian.
+    #
+    # ``PromptContractError`` es HERMANA de ``ValidationError``, no hija: un prompt rancio
+    # NO se arregla reintentando, asi que el guard de reintento no debe tragarsela. Aqui
+    # se captura y se aborta -- exactamente como ``OllamaConfigError``.
+    try:
+        AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
+    except PromptContractError as exc:
+        print(f"[FATAL] {exc}", file=sys.stderr)
         sys.exit(1)
 
     try:
