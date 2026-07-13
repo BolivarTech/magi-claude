@@ -187,6 +187,34 @@ single shared predicate failed twice, in both directions, before this split was 
 
 ---
 
+## Characters that *look* like the markers but are not
+
+The parser normalises **invisible** characters out of a candidate line before comparing it —
+every Unicode `Cf` (format) and `Mn` (non-spacing mark) codepoint, which covers zero-width
+spaces, the BOM, soft hyphens, variation selectors, and the rest. A model that emits
+`<MAGI_VERDICT>` with a zero-width space wedged inside it still emits the marker, and killing
+that mage over an invisible character would be a retry thrown away.
+
+It does **not** normalise homoglyphs, and that is deliberate. A fullwidth `＜` (`U+FF1C`) is
+not an invisible character — it is a **different character**, in a different Unicode category
+(`Sm`). Accepting it would mean accepting, as the marker, something that is not the marker,
+which is precisely the laxity this whole mechanism exists to remove. So a model that writes
+`＜MAGI_VERDICT＞` has not written the marker: extraction fails closed, and the mage is retried.
+
+**This is not a dead end for the model.** The retry's corrective feedback carries the marker
+lines *literally* (`retry_feedback.py` interpolates the real `VERDICT_OPEN` / `VERDICT_CLOSE`
+constants into the instruction), so the model is shown the exact ASCII it must emit. If a
+particular model does this *persistently*, that is a model-selection problem, not a parser
+problem: watch `extraction_failures` (cause `missing_markers`) for that seat, and iterate its
+prompt or rotate it to a different model. Loosening the marker comparison to accept
+lookalikes would trade a noisy, recoverable failure for a silent, unrecoverable one.
+
+Case, on the other hand, **is** forgiven: `<magi_verdict>` is accepted. A model that lowercased
+the tag still emitted the marker, and there is no way for a lowercase mention to be mistaken
+for anything else — it can only ever fail closed, never open.
+
+---
+
 ## References
 
 - Implementation: `skills/magi/scripts/prompt_guard.py`, `skills/magi/scripts/verdict_markers.py`

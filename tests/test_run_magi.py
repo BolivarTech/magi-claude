@@ -6244,7 +6244,12 @@ class TestEchoCanaryAndAgentIdentity:
             async def run(self, *a, **k):
                 return raw
 
-        (tmp_path / f"{agent}.md").write_text("SYS", encoding="utf-8")
+        # El system prompt lo pone la fixture ``seeded_agents_dir`` con el .md REAL. Este
+        # helper escribia "SYS" encima (MAGI gate, Balthasar): hoy no rompe nada porque
+        # ``launch_agent`` no corre el guard, pero deja el agents_dir CORRUPTO para cualquier
+        # test posterior que use el mismo ``tmp_path`` con ``run_orchestrator`` -- que si lo
+        # corre, y abortaria con un ``[FATAL]`` desconcertante. Un prompt de tres letras no
+        # aportaba nada que el real no de.
         return await run_magi.launch_agent(
             agent, str(tmp_path), "P", str(tmp_path), 900, backend=_Fake()
         )
