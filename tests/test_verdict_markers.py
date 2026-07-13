@@ -480,3 +480,22 @@ class TestFenceCloseWithAnInfoString:
         body = '```json\n{"agent": "caspar"}'
         with pytest.raises(json.JSONDecodeError):
             json.loads(VerdictSentinel().extract(_block(body)))
+
+
+def test_the_line_numbers_in_the_error_are_the_ones_a_HUMAN_would_count():
+    """MAGI gate (Balthasar, cycle 19): a 0-based index dressed up as a line number.
+
+    The message says "line N" to a person who is about to open a file at line N. Editors,
+    ``grep -n`` and every human being count from 1; the list index counts from 0. Reporting one
+    as the other sends the reader to the wrong line -- reliably, every time, and most annoyingly
+    when the file is short enough that the off-by-one looks like the truth.
+    """
+    sentinel = VerdictSentinel()
+    raw = "\n".join(("prose", VERDICT_CLOSE, VERDICT, VERDICT_OPEN))  # close before open
+
+    with pytest.raises(AmbiguousVerdictMarkers) as exc:
+        sentinel.extract(raw)
+
+    message = str(exc.value)
+    assert "close at line 2" in message, f"the close is on line 2 for a human; got: {message}"
+    assert "open at line 4" in message, f"the open is on line 4 for a human; got: {message}"

@@ -100,36 +100,42 @@ def test_spy_tallies_unterminated_block():
     assert mma.tally["melchior"]["unterminated_block"] == 1
 
 
-def test_spy_tallies_invalid_json_inside_markers_and_reraises():
-    """Markers present, but the body between them is not valid JSON (R7 content drift)."""
+def test_spy_tallies_invalid_json_inside_markers_WITHOUT_raising():
+    """Markers present, body not valid JSON (R7 content drift): counted, not decided on.
+
+    The spy used to RAISE here, and ``extract`` does not: it returns the block and lets the
+    parser decode it. Raising sent the parser down a path it never takes in production -- an
+    instrument perturbing its subject (MAGI gate, Balthasar). The count is the same; the
+    behaviour is now the real one.
+    """
     mma.install_spy()
     sentinel = VerdictSentinel()
 
     with mma.agent_context("balthasar"):
-        with pytest.raises(json.JSONDecodeError):
-            sentinel.extract("<MAGI_VERDICT>\nnot valid json at all\n</MAGI_VERDICT>")
+        block = sentinel.extract("<MAGI_VERDICT>\nnot valid json at all\n</MAGI_VERDICT>")
 
+    assert block == "not valid json at all", "the block is RETURNED, as the real method does"
     assert mma.tally["balthasar"]["invalid_json"] == 1
     # The marker layer itself succeeded -- only the content tally fires.
     assert "missing_markers" not in mma.tally["balthasar"]
 
 
-def test_spy_survives_a_payload_too_deep_to_decode():
-    """MAGI gate finding (Balthasar, cycle 3): the spy could CRASH the release gate.
+def test_spy_tallies_a_payload_too_deep_to_decode_WITHOUT_raising():
+    """CPython raises ``RecursionError`` -- not ``JSONDecodeError`` -- on deeply nested JSON.
 
-    CPython raises ``RecursionError`` -- not ``JSONDecodeError`` -- on deeply nested JSON,
-    and the production parser has caught it since 4.0.6. The spy re-decoded the block without
-    that guard, so one pathological completion would take down the instrument mid-measurement
-    and leave the release with no artifact at all. It is content the parser rejects: tally it
-    as such and keep measuring.
+    Counted like any other undecodable content, and NOT re-raised: the block is RETURNED, and the
+    parser then fails the way it always would (which is what ``measure_raw_file`` absorbs). The
+    spy used to raise here, which crashed the instrument in cycle 3 and, once that was patched,
+    still left it perturbing the very code it measures (cycle 19). It observes now.
     """
     mma.install_spy()
     sentinel = VerdictSentinel()
     too_deep = "[" * 20_000 + "]" * 20_000
 
     with mma.agent_context("caspar"):
-        with pytest.raises((json.JSONDecodeError, RecursionError)):
-            sentinel.extract(f"<MAGI_VERDICT>\n{too_deep}\n</MAGI_VERDICT>")
+        block = sentinel.extract(f"<MAGI_VERDICT>\n{too_deep}\n</MAGI_VERDICT>")
+
+    assert block == too_deep
 
     assert mma.tally["caspar"]["invalid_json"] == 1
 
@@ -549,3 +555,45 @@ def test_a_hung_run_cannot_hang_the_measurement(monkeypatch, tmp_path):
 
     assert captured.get("timeout") is not None, "the parent must not wait forever on a child"
     assert captured["timeout"] > 900, "and its bound must exceed the child's own"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "just prose, no markers",
+        "<MAGI_VERDICT>\n{",
+        "<MAGI_VERDICT>\n{}\n</MAGI_VERDICT>\n<MAGI_VERDICT>\n{}\n</MAGI_VERDICT>",
+        "<MAGI_VERDICT>\nnot json at all\n</MAGI_VERDICT>",
+        '<MAGI_VERDICT>\n{"n": ' + "1" * 5000 + "}\n</MAGI_VERDICT>",
+        '<MAGI_VERDICT>\n{"agent": "caspar"}\n</MAGI_VERDICT>',
+    ],
+    ids=["no-markers", "unterminated", "ambiguous", "bad-json", "huge-int", "clean"],
+)
+def test_the_spy_OBSERVES_and_never_decides(raw):
+    """MAGI gate (Balthasar, cycle 19): the instrument was changing what it measured.
+
+    ``extract`` RETURNS the block; the JSON inside it is decoded later, by the parser. The spy
+    decoded it too -- and RAISED where the real method returns. So under measurement the parser
+    took a different path than it takes in production: an instrument that perturbs its subject.
+    Its own docstring promised *"this spy must never change the parser's observable behaviour,
+    only observe it"*, which is the third time in this branch that a comment has asserted more
+    than the code delivered.
+
+    It tallies the content now instead of raising on it, and the parser goes on to fail the way
+    it always would have.
+    """
+    real = VerdictSentinel.extract
+
+    def outcome(fn):
+        try:
+            return ("returned", fn(VerdictSentinel(), raw))
+        except BaseException as exc:  # noqa: BLE001 -- the TYPE is the thing under test
+            return ("raised", type(exc).__name__)
+
+    before = outcome(real)
+    mma.install_spy()
+    with mma.agent_context("caspar"):
+        during = outcome(VerdictSentinel.extract)
+    mma.uninstall_spy()
+
+    assert before == during, "the spy must observe the parser, not change it"
