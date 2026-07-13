@@ -315,3 +315,37 @@ class TestClaudeCliFixtureContract:
         verdict = _parse(raw)
         assert verdict["agent"] in {"melchior", "balthasar", "caspar"}
         assert verdict["verdict"] in {"approve", "reject", "conditional"}
+
+
+def test_the_envelope_keys_COVER_every_captured_cli_shape():
+    """MAGI gate (Balthasar, three cycles): the envelope keys are a contract -- so enforce it.
+
+    ``_ENVELOPE_KEYS`` enumerates what makes a decoded object the CLI's transport wrapper rather
+    than the model's own words, and the answer to "what if a future CLI adds a key?" has been a
+    comment. A comment does not fail a build. The fixtures in ``tests/fixtures/claude-cli-outputs/``
+    are captured from the REAL CLI, one per shape, and they are where a new envelope shape lands
+    first -- so this test ties the two together: capture a fixture with a new wrapper key and this
+    fails until ``_ENVELOPE_KEYS`` learns about it.
+
+    Why not just guess at unknown keys ("if it looks like a wrapper")? Because that is the
+    shape-guessing this whole milestone deleted. The failure mode until a new key is learned is a
+    mage retried with the wrong instruction -- **fail-closed, never a fabricated verdict**.
+    """
+    from pathlib import Path
+
+    from parse_agent_output import _ENVELOPE_KEYS
+
+    fixtures = Path(__file__).parent / "fixtures" / "claude-cli-outputs"
+    for path in sorted(fixtures.glob("*.json")):
+        raw = path.read_text(encoding="utf-8")
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            continue  # a raw-text shape (Ollama), not an envelope: nothing to cover here
+        if not isinstance(decoded, dict):
+            continue  # a plain-string shape
+        assert any(key in decoded for key in _ENVELOPE_KEYS), (
+            f"{path.name} is a captured CLI envelope whose wrapper key is not in "
+            f"_ENVELOPE_KEYS={_ENVELOPE_KEYS} -- the parser would route it to the raw text and "
+            "spend a retry telling the model it forgot markers in text the CLI wrote"
+        )
