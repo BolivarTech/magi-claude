@@ -46,7 +46,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from validate import MAX_INPUT_FILE_SIZE  # noqa: E402
-from verdict_markers import VerdictSentinel  # noqa: E402
+from verdict_markers import VerdictExtractionError, VerdictSentinel  # noqa: E402
 
 #: The sentinel is **stateless** (it only carries the marker pair): one instance is enough.
 _SENTINEL = VerdictSentinel()
@@ -375,7 +375,17 @@ def main() -> None:
 
     try:
         parse_agent_output(input_path, output_path)
-    except (json.JSONDecodeError, ValueError, FileNotFoundError, OSError) as exc:
+    except (
+        VerdictExtractionError,
+        json.JSONDecodeError,
+        ValueError,
+        FileNotFoundError,
+        OSError,
+    ) as exc:
+        # ``VerdictExtractionError`` is listed FIRST and explicitly: it inherits from
+        # ``ValidationError``, not from ``ValueError`` -- deliberately, so the ORCHESTRATOR's
+        # retry guard catches it -- which meant this CLI printed a traceback for the parser's
+        # single most common failure, a response with no markers (MAGI gate, Balthasar).
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
