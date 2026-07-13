@@ -6505,22 +6505,25 @@ class TestMaxAttemptsFlag:
         assert "max_attempts_per_model" in capsys.readouterr().err
 
     @pytest.mark.asyncio
-    async def test_max_attempts_below_one_fails_with_ITS_OWN_cause(self, tmp_path):
-        """The guard lives at the ENTRY POINT, not inside the per-mage coroutine.
+    @pytest.mark.parametrize("budget", [0, 1000])
+    async def test_the_programmatic_budget_is_bounded_at_BOTH_ends(self, tmp_path, budget):
+        """The guard lives at the ENTRY POINT, and it bounds both ends (MAGI gate, Balthasar).
 
-        Inside, the ``gather`` catches it and the user reads *"Only 0 agent(s) succeeded"* --
-        the error buries its own cause.
+        At the entry point, because inside the per-mage coroutine the ``gather`` catches it and
+        the user reads *"Only 0 agent(s) succeeded"* -- the error buries its own cause. Bounded
+        ABOVE, because the CLI flag and the Ollama TOML both cap the budget and a direct Python
+        caller was the last door left open on a budget that is spent on PAID calls.
         """
         from run_magi import run_orchestrator
 
-        with pytest.raises(RuntimeError, match="max_attempts must be >= 1"):
+        with pytest.raises(RuntimeError, match="max_attempts must be between"):
             await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="x",
                 output_dir=str(tmp_path),
                 timeout=10,
                 show_status=False,
-                max_attempts=0,
+                max_attempts=budget,
             )
 
 

@@ -484,3 +484,17 @@ def test_check_release_gate_rejects_malformed_json(tmp_path):
 
     assert passed is False
     assert "not valid JSON" in message
+
+
+def test_installing_the_spy_twice_does_not_make_it_permanent():
+    """MAGI gate (Balthasar, cycle 11): an instrument you cannot remove is one you cannot trust.
+
+    A second ``install_spy()`` would leave ``extract`` already pointing at the spy, so
+    ``uninstall_spy()`` would restore the spy over itself and the patch would survive the
+    uninstall -- silently, for the rest of the process.
+    """
+    mma.install_spy()
+    mma.install_spy()
+    mma.uninstall_spy()
+
+    assert VerdictSentinel.extract is mma._real_extract

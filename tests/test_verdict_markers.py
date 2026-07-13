@@ -452,3 +452,31 @@ class TestExtractProperties:
         """
         raw = f"prosa\n<think>noise</think>\n{_block(json.dumps(obj))}\nmas prosa"
         assert json.loads(VerdictSentinel().extract(raw)) == obj
+
+
+class TestFenceCloseWithAnInfoString:
+    """MAGI gate (Caspar, cycle 11): a burned retry on a verdict that was never wrong."""
+
+    def test_an_echoed_info_string_on_the_CLOSING_fence_is_still_a_fence(self):
+        """Models echo the opening fence's language on the close. It costs them a retry.
+
+        The closing regex demanded a BARE fence, so ```json ... ```json left the fence lines in
+        the block, ``json.loads`` choked on them, and a perfectly good verdict was thrown back
+        for a retry. Being permissive here is free -- the fence is only stripped when the FIRST
+        and the LAST line are both fences, and what is inside is still decided by ``json.loads``.
+        **Permissive where it does not matter, strict where it does (the markers).**
+        """
+        body = '```json\n{"agent": "caspar", "verdict": "reject"}\n```json'
+        extracted = VerdictSentinel().extract(_block(body))
+
+        assert json.loads(extracted)["agent"] == "caspar"
+
+    def test_a_bare_closing_fence_still_works(self):
+        body = '```json\n{"agent": "caspar", "verdict": "reject"}\n```'
+        assert json.loads(VerdictSentinel().extract(_block(body)))["agent"] == "caspar"
+
+    def test_a_fence_that_only_OPENS_is_left_intact(self):
+        """Not a fence pair -> not normalised. Trimming until something decodes is SEARCHING."""
+        body = '```json\n{"agent": "caspar"}'
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(VerdictSentinel().extract(_block(body)))

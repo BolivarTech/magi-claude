@@ -269,3 +269,26 @@ class TestTheMarkerCountMessageKnowsItsAudience:
         message = str(exc.value)
         assert "customised" in message
         assert "Reinstall" not in message, "do not tell a customizer to throw their work away"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "no markers at all",  # stale install
+        "<MAGI_VERDICT>\n{}\n</MAGI_VERDICT>\n<MAGI_VERDICT>\n{}\n</MAGI_VERDICT>",  # two pairs
+        "<MAGI_VERDICT>\nnot json\n",  # unterminated
+    ],
+)
+def test_every_FATAL_points_at_the_FAQ(tmp_path, content):
+    """MAGI gate (Melchior, cycle 11): the hint is only a hint if it cannot be dropped silently.
+
+    Each of these messages aborts the run before a token is spent. Nothing pinned that they
+    carry the pointer to the doc that explains them, so a refactor could quietly remove it.
+    """
+    from prompt_guard import AgentPromptGuard, PromptContractError
+    from verdict_markers import VerdictSentinel
+
+    (tmp_path / "caspar.md").write_text(content, encoding="utf-8")
+
+    with pytest.raises(PromptContractError, match="faq-prompt-guard"):
+        AgentPromptGuard(tmp_path, VerdictSentinel()).check()
