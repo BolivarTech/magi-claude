@@ -517,3 +517,35 @@ def test_measuring_a_payload_with_a_HUGE_INTEGER_does_not_abort_the_measurement(
     mma.measure_raw_file(raw, "caspar")  # must NOT raise
 
     assert mma.tally["caspar"]["invalid_json"] == 1
+
+
+def test_a_hung_run_cannot_hang_the_measurement(monkeypatch, tmp_path):
+    """MAGI gate (Balthasar, cycle 18): the parent had no guard against a hung child.
+
+    ``--timeout`` bounds each MAGE, and the operator reads that and reasonably concludes the
+    measurement is bounded. It was not: the parent ``subprocess.run`` had no timeout of its own,
+    so a child that deadlocked -- before its own timeouts could fire, or while shutting down --
+    would hang the release measurement forever, with no artifact and no error. A bound that only
+    the child enforces is not a bound on the parent.
+
+    The parent's bound is the child's own, plus a margin for its three mages and its shutdown --
+    generous, because killing a healthy run would be worse than waiting for a sick one.
+    """
+    captured: dict = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(mma.subprocess, "run", fake_run)
+
+    mma.run_real_magi(
+        "code-review", tmp_path / "bundle.md", ollama=True, timeout=900, output_dir=tmp_path
+    )
+
+    assert captured.get("timeout") is not None, "the parent must not wait forever on a child"
+    assert captured["timeout"] > 900, "and its bound must exceed the child's own"
