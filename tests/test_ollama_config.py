@@ -346,3 +346,21 @@ def test_require_bool_accepts_integer_1_and_0_but_not_other_ints():
     for bad in (2, -1, 42):
         with pytest.raises(OllamaConfigError):
             _require_bool(bad, key="strict_context_guard", path="t.toml")
+
+
+def test_no_shipped_default_is_a_preview_tag():
+    """A default we ship must not be a tag Ollama can retire from under the user.
+
+    ``gemini-3-flash-preview:latest`` was accepted into the fallback list as a known risk
+    (the Google slot takes one model, and Gemini 3 beat gemma4). Ollama then announced its
+    retirement, which would have left every user's scaffolded config carrying a dead entry
+    -- harmless by R11.1 (a missing fallback warns, never aborts) but noisy on every run,
+    and a default nobody chose. A preview tag is a promise the vendor has not made.
+    """
+    from ollama_config import DEFAULT_FALLBACK, DEFAULT_MODELS
+
+    shipped = [spec.model for spec in DEFAULT_MODELS.values()]
+    shipped += [spec.model for spec in DEFAULT_FALLBACK]
+
+    offenders = [tag for tag in shipped if "preview" in tag]
+    assert offenders == [], f"preview tags shipped as defaults: {offenders}"
