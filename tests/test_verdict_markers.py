@@ -17,6 +17,7 @@ from hypothesis import strategies as st
 
 from validate import ValidationError
 from verdict_markers import (
+    _LINE_BREAK,
     VERDICT_CLOSE,
     VERDICT_OPEN,
     AgentIdentityError,
@@ -318,33 +319,42 @@ class TestFenceNormalization:
         monkeypatch.setattr(VerdictSentinel, "_normalize_line", staticmethod(counting))
         raw = _block(VERDICT)
         VerdictSentinel().extract(raw)
-        assert calls == len(raw.splitlines())  # UNA por linea, ni una mas
+        # Se cuenta con el MISMO criterio de linea que usa ``extract`` (``_LINE_BREAK``), no
+        # con ``splitlines()``: dos criterios distintos para "que es una linea" es como se
+        # desincronizan un test y su implementacion sin que nadie lo note.
+        assert calls == len(_LINE_BREAK.split(raw))  # UNA por linea, ni una mas
 
 
 class TestExtractProperties:
     """hypothesis: propiedades sobre entradas GENERADAS, no ejemplos (§0.3)."""
 
-    @given(st.text())
-    def test_nothing_from_OUTSIDE_the_markers_can_reach_the_output(self, noise):
-        """LA propiedad de seguridad de MS2, en una linea.
+    @given(
+        st.text(),
+        st.text(),
+        st.dictionaries(st.text(min_size=1), st.text(), min_size=1),
+    )
+    def test_nothing_from_OUTSIDE_the_markers_can_reach_the_output(self, prefix, suffix, obj):
+        """LA propiedad de seguridad de MS2 -- y ahora se EJERCITA de verdad.
 
-        NO se asevera la igualdad exacta con el texto entre marcas: ``extract`` puede
-        **normalizar** (quitar un fence) dentro del bloque, y una igualdad estricta
-        fallaria en cuanto hypothesis genere un fence — un **falso positivo del test**, no
-        un bug del codigo. Tampoco se compara contra ``_strip_fence``: eso seria probar la
-        implementacion **contra si misma**.
+        La version previa generaba ``st.text()`` a secas y comprobaba la propiedad **solo
+        si** el texto traia un bloque bien formado. Medido: **0 de 2000 ejemplos** llegaban
+        a la asercion -- hypothesis no produce ``<MAGI_VERDICT>`` solo en su renglon por
+        azar. Era ``assert True`` con forma de propiedad, justo sobre el invariante nuclear
+        del milestone. (Su oraculo, ademas, re-partia con ``splitlines()``, que ya no es lo
+        que hace ``extract``: dos piezas decidiendo lo mismo con criterios distintos.)
+
+        Ahora el bloque se **construye** y el ruido va **fuera** (y puede ser cualquier
+        cosa, incluidas marcas: entonces se exige fallo cerrado). El oraculo no reconstruye
+        nada -- sabemos por construccion que ENTRE las marcas va ``obj``, asi que si algo
+        de fuera se colara, el bloque no decodificaria a ``obj``.
         """
         sentinel = VerdictSentinel()
+        raw = f"{prefix}\n{_block(json.dumps(obj))}\n{suffix}"
         try:
-            block = sentinel.extract(noise)
+            block = sentinel.extract(raw)
         except VerdictExtractionError:
-            return  # fallar cerrado siempre es aceptable
-        lines = noise.splitlines()
-        opens = [i for i, ln in enumerate(lines) if sentinel.is_marker_line(ln, VERDICT_OPEN)]
-        closes = [i for i, ln in enumerate(lines) if sentinel.is_marker_line(ln, VERDICT_CLOSE)]
-        assert len(opens) == 1 and len(closes) == 1 and opens[0] < closes[0]
-        intra = "\n".join(lines[opens[0] + 1 : closes[0]])
-        assert block in intra  # normalizar SI; importar de fuera, NO
+            return  # el ruido generado traia una marca -> fallar cerrado es correcto
+        assert json.loads(block) == obj
 
     @given(st.text())
     def test_never_raises_anything_but_a_VerdictExtractionError(self, noise):
