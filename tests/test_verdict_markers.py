@@ -8,9 +8,12 @@ aqui, es que el modulo perdio su bajo acoplamiento.
 """
 
 import ast
+import json
 from pathlib import Path
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from validate import ValidationError
 from verdict_markers import (
@@ -165,3 +168,175 @@ class TestExactMarkerLinePredicate:
 
     def test_case_drift_in_OUR_file_is_rejected(self):
         assert not self.sentinel.is_exact_marker_line("<magi_verdict>", VERDICT_OPEN)
+
+
+VERDICT = '{"agent": "caspar", "verdict": "reject"}'
+
+
+def _block(body: str) -> str:
+    """Envuelve *body* en el bloque delimitado que MS2 exige."""
+    return f"{VERDICT_OPEN}\n{body}\n{VERDICT_CLOSE}"
+
+
+class TestExtract:
+    """El ORDEN de los chequeos es load-bearing: selecciona el feedback del reintento."""
+
+    def setup_method(self):
+        self.sentinel = VerdictSentinel()
+
+    def test_extracts_the_block_and_ignores_everything_outside(self):
+        raw = f"<think>razono un rato</think>\nprosa\n{_block(VERDICT)}\nmas prosa"
+        assert json.loads(self.sentinel.extract(raw))["agent"] == "caspar"
+
+    def test_zero_markers_raises_MISSING_not_ambiguous(self):
+        """El ``[CRITICAL]`` del ciclo 6: el TIPO de excepcion selecciona el feedback.
+
+        Decirle *"emitiste mas de un bloque"* a quien no emitio NINGUNA marca gasta el
+        reintento en una instruccion **falsa**, y el mago muere por un bug del algoritmo
+        que existe para salvarlo.
+        """
+        with pytest.raises(MissingVerdictMarkers):
+            self.sentinel.extract(VERDICT)  # JSON perfecto, pero SIN marcas
+
+    def test_an_open_without_a_close_is_a_truncated_output(self):
+        with pytest.raises(UnterminatedVerdictBlock):
+            self.sentinel.extract(f"{VERDICT_OPEN}\n{VERDICT}")
+
+    def test_a_close_without_an_open_is_a_truncated_output(self):
+        with pytest.raises(UnterminatedVerdictBlock):
+            self.sentinel.extract(f"{VERDICT}\n{VERDICT_CLOSE}")
+
+    def test_two_blocks_fail_closed_without_a_tie_break(self):
+        """El eco del ejemplo + el veredicto real. **NUNCA** se elige uno."""
+        with pytest.raises(AmbiguousVerdictMarkers):
+            self.sentinel.extract(f"{_block(VERDICT)}\n{_block(VERDICT)}")
+
+    def test_nested_open_markers_fail_closed(self):
+        raw = f"{VERDICT_OPEN}\n{VERDICT_OPEN}\n{VERDICT}\n{VERDICT_CLOSE}"
+        with pytest.raises(AmbiguousVerdictMarkers):
+            self.sentinel.extract(raw)
+
+    def test_a_close_before_the_open_fails_closed(self):
+        with pytest.raises(AmbiguousVerdictMarkers):
+            self.sentinel.extract(f"{VERDICT_CLOSE}\n{VERDICT}\n{VERDICT_OPEN}")
+
+    def test_a_marker_quoted_inside_the_json_does_not_truncate_the_block(self):
+        """MAGI se revisa a si mismo: un finding SOBRE el sentinel cita la marca.
+
+        JSON **escapa los saltos de linea**, asi que una marca citada dentro del payload
+        **no puede** aparecer sola en un renglon -> el anclaje a linea la hace inofensiva.
+        """
+        payload = json.dumps(
+            {"agent": "caspar", "detail": "el cierre </MAGI_VERDICT> se ancla a linea"}
+        )
+        assert json.loads(self.sentinel.extract(_block(payload)))["agent"] == "caspar"
+
+    def test_a_raw_newline_inside_a_string_yields_two_closes_and_fails_closed(self):
+        """Un modelo que emite JSON invalido con un salto CRUDO -> 1 apertura, 2 cierres."""
+        body = '{"detail": "roto\n</MAGI_VERDICT>\nsigue"}'
+        with pytest.raises(AmbiguousVerdictMarkers):
+            self.sentinel.extract(_block(body))
+
+    def test_extract_documents_every_cause_it_raises(self):
+        """El ``Raises:`` es LOAD-BEARING: uno incompleto es un reintento a ciegas."""
+        doc = VerdictSentinel.extract.__doc__ or ""
+        assert "Raises:" in doc
+        for cause in (
+            "MissingVerdictMarkers",
+            "UnterminatedVerdictBlock",
+            "AmbiguousVerdictMarkers",
+        ):
+            assert cause in doc
+
+
+class TestFenceNormalization:
+    """Normalizar DENTRO de una region ya delimitada: permitido. Buscar fuera: jamas."""
+
+    def setup_method(self):
+        self.sentinel = VerdictSentinel()
+
+    @pytest.mark.parametrize(
+        "opener", ["```json", "```", "~~~json", "``` json", "```json  ", "```json5"]
+    )
+    def test_a_fence_around_the_json_is_stripped(self, opener):
+        """glm-5.2 fencea por costumbre. Fallar por un ESPACIO seria fragil, no estricto."""
+        closer = opener[:3]
+        raw = _block(f"{opener}\n{VERDICT}\n{closer}")
+        assert json.loads(self.sentinel.extract(raw))["agent"] == "caspar"
+
+    def test_text_between_the_fence_and_the_json_is_left_INTACT(self):
+        """Quitar "lo que estorba" hasta que algo decodifique seria VOLVER A BUSCAR."""
+        raw = _block(f"```json\naqui va mi veredicto:\n{VERDICT}\n```")
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(self.sentinel.extract(raw))
+
+    def test_a_MISMATCHED_fence_pair_is_not_a_fence(self):
+        """``` abierto y ~~~ cerrado no es un fence: es texto. Se deja intacto."""
+        raw = _block(f"```json\n{VERDICT}\n~~~")
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(self.sentinel.extract(raw))
+
+    def test_each_line_is_normalized_ONCE_not_twice(self, monkeypatch):
+        """La cota O(N) del plan, hecha EJECUTABLE en vez de prometida.
+
+        La version obvia de ``extract`` (dos comprensiones, una por marca) normaliza
+        **cada linea DOS veces**: mismo O(N), el doble de trabajo, y por nada. Este test
+        hace que esa regresion **rompa el build** en vez de pasar desapercibida.
+        """
+        calls = 0
+        original = VerdictSentinel._normalize_line
+
+        def counting(line: str) -> str:
+            nonlocal calls
+            calls += 1
+            return original(line)
+
+        monkeypatch.setattr(VerdictSentinel, "_normalize_line", staticmethod(counting))
+        raw = _block(VERDICT)
+        VerdictSentinel().extract(raw)
+        assert calls == len(raw.splitlines())  # UNA por linea, ni una mas
+
+
+class TestExtractProperties:
+    """hypothesis: propiedades sobre entradas GENERADAS, no ejemplos (§0.3)."""
+
+    @given(st.text())
+    def test_nothing_from_OUTSIDE_the_markers_can_reach_the_output(self, noise):
+        """LA propiedad de seguridad de MS2, en una linea.
+
+        NO se asevera la igualdad exacta con el texto entre marcas: ``extract`` puede
+        **normalizar** (quitar un fence) dentro del bloque, y una igualdad estricta
+        fallaria en cuanto hypothesis genere un fence — un **falso positivo del test**, no
+        un bug del codigo. Tampoco se compara contra ``_strip_fence``: eso seria probar la
+        implementacion **contra si misma**.
+        """
+        sentinel = VerdictSentinel()
+        try:
+            block = sentinel.extract(noise)
+        except VerdictExtractionError:
+            return  # fallar cerrado siempre es aceptable
+        lines = noise.splitlines()
+        opens = [i for i, ln in enumerate(lines) if sentinel.is_marker_line(ln, VERDICT_OPEN)]
+        closes = [i for i, ln in enumerate(lines) if sentinel.is_marker_line(ln, VERDICT_CLOSE)]
+        assert len(opens) == 1 and len(closes) == 1 and opens[0] < closes[0]
+        intra = "\n".join(lines[opens[0] + 1 : closes[0]])
+        assert block in intra  # normalizar SI; importar de fuera, NO
+
+    @given(st.text())
+    def test_never_raises_anything_but_a_VerdictExtractionError(self, noise):
+        """Entrada arbitraria NUNCA provoca una excepcion no controlada."""
+        try:
+            VerdictSentinel().extract(noise)
+        except VerdictExtractionError:
+            pass
+
+    @given(st.dictionaries(st.text(min_size=1), st.text(), min_size=1))
+    def test_a_verdict_wrapped_in_markers_round_trips_EXACTLY(self, obj):
+        """MATA la implementacion tramposa que la propiedad anterior dejaba viva.
+
+        Un ``extract`` que devolviera **siempre la cadena vacia** pasaria ``block in
+        intra`` -- ``"" in cualquier_cosa`` es **True**. La propiedad de no-fuga es
+        necesaria pero **no suficiente**.
+        """
+        raw = f"prosa\n<think>ruido</think>\n{_block(json.dumps(obj))}\nmas prosa"
+        assert json.loads(VerdictSentinel().extract(raw)) == obj
