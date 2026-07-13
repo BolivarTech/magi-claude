@@ -138,8 +138,8 @@ FEEDBACK_TEMPLATES: dict[str, str] = {
 WORST_TOKENS_PER_CHAR = 4
 
 #: DERIVED, not hardcoded: the largest fixed portion across all seven retry-feedback
-#: templates, plus the worst-case cost of the truncated error detail. A cota that
-#: must be updated by hand every time a template is added or edited is a cota that
+#: templates, plus the worst-case cost of the truncated error detail. A bound that
+#: must be updated by hand every time a template is added or edited is a bound that
 #: WILL be forgotten -- this exact constant was wrong three times in MS1 for exactly
 #: that reason. Deriving it from ``FEEDBACK_TEMPLATES`` makes drift impossible: add
 #: an eighth cause and this recomputes on its own.

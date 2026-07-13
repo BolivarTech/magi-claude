@@ -27,6 +27,12 @@ AGENT_NAMES = ("melchior", "balthasar", "caspar")
 AGENT_FILE_SUFFIX = ".md"
 EXPECTED_MARKER_COUNT = 1
 
+#: Every [FATAL] this guard raises aborts the run before a single token is spent, so it
+#: owes the reader somewhere to go. The FAQ documents each message and how to fix it --
+#: including the case a user is most likely to hit: a customised prompt (MAGI gate,
+#: Balthasar). An error that only forbids, without teaching, is half an error.
+FAQ_HINT = "See docs/faq-prompt-guard.md for this message and how to fix it."
+
 
 class PromptContractError(Exception):
     """Raised when a shipped agent prompt violates the runtime contract.
@@ -73,10 +79,12 @@ class AgentPromptGuard:
             text = path.read_text(encoding="utf-8-sig")
         except OSError as exc:
             raise PromptContractError(
-                f"{path}: cannot read prompt file. Reinstall the plugin."
+                f"{path}: cannot read prompt file. Reinstall the plugin. {FAQ_HINT}"
             ) from exc
         except UnicodeDecodeError as exc:
-            raise PromptContractError(f"{path}: prompt file is not valid UTF-8.") from exc
+            raise PromptContractError(
+                f"{path}: prompt file is not valid UTF-8. {FAQ_HINT}"
+            ) from exc
 
         lines = text.splitlines()
         opens = sum(self._sentinel.is_exact_marker_line(ln, VERDICT_OPEN) for ln in lines)
@@ -87,20 +95,20 @@ class AgentPromptGuard:
                 f"{path}: found {opens} open and {closes} close marker lines. "
                 "Marker lines are ONLY for the verdict block; repeating them, "
                 "even inside a code block, makes the model emit two examples. "
-                "Reinstall the plugin (likely cause: v5.0.x prompts)."
+                f"Reinstall the plugin (likely cause: v5.0.x prompts). {FAQ_HINT}"
             )
 
         try:
             between = self._sentinel.extract(text)
         except VerdictExtractionError as exc:
-            raise PromptContractError(f"{path}: {exc}") from exc
+            raise PromptContractError(f"{path}: {exc} {FAQ_HINT}") from exc
 
         if self._is_fabricable_verdict(between):
             raise PromptContractError(
                 f"{path}: content between markers is a valid verdict. "
                 "The model can COPY it and the copy would be accepted as its verdict; "
                 "a PLACEHOLDER goes between the markers, not an example; "
-                "the worked example goes OUTSIDE the markers."
+                f"the worked example goes OUTSIDE the markers. {FAQ_HINT}"
             )
 
     @staticmethod
