@@ -6629,6 +6629,30 @@ class TestAdherenceTelemetry:
         assert result["extraction_failures"] == {"caspar": {"missing_markers": 1}}
 
     @pytest.mark.asyncio
+    async def test_a_run_that_DIES_still_surfaces_why(self, tmp_path, capsys):
+        """El caso catastrofico: los tres magos omiten las marcas -> el run muere.
+
+        Muere **bajo el suelo de 2 magos**, asi que no llega a escribir ``magi-report.json``
+        -- y con el se iba el unico dato que explicaba la muerte. El dia que un modelo
+        empiece a omitir las marcas de verdad, MAGI moriria diciendo *"solo 0 magos
+        tuvieron exito"* y **nadie sabria por que**: es justo el sintoma ilegible que R18
+        existe para eliminar. La telemetria tiene que sobrevivir a la muerte del run.
+        """
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            raise MissingVerdictMarkers("no <MAGI_VERDICT> block in the output")
+
+        with pytest.raises(RuntimeError, match="fewer than 2"):
+            await _run(tmp_path, mock_launch)
+
+        err = capsys.readouterr().err
+        assert "extraction_failures" in err
+        assert "missing_markers" in err
+        assert "caspar" in err
+
+    @pytest.mark.asyncio
     async def test_a_rotating_mage_records_EVERY_failed_attempt_across_models(self, tmp_path):
         """Un mago que omite las marcas en TODOS sus intentos, en dos modelos, cuenta 4.
 
