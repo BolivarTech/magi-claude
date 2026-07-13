@@ -260,6 +260,14 @@ Each agent responds with a JSON object following this strict schema:
 - **findings**: List of individual findings classified by severity. This is the atomic unit of analysis — the synthesis engine deduplicates and merges findings across all three agents by title (case-insensitive), tracking all reporter agents via `sources` and keeping the highest severity.
 - **recommendation**: A concrete action, not vague advice.
 
+**On the wire (v5.1.0+):** an agent's raw response carries this object between two literal
+marker lines, `<MAGI_VERDICT>` and `</MAGI_VERDICT>`, each alone on its own line. The
+parser extracts only what is between them and ignores everything else in the response —
+see [`docs/faq-prompt-guard.md`](faq-prompt-guard.md) and
+[`docs/adr/0001-no-runtime-heuristic-fallback.md`](adr/0001-no-runtime-heuristic-fallback.md)
+for why. The schema above is unchanged; only how it is delimited in the raw transcript is
+new.
+
 ### 5.3 Voting Rules
 
 The consensus logic in `consensus.py` uses **weight-based scoring**:

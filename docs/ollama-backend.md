@@ -58,18 +58,18 @@ global `~/.claude/magi-ollama.toml` > built-in defaults**.
 | `base_url` | `MAGI_OLLAMA_HOST` → repo → global → `OLLAMA_HOST` → `http://localhost:11434/v1` |
 | `api_key` | `MAGI_OLLAMA_API_KEY` → repo → global → `OLLAMA_API_KEY` → *(none)* |
 | `models.<mage>` | `MAGI_OLLAMA_MODEL_<MAGE>` → repo `[models]` → global `[models]` → default trio |
-| `structured` | `MAGI_OLLAMA_STRUCTURED` → repo → global → `"schema"` |
 
-Example `magi-ollama.toml`:
+Example `magi-ollama.toml` (minimal — just `base_url`/`api_key`/`models`; see §3b below for
+the full schema with `lineage` and `[[fallback]]`, required since **v5.0.0**):
 ```toml
 base_url = "http://localhost:11434/v1"   # OpenAI-compatible base (any path is honored verbatim; a bare host:port gets /v1)
 # api_key = "sk-..."                       # cloud/auth only; local does not need it
 [models]
-melchior  = "qwen3.5:397b-cloud"
-balthasar = "kimi-k2.6:cloud"
-caspar    = "glm-5.2:cloud"
-# structured = "schema"                    # "schema" | "object" | "off"
+melchior  = { model = "qwen3.5:397b-cloud",   lineage = "alibaba"  }
+balthasar = { model = "kimi-k2.6:cloud",      lineage = "moonshot" }
+caspar    = { model = "glm-5.2:cloud",        lineage = "zhipu"    }
 ```
+
 > **Security:** the `api_key` is never logged nor written to artifacts, and it is
 > redacted in error messages. Do not commit a TOML with a real key. An
 > `MAGI_OLLAMA_API_KEY=""` (empty) means **explicitly no auth** (it does not inherit
@@ -82,10 +82,21 @@ caspar    = "glm-5.2:cloud"
 - **B) Direct cloud API**: cloud-endpoint `base_url` + `api_key`. For machines
   without a local daemon.
 
-### Structured output + reliability
-The request uses `response_format` (JSON schema, `strict:false` for portability). If a
-server responds 400 rejecting `response_format`, MAGI does **one retry without it**
-(downgrade) and relies on the existing parser+retry. `structured="off"` disables it.
+### Verdict extraction (v5.1.0 — replaces the old `structured`/`response_format` setting)
+Reliability no longer comes from asking the server to constrain its own output. Through
+**v5.0.x**, MAGI could request `response_format` (JSON schema) via the `structured` setting,
+with a one-retry-without-it downgrade on a 400. **Both were removed in v5.1.0**: a model
+constrained to raw JSON cannot also wrap its answer in the `<MAGI_VERDICT>` /
+`</MAGI_VERDICT>` marker lines the verdict sentinel now requires (see
+[`docs/faq-prompt-guard.md`](faq-prompt-guard.md) and the
+[ADR](adr/0001-no-runtime-heuristic-fallback.md)) — the two mechanisms are mutually
+exclusive, and the sentinel is the one that closes the fabrication residual, so it wins.
+There is no `structured` key and no `MAGI_OLLAMA_STRUCTURED` environment variable to set
+anymore; a `magi-ollama.toml` that still sets `structured` gets a `WARNING: unknown key
+'structured' ... (ignored)` on stderr and otherwise runs normally — it is not an error, but
+it no longer does anything. Reliability instead comes from the marker contract
+itself, cause-specific retry feedback (`retry_feedback.py`), and — since fallback rotation
+landed in v5.0.0 — rotating a mage to a declared substitute model rather than losing it.
 
 ### Preflight (fail-fast)
 Before launching agents, MAGI verifies that the host responds and that the trio is
@@ -252,9 +263,10 @@ Every rotation is announced on **stderr** at the moment it happens, marked in th
 | `No :cloud models available ... Run ollama signin` | `:cloud` trio without a cloud session | `ollama signin` (mode A) or set `api_key`+cloud base_url (mode B) |
 | `Missing models on <host>: [...]` | local models not pulled | `ollama pull <model>`, or edit the TOML to the tier you have |
 | `Auth failed (401/403)` | invalid/absent api_key | fix `MAGI_OLLAMA_API_KEY` / the TOML |
-| 400 + degraded on every run | server does not support `response_format` | use `structured="object"` or `"off"` |
 | `--model does not apply with --ollama` | you passed both | drop `--model`; models go in the TOML/env |
 | A mage is dropped although its `*.raw.json` looks like a valid verdict | the model wrapped its JSON in a markdown fence or a `<think>` block | **fixed in 4.0.6** — the parser now reads the raw file as text before assuming an envelope. If you still see it on 4.0.6+, keep the `raw.json`: it is a parser bug, not a config problem |
+| `[FATAL]` at startup naming a file under `agents/` | one of the three shipped agent prompts has malformed `<MAGI_VERDICT>` markers, or a complete verdict sitting between them | see [`docs/faq-prompt-guard.md`](faq-prompt-guard.md) — every message explained, with the fix |
+| `extraction_failures` non-empty in `magi-report.json` (v5.1.0+) | a model omitted the marker lines, emitted more than one block, or copied the prompt's worked example | check the per-cause counts; a model that fails this repeatedly needs a prompt iteration or a model swap, not a config change (see the ADR at `docs/adr/0001-no-runtime-heuristic-fallback.md`) |
 
 ---
 
@@ -262,5 +274,9 @@ Every rotation is announced on **stderr** at the moment it happens, marked in th
 
 - Implementation: `skills/magi/scripts/ollama_backend.py`, `ollama_config.py`,
   `ollama_preflight.py`, `ollama_init.py`, `backend.py`, `claude_backend.py`,
-  `agent_schema.py`.
+  `fallback_policy.py`, `model_context.py`.
+- Verdict extraction (v5.1.0): `skills/magi/scripts/verdict_markers.py`,
+  `prompt_guard.py`, `retry_feedback.py` — see
+  [`docs/faq-prompt-guard.md`](faq-prompt-guard.md) and
+  [`docs/adr/0001-no-runtime-heuristic-fallback.md`](adr/0001-no-runtime-heuristic-fallback.md).
 - Ollama cloud catalog: <https://ollama.com/search?c=cloud>

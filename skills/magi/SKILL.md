@@ -84,10 +84,10 @@ cross-lineage diversity:
 - `--ollama` is **mutually exclusive** with `--model` (per-mage models come from
   config, not the CLI — passing both errors out).
 - Host, API key, and the per-mage model trio resolve in layers: env
-  (`MAGI_OLLAMA_HOST` / `MAGI_OLLAMA_API_KEY` / `MAGI_OLLAMA_MODEL_<MAGE>` /
-  `MAGI_OLLAMA_STRUCTURED`) > repo `./.claude/magi-ollama.toml` > global
-  `~/.claude/magi-ollama.toml` > built-in defaults (cloud trio). `OLLAMA_HOST` /
-  `OLLAMA_API_KEY` act as generic fallbacks below the files.
+  (`MAGI_OLLAMA_HOST` / `MAGI_OLLAMA_API_KEY` / `MAGI_OLLAMA_MODEL_<MAGE>`) > repo
+  `./.claude/magi-ollama.toml` > global `~/.claude/magi-ollama.toml` > built-in
+  defaults (cloud trio). `OLLAMA_HOST` / `OLLAMA_API_KEY` act as generic fallbacks
+  below the files.
 - Run `python skills/magi/scripts/run_magi.py --ollama-init` to scaffold a
   starter `./.claude/magi-ollama.toml` (refuses to overwrite an existing one).
 - A fail-fast **preflight** checks the host is reachable and the trio is
@@ -115,7 +115,21 @@ Read each agent's system prompt from the `agents/` directory:
 - `agents/balthasar.md`
 - `agents/caspar.md`
 
-Each agent must respond with **only** a JSON object matching this schema:
+Per its system prompt (v5.1.0, the verdict sentinel), each agent wraps its verdict
+between two literal marker lines, each alone on its own line:
+
+```
+<MAGI_VERDICT>
+{ ...the agent's 7-key JSON object... }
+</MAGI_VERDICT>
+```
+
+The agent may reason or explain before the markers — ignore that part. **Before writing
+each agent's output to `<agent>.json` for Step 4's manual `synthesize.py` call, extract
+only the JSON object between `<MAGI_VERDICT>` and `</MAGI_VERDICT>` — do not write the
+marker lines themselves into the file.** `synthesize.py` reads plain JSON; it does not
+know about the markers (that extraction is normally done by `parse_agent_output.py` in
+parallel mode, which this native path bypasses). The object itself matches this schema:
 
 ```json
 {

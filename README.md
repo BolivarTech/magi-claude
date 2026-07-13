@@ -88,6 +88,47 @@ untouched scaffold behaves exactly as the built-in defaults. Full table in
 > (three mages, synthesis, and report) runs without any Claude/Anthropic API call. It is
 > runnable standalone as a CI gate: `python skills/magi/scripts/run_magi.py <mode> <file_or_text> --ollama`.
 
+**New in v5.1.0 — the verdict sentinel (BREAKING, agent prompt contract):** MAGI no
+longer *searches* an agent's raw output for something that looks like a verdict — it
+*extracts* the JSON between two literal marker lines, `<MAGI_VERDICT>` /
+`</MAGI_VERDICT>`, each alone on its own line. A response missing either marker, or
+carrying more than one block, is rejected outright and retried with corrective feedback
+instead of being scanned for a lookalike. This closes a long-standing residual where a
+truncated or ambiguous response could cause the old parser to silently accept the
+**worked example already sitting in the agent's own system prompt** as its verdict — a
+fabricated `approve`, in the adversarial seat, indistinguishable from a real one. A new
+installation-time guard also refuses to start if any of the three shipped agent prompts
+has malformed markers or a complete example sitting *between* them (see
+[`docs/faq-prompt-guard.md`](docs/faq-prompt-guard.md) for every `[FATAL]` message and how
+to fix it). Full rationale, evidence, and the alternatives considered and rejected:
+[`docs/adr/0001-no-runtime-heuristic-fallback.md`](docs/adr/0001-no-runtime-heuristic-fallback.md).
+
+> **There is no runtime fallback to the old heuristic — read this before you need it.**
+> If a model in your trio cannot reliably emit the marker lines, MAGI retries it with a
+> cause-specific correction and, absent a fix, drops that mage to a degraded run rather
+> than silently guessing (watch `extraction_failures` in `magi-report.json` — it is the
+> counter that tells you if this is happening). There is intentionally no config flag or
+> environment variable to re-enable the pre-5.1.0 heuristic: a flag like that would be a
+> switch that restores silent fabrication of an `approve`, not a safety valve (the ADR
+> above has the full argument, made after the proposal was raised and rejected seven
+> times during design review).
+>
+> **The downgrade path is the only production safety net for this change**, so it is
+> documented here instead of buried in a changelog — a net nobody knows about is not a
+> net. Every release is tagged (`vX.Y.Z`, annotated), so reverting to the last pre-sentinel
+> release is a normal local checkout, not an emergency patch:
+> ```bash
+> git clone https://github.com/BolivarTech/magi-claude.git
+> cd magi-claude
+> git checkout v5.0.3
+> claude --plugin-dir "$(pwd)"
+> ```
+> If you installed via the marketplace (`/plugin install magi@bolivartech-plugins`), the
+> checkout above (dev-mode `--plugin-dir`) is the reliable way to pin an older version,
+> since the marketplace itself tracks whatever ref its source points to. Uninstall the
+> marketplace copy first (`/plugin uninstall magi@bolivartech-plugins`) to avoid running
+> two copies of the plugin at once.
+
 ---
 
 ## Agents
