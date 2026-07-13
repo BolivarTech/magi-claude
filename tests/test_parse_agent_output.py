@@ -1,12 +1,12 @@
 # Author: Julian Bolivar
 # Version: 2.0.0
 # Date: 2026-07-13
-"""Tests de ``parse_agent_output`` — extraccion del veredicto (MS2).
+"""Tests for ``parse_agent_output`` -- verdict extraction (MS2).
 
-**El parser ya no BUSCA: EXTRAE.** La recuperacion heuristica se borro (no se dejo como
-fallback: un fallback reintroduce el residual entero). Lo que sobrevive de la suite previa
-es lo que prueba el **TRANSPORTE** (las formas de envelope), que MS2 no toca; lo que
-probaba **la heuristica** murio con ella.
+**The parser no longer SEARCHES: it EXTRACTS.** The heuristic recovery was deleted (it was
+NOT kept as a fallback: a fallback reintroduces the whole residual). What survives from the
+previous suite is what pins the **TRANSPORT** (the envelope shapes), which MS2 does not
+touch; what pinned **the heuristic** died with it.
 """
 
 import json
@@ -38,12 +38,12 @@ VERDICT = json.dumps(
 
 
 def marked(payload: str) -> str:
-    """Envuelve *payload* en el bloque delimitado que MS2 exige."""
+    """Wrap *payload* in the delimited block that MS2 requires."""
     return "\n".join((VERDICT_OPEN, payload, VERDICT_CLOSE))
 
 
 def _parse(raw: str) -> dict:
-    """Corre el parser real sobre *raw* y devuelve el veredicto escrito."""
+    """Run the real parser over *raw* and return the verdict it wrote."""
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, "raw.json")
         dst = os.path.join(tmp, "out.json")
@@ -97,8 +97,15 @@ class TestExtractText:
     def test_plain_string(self):
         assert _extract_text("hello world") == "hello world"
 
-    def test_bare_verdict_dict_serialized_to_json(self):
-        """_extract_text must serialize a bare verdict dict to a valid JSON string."""
+    def test_a_bare_verdict_dict_is_NOT_a_transport_shape(self):
+        """The bare-verdict branch is gone, and its absence is the point.
+
+        ``_extract_text`` used to special-case a dict carrying ``agent`` + ``verdict`` -- i.e.
+        it decided that an object was "verdict-shaped" by looking at its keys, which is the
+        exact disease MS2 cured. The caller now routes EVERY non-envelope object to the raw
+        text, reaching the same ``MissingVerdictMarkers`` instruction by a rule that guesses
+        nothing. What remains here is the transport contract, and nothing else.
+        """
         verdict = {
             "agent": "melchior",
             "verdict": "approve",
@@ -108,10 +115,22 @@ class TestExtractText:
             "findings": [],
             "recommendation": "go",
         }
-        result = _extract_text(verdict)
-        parsed = json.loads(result)
-        assert parsed["agent"] == "melchior"
-        assert parsed["verdict"] == "approve"
+        with pytest.raises(ValueError, match="Unexpected agent output type"):
+            _extract_text(verdict)
+
+    def test_a_bare_verdict_still_reaches_the_MARKERS_instruction(self):
+        """And end to end, the mage is told the thing it can actually fix (R15/BDD-8b)."""
+        verdict = {
+            "agent": "melchior",
+            "verdict": "approve",
+            "confidence": 0.8,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [],
+            "recommendation": "go",
+        }
+        with pytest.raises(MissingVerdictMarkers):
+            _parse(json.dumps(verdict))
 
     def test_fallback_dict_raises_value_error(self):
         data = {"unknown_key": "some_value"}
@@ -154,7 +173,7 @@ def _sample_agent_payload() -> dict:
 
 
 class TestTheHeuristicIsGone:
-    """R1/R16: se BORRA, no se deja como fallback. Un fallback reintroduce el residual."""
+    """R1/R16: it is DELETED, not kept as a fallback. A fallback reintroduces the residual."""
 
     def test_the_scanner_symbols_no_longer_exist(self):
         import parse_agent_output as pao
@@ -166,33 +185,33 @@ class TestTheHeuristicIsGone:
             "_LENIENT_RECOVERY_MAX_CHARS",
             "_strip_code_fences",
         ):
-            assert not hasattr(pao, dead), f"{dead} sigue vivo: MS2 seria TEATRO"
+            assert not hasattr(pao, dead), f"{dead} is still alive: MS2 would be THEATRE"
 
 
 class TestSentinelExtraction:
-    """El unico camino valido: el bloque delimitado."""
+    """The only valid path: the delimited block."""
 
     def test_a_marked_verdict_is_extracted(self):
         assert _parse(marked(VERDICT))["agent"] == "melchior"
 
     def test_prose_and_think_around_the_block_are_IGNORED(self):
-        """El incidente 2.4.2 (que pario la heuristica) ahora es **inofensivo**."""
+        """The 2.4.2 incident (the one that birthed the heuristic) is now **harmless**."""
         raw = "\n".join(
-            ("He verificado el plan.", "<think>razono</think>", marked(VERDICT), "Fin.")
+            ("I have verified the plan.", "<think>reasoning</think>", marked(VERDICT), "End.")
         )
         assert _parse(raw)["agent"] == "melchior"
 
     def test_a_fence_INSIDE_the_block_is_normalized(self):
-        """glm-5.2 fencea por costumbre, incluso con json_schema activo."""
+        """glm-5.2 fences out of habit, even with json_schema active."""
         fenced = "\n".join(("```json", VERDICT, "```"))
         assert _parse(marked(fenced))["agent"] == "melchior"
 
     def test_a_BARE_verdict_without_markers_is_REJECTED(self):
-        """R15 -- el requisito mas doloroso y el mas importante.
+        """R15 -- the most painful requirement, and the most important.
 
-        Antes de MS2 esto FUNCIONABA (es como llegaban las 3/3 salidas de Claude medidas),
-        y es EXACTAMENTE la variante 1 del residual en su forma pura: el eco solitario.
-        **Si se acepta un veredicto sin marcas, MS2 es teatro.**
+        Before MS2 this WORKED (it is how the 3/3 measured Claude outputs arrived), and it is
+        EXACTLY variant 1 of the residual in its pure form: the lone echo.
+        **If a verdict without markers is accepted, MS2 is theatre.**
         """
         with pytest.raises(MissingVerdictMarkers):
             _parse(VERDICT)
@@ -200,9 +219,31 @@ class TestSentinelExtraction:
     def test_a_claude_envelope_is_unwrapped_THEN_extracted(self):
         assert _parse(json.dumps({"result": marked(VERDICT)}))["agent"] == "melchior"
 
-    def test_json_that_decodes_but_is_NOT_an_envelope_fails_closed(self):
-        with pytest.raises((MissingVerdictMarkers, json.JSONDecodeError)):
+    def test_json_that_decodes_but_is_NOT_an_envelope_is_treated_as_RAW_TEXT(self):
+        """BDD-8b, and the exception TYPE is the whole point -- not just "it fails".
+
+        This test used to accept ``(MissingVerdictMarkers, json.JSONDecodeError)``, and that
+        disjunction hid a real spec-vs-code divergence: the parser was raising the second one.
+        Both fail closed, so the test stayed green -- but the exception type SELECTS the retry
+        instruction, and the two say opposite things. "Unrecognised output shape" teaches the
+        model NOTHING; "you left out the markers" is the actual, correctable defect.
+
+        A decodable object that is not a recognised envelope is not a transport wrapper: it is
+        the model's own text, and the raw text is the payload. With no markers in it, there is
+        no verdict.
+        """
+        with pytest.raises(MissingVerdictMarkers):
             _parse(json.dumps({"foo": "bar"}))
+
+    def test_a_MALFORMED_envelope_is_still_a_transport_error(self):
+        """The other side of the same coin: an envelope is the CLI's wrapper, not the model's.
+
+        A dict that DOES carry ``result``/``content`` but is malformed is a transport problem.
+        Telling the model "you left out the markers" would be a false instruction about text
+        it never wrote -- so this one keeps its unrecognised-shape error.
+        """
+        with pytest.raises(json.JSONDecodeError, match="content"):
+            _parse(json.dumps({"content": "not a list"}))
 
     def test_two_blocks_fail_closed(self):
         with pytest.raises(AmbiguousVerdictMarkers):
@@ -213,17 +254,17 @@ class TestSentinelExtraction:
             _parse("\n".join((VERDICT_OPEN, VERDICT)))
 
     def test_invalid_json_between_the_markers_still_raises_JSONDecodeError(self):
-        """El orquestador reintenta ante ``(ValidationError, JSONDecodeError)``: si el
-        contenido entre marcas no decodifica, el mago debe conservar su reintento."""
+        """The orchestrator retries on ``(ValidationError, JSONDecodeError)``: if the content
+        between the markers does not decode, the mage must keep its retry."""
         with pytest.raises(json.JSONDecodeError):
-            _parse(marked("{roto,"))
+            _parse(marked("{broken,"))
 
 
 class TestClaudeCliFixtureContract:
-    """Los fixtures pinnean el TRANSPORTE (las formas de envelope), que MS2 no cambia.
+    """The fixtures pin the TRANSPORT (the envelope shapes), which MS2 does not change.
 
-    Lo que cambia es su **contenido interno**, que ahora lleva marcas -- porque a partir de
-    MS2 **eso es lo que ``claude -p`` devuelve de verdad**.
+    What changes is their **inner content**, which now carries markers -- because from MS2
+    onward **that is what ``claude -p`` actually returns**.
     """
 
     FIXTURES = [
