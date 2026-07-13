@@ -275,6 +275,13 @@ def measure_raw_file(raw_path: Path, agent: str) -> None:
         with agent_context(agent):
             try:
                 _parse_agent_output(str(raw_path), str(parsed_path))
+            except RecursionError:
+                # Already tallied by ``_spy`` as invalid content. Caught HERE too, because the
+                # spy re-raises it and this was the only place left where it could escape --
+                # and an escape takes down the whole release measurement, leaving no artifact
+                # at all, which is the one outcome this instrument must never produce. The spy's
+                # comment promised the measurement carries on; this is what makes that true.
+                return
             except (VerdictExtractionError, json.JSONDecodeError):
                 # Already tallied by ``_spy`` (VerdictExtractionError: marker omission
                 # / ambiguity; JSONDecodeError: invalid JSON inside the markers, or an
