@@ -44,6 +44,17 @@ ECHO_CANARY: dict[str, str] = {
 #: es exhaustiva y no envejece.**
 _STRIPPED_CATEGORIES = frozenset({"Cf", "Mn"})
 
+#: Los UNICOS separadores que cuentan como fin de linea al buscar una marca: los que JSON
+#: **escapa dentro de un string**. ``str.splitlines()`` corta ademas por ``\v``, ``\f``,
+#: ``\x1c-\x1e``, ``U+0085``, ``U+2028`` y ``U+2029``; los tres ultimos son **legales
+#: crudos dentro de un string JSON**, asi que con ``splitlines`` una marca CITADA en el
+#: payload podia quedar sola en un renglon y partir el bloque -- justo el caso que el
+#: anclaje a linea promete que es imposible, y justo el que MAGI produce **al revisarse a
+#: si mismo** (un finding sobre el sentinel cita la marca). Recortar el juego de
+#: separadores no puede abrir un fail-open: una linea que contenga ``U+2028`` no normaliza
+#: a la marca, luego solo puede fallar cerrado.
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
 #: Fence de apertura: ``` o ~~~, con o sin info-string, con espacios alrededor.
 #: El info-string se acepta **permisivo** (cualquier token sin espacios) y NO como lista
 #: blanca: una lista **enumera** lo permitido, asi que cada lenguaje con un punto o una
@@ -219,7 +230,16 @@ class VerdictSentinel:
             AmbiguousVerdictMarkers: El conteo no es exactamente 1 y 1, o el cierre
                 precede a la apertura.
         """
-        lines = text.splitlines()
+        # Una "linea" es lo que JSON **escapa dentro de un string**: ``\n``, ``\r\n``,
+        # ``\r``. NO ``str.splitlines()``, que corta ademas por ``\v``, ``\f``,
+        # ``\x1c-\x1e``, ``U+0085``, ``U+2028`` y ``U+2029`` -- y los tres ultimos son
+        # **legales crudos dentro de un string JSON**. Con splitlines, un finding SOBRE el
+        # sentinel que citara la marca detras de un ``U+2028`` la dejaba **sola en su
+        # renglon** -> 2 cierres -> el mago moria por un separador invisible. Fallaba
+        # cerrado, si, pero por un caso que la garantia de arriba dice que no puede pasar:
+        # la garantia era mas ancha que el codigo. No partir por ``U+2028`` **no puede**
+        # abrir un fail-open (una linea que lo contenga no normaliza a la marca).
+        lines = _LINE_BREAK.split(text)
 
         opens: list[int] = []
         closes: list[int] = []
