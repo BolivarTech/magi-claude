@@ -498,3 +498,22 @@ def test_installing_the_spy_twice_does_not_make_it_permanent():
     mma.uninstall_spy()
 
     assert VerdictSentinel.extract is mma._real_extract
+
+
+def test_measuring_a_payload_with_a_HUGE_INTEGER_does_not_abort_the_measurement(tmp_path):
+    """MAGI gate (Caspar, cycle 15): the same hole as RecursionError, wearing another name.
+
+    ``json.loads`` raises a PLAIN ``ValueError`` -- not ``JSONDecodeError`` -- when a number
+    exceeds ``int_max_str_digits`` (4300 by default). The production parser has always mapped
+    that to ``JSONDecodeError`` so the mage keeps its retry; the instrument did not, so one
+    pathological completion would take the whole release measurement down and leave no artifact
+    at all. Catching only the exceptions you thought of is how an instrument you trust dies on
+    the input you did not.
+    """
+    huge = "1" * 5000
+    raw = _write_raw(tmp_path, "caspar", '<MAGI_VERDICT>\n{"n": ' + huge + "}\n</MAGI_VERDICT>")
+    mma.install_spy()
+
+    mma.measure_raw_file(raw, "caspar")  # must NOT raise
+
+    assert mma.tally["caspar"]["invalid_json"] == 1
