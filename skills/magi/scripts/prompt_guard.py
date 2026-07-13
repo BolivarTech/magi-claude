@@ -31,7 +31,10 @@ EXPECTED_MARKER_COUNT = 1
 #: owes the reader somewhere to go. The FAQ documents each message and how to fix it --
 #: including the case a user is most likely to hit: a customised prompt (MAGI gate,
 #: Balthasar). An error that only forbids, without teaching, is half an error.
-FAQ_HINT = "See docs/faq-prompt-guard.md for this message and how to fix it."
+FAQ_HINT = (
+    "See docs/faq-prompt-guard.md for this message and how to fix it "
+    "(https://github.com/BolivarTech/magi-claude/blob/main/docs/faq-prompt-guard.md)."
+)
 
 
 class PromptContractError(Exception):
