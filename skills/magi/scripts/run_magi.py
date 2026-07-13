@@ -186,8 +186,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         Parsed namespace with mode, input, timeout, output_dir.
     """
     parser = argparse.ArgumentParser(description="MAGI Orchestrator")
-    parser.add_argument("mode", choices=VALID_MODES, help="Analysis mode")
-    parser.add_argument("input", help="Path to file or inline text to analyze")
+    # Optional AT PARSE TIME, required in practice: ``--check-prompts`` is a dry run that needs
+    # neither a mode nor an input, and making argparse enforce the positionals would force that
+    # flag to be screened out of ``sys.argv`` by hand -- which silently breaks argparse's own
+    # abbreviations (``--check`` would expand to ``--check-prompts`` and then be ignored, giving
+    # the user a normal run they did not ask for; MAGI gate, Balthasar). Enforced below instead.
+    parser.add_argument("mode", nargs="?", choices=VALID_MODES, help="Analysis mode")
+    parser.add_argument("input", nargs="?", help="Path to file or inline text to analyze")
     parser.add_argument(
         "--timeout",
         type=int,
@@ -316,6 +321,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.warn_input_tokens <= 0:
         parser.error("--warn-input-tokens must be a positive integer")
+    if not args.check_prompts and (args.mode is None or args.input is None):
+        parser.error("the following arguments are required: mode, input")
     if args.ollama and args.model is not None:
         parser.error(
             "--model does not apply with --ollama; per-mage models are "
@@ -335,7 +342,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # INVARIANT: --model must stay None when --ollama is set. Do NOT collapse
     # this into `args.model or MODE_DEFAULT_MODELS[...]` — that would silently
     # re-enable `--ollama --model` and feed Ollama a Claude-shaped model name.
-    if not args.ollama and args.model is None:
+    #
+    # ``args.mode is not None`` guards the dry run, which HAS no mode: the model default is
+    # keyed by mode, and a lookup of ``None`` is a ``KeyError`` -- i.e. ``--check-prompts``
+    # would die inside argument parsing, before the guard it exists to run.
+    if not args.ollama and args.model is None and args.mode is not None:
         args.model = MODE_DEFAULT_MODELS[args.mode]
     return args
 
@@ -1990,12 +2001,14 @@ def main() -> None:
         print(f"Wrote Ollama config template to {path}")
         sys.exit(0)
 
-    # Same short-circuit shape as --ollama-init, and for the same reason: a dry run of the
-    # prompt guard needs neither a mode nor an input, so it must not have to invent them.
-    if "--check-prompts" in sys.argv[1:]:
-        check_prompts(_default_agents_dir())
-
     args = parse_args()
+
+    # A dry run of the prompt guard: no mode, no input, no tokens. Decided from the PARSED
+    # args, not by scanning sys.argv -- a raw scan duplicates the flag name as a magic string
+    # and bypasses argparse's abbreviation handling, so ``--check`` would be accepted, expanded,
+    # and then quietly ignored (MAGI gate, Balthasar).
+    if args.check_prompts:
+        check_prompts(_default_agents_dir())
 
     try:
         input_content, input_label = _load_input_content(args.input)
