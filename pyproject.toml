@@ -1,13 +1,10 @@
 [project]
 name = "magi"
-version = "5.0.2"
+version = "5.0.3"
 requires-python = ">= 3.12"
 description = "MAGI multi-perspective analysis plugin for Claude Code"
 license = "MIT OR Apache-2.0"
 authors = [{name = "Julian Bolivar"}]
-
-[project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -52,6 +49,19 @@ warn_return_any = false
 disable_error_code = ["type-arg", "misc", "unused-ignore"]
 
 [dependency-groups]
+# The gate's toolchain lives HERE, not in [project.optional-dependencies], because
+# `uv run` / `uv sync` install dependency-groups by default and extras only on demand:
+# as an extra, the toolchain was never governed by uv.lock at all -- `uv run mypy` just
+# found whatever happened to be in the venv. Two machines drifted to two toolchains and
+# the gate answered differently on the same code (mypy 1.20 reports a no-any-return in
+# model_context.py that 2.x does not: 1.x fails to narrow Any -> int when the value comes
+# from a for-loop unpack, so the isinstance guard is invisible to it).
+#
+# Floors say which versions the gate was ever green on; uv.lock pins the exact ones.
 dev = [
     "hypothesis>=6.156.6",
+    "mypy>=2.1.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.15.18",
 ]

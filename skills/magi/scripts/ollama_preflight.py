@@ -212,6 +212,32 @@ def _check_fallback_lineages_are_unique(
             )
 
 
+def check_config_offline(config: OllamaConfig) -> list[str]:
+    """Run every config check that needs no network. The single source of truth.
+
+    Both the preflight (before a run) and ``validate_magi_toml.py`` (before you even
+    have a run) must answer the SAME question -- "is this config acceptable?" -- so
+    they call this, not their own copy. The validator used to re-derive one of these
+    checks by hand and consequently said ``OK`` to a duplicate-lineage fallback that
+    the preflight fail-closes on: a pre-run tool that green-lights what the product
+    refuses to run is worse than no tool.
+
+    Args:
+        config: The resolved configuration.
+
+    Returns:
+        Lineage warnings (R21). Non-empty is not a failure -- they are typo hints.
+
+    Raises:
+        OllamaPreflightError: Two trio mages sharing a lineage (R22), or two fallback
+            entries sharing a lineage (R11.3). Both are fail-closed: they attack the
+            one-lineage-one-mage invariant the whole system rests on.
+    """
+    _check_trio_lineages_are_distinct(config.models)
+    _check_fallback_lineages_are_unique(config.fallback, config.models)
+    return _check_lineage_patterns(config.models, config.fallback)
+
+
 def _check_lineage_patterns(
     models: Mapping[str, ModelSpec],
     fallback: Sequence[ModelSpec],
@@ -304,9 +330,7 @@ async def preflight(config: OllamaConfig, prompt: str) -> PreflightResult:
         raise OllamaPreflightError(redact_secrets(str(exc), config.api_key)) from None
 
     # 1. Structural checks first -- they cost nothing and catch config errors.
-    _check_trio_lineages_are_distinct(config.models)
-    _check_fallback_lineages_are_unique(config.fallback, config.models)
-    lineage_warnings = _check_lineage_patterns(config.models, config.fallback)
+    lineage_warnings = check_config_offline(config)
 
     # 2. The trio is a REQUIREMENT; the fallbacks are insurance (R11.1).
     missing = [spec.model for spec in config.models.values() if spec.model not in available]

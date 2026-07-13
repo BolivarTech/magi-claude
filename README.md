@@ -59,7 +59,7 @@ different lineage** instead of losing the mage to degraded mode — preserving t
 independent perspectives the ensemble depends on. This **changes the `magi-ollama.toml`
 schema**: `[models]` entries go from a bare string to a table with an explicit `lineage`
 (`melchior = { model = "qwen3.5:397b-cloud", lineage = "alibaba" }`). A v4 config now
-fails closed with an actionable error — run `python scripts/validate_magi_toml.py` to see
+fails closed with an actionable error — run `python skills/magi/scripts/validate_magi_toml.py` to see
 exactly what to change (the lineage is never inferred). **Kill-switch:**
 `MAGI_OLLAMA_MAX_ROTATIONS=0` disables rotation entirely (a shadow-rollout mode that keeps
 the new preflight/probe active while rotation is off). **Hard limitation:** on an endpoint
@@ -377,12 +377,21 @@ make typecheck   # mypy
 |-----------|----------|-------|
 | Claude Code CLI (`claude -p`) | For parallel mode | Fallback available without it |
 | Python 3.12+ | Yes | Uses `asyncio`, `dict[str, Any]` syntax |
+| [`uv`](https://docs.astral.sh/uv/) | **To develop** (not to use) | Every `make` target runs through `uv run`, so the toolchain comes from `uv.lock` instead of from whichever venv is active. Using the plugin needs none of this. |
 
 ### Dev Dependencies
 
 ```bash
-pip install pytest pytest-asyncio ruff mypy
+uv sync          # installs the toolchain pinned in uv.lock
+make verify      # lockcheck + tests + ruff check + ruff format --check + mypy
 ```
+
+**`uv` is required for every `make` target** (each one runs through `uv run`). That is
+deliberate: with a bare `pip install`, the toolchain you get depends on which venv is
+active, and two unpinned toolchains gave *opposite verdicts on the same code* — `mypy`
+1.x reports a `no-any-return` that 2.x does not. A gate that answers differently
+depending on which shell you are in is not a gate. `uv sync` also brings in `hypothesis`,
+which the property-based tests need.
 
 ---
 

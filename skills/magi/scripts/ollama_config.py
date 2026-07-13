@@ -66,13 +66,20 @@ DEFAULT_STRICT_CONTEXT_GUARD = False
 
 #: Ordered strong->weak, ONE model per lineage, none colliding with the trio's
 #: lineages. Verified against registry.ollama.ai on 2026-07-11 (the website lists
-#: tags the registry does not serve -- see scripts/verify_fallback_tags.py).
+#: tags the registry does not serve, so the check must hit the registry). The
+#: pre-release check itself is maintainer tooling and is not shipped.
 DEFAULT_FALLBACK: tuple[ModelSpec, ...] = (
     ModelSpec("glm-5.2:cloud", "zhipu"),
     ModelSpec("gpt-oss:120b-cloud", "openai"),
     ModelSpec("minimax-m3:cloud", "minimax"),
     ModelSpec("nemotron-3-super:cloud", "nvidia"),
-    ModelSpec("gemini-3-flash-preview:latest", "google"),
+    # The Google slot was gemini-3-flash-preview:latest, taken as a known risk: one model
+    # per lineage, and Gemini 3 beat gemma4. Ollama is retiring that tag (2026-07-15), so
+    # it goes back to gemma4:cloud (verified against registry.ollama.ai, HTTP 200). A
+    # retired default is harmless by R11.1 -- a missing fallback warns, never aborts -- but
+    # it would put a dead entry, and a warning, in every scaffolded config. Never ship a
+    # preview tag as a default: it is a promise the vendor has not made (pinned by test).
+    ModelSpec("gemma4:cloud", "google"),
 )
 
 _KNOWN_TOP_KEYS = {
@@ -197,7 +204,7 @@ _MIGRATION_HINT = (
     "lineage explicitly.\n"
     '  OLD:  melchior = "qwen3.5:397b-cloud"\n'
     '  NEW:  melchior = { model = "qwen3.5:397b-cloud", lineage = "alibaba" }\n'
-    "Run `python scripts/validate_magi_toml.py` for a per-key report."
+    "Run `python skills/magi/scripts/validate_magi_toml.py` for a per-key report."
 )
 
 #: A model tag is user input from a TOML, and it reaches BOTH a JSON body (Ollama)
