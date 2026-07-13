@@ -1,3 +1,4 @@
+<MAGI_VERDICT>
 ```json
 {
   "agent": "caspar",
@@ -16,3 +17,4 @@
   "recommendation": "Fix the six concrete defects, then execute."
 }
 ```
+</MAGI_VERDICT>

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from collections import Counter, defaultdict
 import os
 import re
 import shutil
@@ -29,7 +30,7 @@ import sys
 import urllib.error
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 # Bootstrap: make sibling modules importable under invocations that do NOT
 # auto-inject this directory into sys.path (e.g. ``python -m
@@ -42,7 +43,6 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from model_context import (  # noqa: E402
-    MAX_ERROR_CHARS,
     ProbeTokensFn,
     compute_required_tokens,
     make_probe,
@@ -94,7 +94,24 @@ from review_context import enrich_code_review_context, resolve_diff  # noqa: E40
 from cost import aggregate_cost  # noqa: E402
 from input_size import WARN_INPUT_TOKENS, check_input_size, estimate_tokens  # noqa: E402
 from finding_validation import parse_diff_ranges, validate_findings  # noqa: E402
-from validate import MAX_INPUT_FILE_SIZE, ValidationError  # noqa: E402
+from prompt_guard import AgentPromptGuard, PromptContractError  # noqa: E402
+from retry_feedback import (  # noqa: E402
+    FEEDBACK_TEMPLATES,
+    MAX_ERROR_CHARS,
+    retry_feedback_cause,
+)
+from validate import (  # noqa: E402
+    MAX_ATTEMPTS_CAP,
+    MAX_INPUT_FILE_SIZE,
+    MIN_ATTEMPTS,
+    ValidationError,
+)
+from verdict_markers import (  # noqa: E402
+    ECHO_CANARY,
+    VerdictSentinel,
+    AgentIdentityError,
+    EchoedExampleRejected,
+)
 
 # Public star-import contract. Underscore-prefixed symbols from
 # ``stderr_shim`` (``_StderrBufferShim``, ``_BinaryStderrBufferShim``,
@@ -126,6 +143,43 @@ MAX_HISTORY_RUNS = 5
 VALID_MODES = ("code-review", "design", "analysis")
 
 
+#: Attempts per model, by default: the original + 1 retry with corrective feedback.
+DEFAULT_MAX_ATTEMPTS = 2
+
+#: The bounds themselves live in ``validate`` and are RE-EXPORTED here, because the budget has
+#: two doors -- this flag and the Ollama TOML's ``max_attempts_per_model`` -- and they must not
+#: be able to disagree. **This is not paranoia:** ``--max-attempts 1000`` (one zero too many)
+#: turns a stubborn mage into a thousand calls -- expensive on Ollama, where `:cloud` is a paid
+#: tier, and hundreds of dollars on Claude. The comment that used to sit here claimed the TOML
+#: "already validates this way". It did not: it accepted 1000 (MAGI gate, Balthasar).
+
+
+def _max_attempts(raw: str) -> int:
+    """Validate ``--max-attempts``: an integer in ``[MIN_ATTEMPTS, MAX_ATTEMPTS_CAP]``.
+
+    Args:
+        raw: The value exactly as it arrives from the command line.
+
+    Returns:
+        The validated integer.
+
+    Raises:
+        argparse.ArgumentTypeError: If it is not an integer, or falls outside the range.
+            **Fails closed**: it never degrades to a silent default.
+    """
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--max-attempts must be an integer (got {raw!r})"
+        ) from exc
+    if not MIN_ATTEMPTS <= value <= MAX_ATTEMPTS_CAP:
+        raise argparse.ArgumentTypeError(
+            f"--max-attempts must be between {MIN_ATTEMPTS} and {MAX_ATTEMPTS_CAP} (got {value})"
+        )
+    return value
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments.
 
@@ -136,8 +190,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         Parsed namespace with mode, input, timeout, output_dir.
     """
     parser = argparse.ArgumentParser(description="MAGI Orchestrator")
-    parser.add_argument("mode", choices=VALID_MODES, help="Analysis mode")
-    parser.add_argument("input", help="Path to file or inline text to analyze")
+    # Optional AT PARSE TIME, required in practice: ``--check-prompts`` is a dry run that needs
+    # neither a mode nor an input, and making argparse enforce the positionals would force that
+    # flag to be screened out of ``sys.argv`` by hand -- which silently breaks argparse's own
+    # abbreviations (``--check`` would expand to ``--check-prompts`` and then be ignored, giving
+    # the user a normal run they did not ask for; MAGI gate, Balthasar). Enforced below instead.
+    parser.add_argument("mode", nargs="?", choices=VALID_MODES, help="Analysis mode")
+    parser.add_argument("input", nargs="?", help="Path to file or inline text to analyze")
     parser.add_argument(
         "--timeout",
         type=int,
@@ -187,6 +246,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="show_status",
         action="store_false",
         help="Disable the live status tree display",
+    )
+    parser.add_argument(
+        "--check-prompts",
+        action="store_true",
+        help=(
+            "Validate the agent prompts against the verdict-marker contract and exit. "
+            "Costs no tokens; use it after customising a prompt. Handled before the "
+            "positional arguments are required (see main)."
+        ),
+    )
+    parser.add_argument(
+        "--max-attempts",
+        type=_max_attempts,
+        # A None sentinel, not the default value: "was it passed?" and "what is it worth?"
+        # are different questions, and answering the first with ``!= DEFAULT`` gets it wrong
+        # for exactly one value -- the default -- so ``--ollama --max-attempts 2`` would be
+        # overridden by the TOML in silence, which is the polite lie the warning exists to
+        # kill. Resolved to DEFAULT_MAX_ATTEMPTS below, so callers still read an int.
+        default=None,
+        help=(
+            f"Attempts per model, {MIN_ATTEMPTS}..{MAX_ATTEMPTS_CAP} "
+            f"(default: {DEFAULT_MAX_ATTEMPTS}). With --ollama, the TOML's "
+            f"max_attempts_per_model overrides it."
+        ),
     )
     parser.add_argument(
         "--base",
@@ -242,15 +325,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.warn_input_tokens <= 0:
         parser.error("--warn-input-tokens must be a positive integer")
+    if not args.check_prompts and (args.mode is None or args.input is None):
+        parser.error("the following arguments are required: mode, input")
     if args.ollama and args.model is not None:
         parser.error(
             "--model does not apply with --ollama; per-mage models are "
             "configured in magi-ollama.toml / MAGI_OLLAMA_MODEL_*."
         )
+    if args.ollama and args.max_attempts is not None:
+        # R13: with --ollama the TOML wins. It used to win SILENTLY, which is a polite
+        # lie: the user who passed the flag believes they configured something. Warn, do
+        # not error -- the flag is legal, it is simply overridden.
+        print(
+            f"[!] WARNING: --max-attempts {args.max_attempts} is overridden by "
+            "max_attempts_per_model in magi-ollama.toml (it governs the Ollama backend)",
+            file=sys.stderr,
+        )
+    if args.max_attempts is None:
+        args.max_attempts = DEFAULT_MAX_ATTEMPTS
     # INVARIANT: --model must stay None when --ollama is set. Do NOT collapse
     # this into `args.model or MODE_DEFAULT_MODELS[...]` — that would silently
     # re-enable `--ollama --model` and feed Ollama a Claude-shaped model name.
-    if not args.ollama and args.model is None:
+    #
+    # ``args.mode is not None`` guards the dry run, which HAS no mode: the model default is
+    # keyed by mode, and a lookup of ``None`` is a ``KeyError`` -- i.e. ``--check-prompts``
+    # would die inside argument parsing, before the guard it exists to run.
+    if not args.ollama and args.model is None and args.mode is not None:
         args.model = MODE_DEFAULT_MODELS[args.mode]
     return args
 
@@ -329,7 +429,37 @@ async def launch_agent(
         f.write(stdout)
 
     parse_raw_output(raw_file, parsed_file)
-    return load_agent_output(parsed_file)
+    payload = load_agent_output(parsed_file)
+
+    # --- The two guards that run AFTER the schema validates (MS2) ---
+    #
+    # Both raise ``ValidationError`` subclasses, so the orchestrator's retry guard catches
+    # them: the model gets corrective feedback and can fix itself.
+
+    # R6 -- anti-echo canary. The LAST belt: the sentinel already prevents anything from
+    # outside the markers being extracted, and the prompt puts nothing valid BETWEEN them.
+    # One theoretical path is left: the model taking the worked example from OUTSIDE and
+    # wrapping it in markers ITSELF. Its fingerprint gives it away.
+    if all(payload.get(key) == value for key, value in ECHO_CANARY.items()):
+        raise EchoedExampleRejected(
+            "the verdict is a verbatim copy of the prompt's example, not your analysis"
+        )
+
+    # R10 -- identity. ``load_agent_output`` validates that ``agent`` is in the ENUM, but
+    # nobody validated that it was the mage that was LAUNCHED. A duplicate name kills the
+    # whole run; a unique but wrong one puts one mage's text in another's seat, and the
+    # consensus counts it as an independent perspective **that never existed**.
+    #
+    # Case-insensitive: a model that writes "Caspar" DID emit its verdict correctly. Killing
+    # it over a capital letter is a retry given away for free, and the enum is validated
+    # separately anyway.
+    claimed = str(payload["agent"]).strip()
+    if claimed.casefold() != agent_name.casefold():
+        raise AgentIdentityError(
+            f"verdict claims agent {claimed!r} but {agent_name!r} was launched"
+        )
+
+    return payload
 
 
 class _DisplayLogGate:
@@ -466,56 +596,57 @@ def _classify(exc: BaseException) -> str:
     return _FAIL_UNEXPECTED
 
 
+#: The retry causes that map to a KNOWN, distinct corrective instruction. Every
+#: :class:`verdict_markers.VerdictExtractionError` subclass gets its own entry, plus
+#: the two causes ``verdict_markers`` does not raise: a JSON-decode failure INSIDE an
+#: otherwise well-formed block, and the generic 7-key schema contract.
+
+
 def _build_retry_prompt(
     original_prompt: str,
     error: ValidationError | json.JSONDecodeError,
     *,
     api_key: str | None = None,
 ) -> str:
-    """Return the retry prompt with corrective feedback appended.
+    """Return the retry prompt with CAUSE-SPECIFIC corrective feedback appended.
 
-    When :func:`launch_agent` raises :class:`ValidationError` (schema
-    fail) or :class:`json.JSONDecodeError` (output is not parseable JSON)
-    on the first attempt, :func:`run_orchestrator` calls this helper to
-    build the replacement prompt for the single retry. The original
-    user prompt is preserved verbatim so the agent's task is unchanged;
-    the parser/validator error message is appended so the model can
-    self-correct the specific defect — a missing key, a stray comma, a
-    truncated output, an unbalanced brace, etc. The envelope delimiter
-    ``---RETRY-FEEDBACK---`` is intentionally distinct from user input
-    so the model can identify the corrective block even if the original
-    prompt already contains arbitrary markdown.
+    When :func:`launch_agent` raises a schema-scoped exception (a
+    :class:`ValidationError` -- including every :mod:`verdict_markers` extraction
+    failure -- or a :class:`json.JSONDecodeError`) on an attempt, :func:`_attempt_model`
+    calls this helper to build the replacement prompt for the retry. The original
+    user prompt is preserved verbatim so the agent's task is unchanged; the
+    template picked by :func:`retry_feedback_cause` names the SPECIFIC defect --
+    missing markers, an unterminated block, more than one block, a copied example,
+    a wrong agent identity, undecodable JSON, or a missing schema key -- so the
+    model spends its one retry on the instruction that actually applies. Handing a
+    model that emitted NO markers the "emit exactly one block" instruction (the old,
+    single-template behaviour) wastes the retry on a FALSE diagnosis and the mage
+    dies. The envelope delimiter ``---RETRY-FEEDBACK---`` is intentionally distinct
+    from user input so the model can identify the corrective block even if the
+    original prompt already contains arbitrary markdown.
 
     Args:
-        original_prompt: The exact prompt sent on the first attempt.
-        error: The exception that triggered the retry. Currently either
-            :class:`ValidationError` (schema mismatch) or
-            :class:`json.JSONDecodeError` (output not parseable as JSON).
+        original_prompt: The exact prompt sent on the failed attempt.
+        error: The exception that triggered the retry. A :class:`ValidationError`
+            (schema mismatch, or any :mod:`verdict_markers` extraction failure) or
+            a :class:`json.JSONDecodeError` (content between the markers is not
+            parseable JSON).
         api_key: The Ollama api_key, if any. The error is REDACTED against it
             before being embedded -- the retry prompt is written to
             ``{agent}.prompt.txt``, and NR3b requires the key to appear on no
-            surface (MAG gate, Caspar): the error is redacted at every other
+            surface (MAGI gate, Caspar): the error is redacted at every other
             boundary, so this one must not be the exception.
 
     Returns:
         A new prompt string that concatenates the original prompt with a
-        feedback block describing the failure and restating the schema
-        contract.
+        cause-specific feedback block.
     """
     detail = redact_secrets(str(error), api_key)
     if len(detail) > MAX_ERROR_CHARS:
         detail = detail[:MAX_ERROR_CHARS] + "..."
-    return (
-        f"{original_prompt}\n\n"
-        f"---RETRY-FEEDBACK---\n"
-        f"Your previous response was rejected by the parsing pipeline:\n"
-        f"{detail}\n\n"
-        f"Re-emit your response as a complete, syntactically valid JSON "
-        f"object containing ALL seven required top-level keys: agent, "
-        f"verdict, confidence, summary, reasoning, findings, "
-        f"recommendation. Do not omit any key, do not truncate, do not "
-        f"emit anything outside the JSON object."
-    )
+    cause = retry_feedback_cause(error)
+    feedback = FEEDBACK_TEMPLATES[cause].format(error=detail)
+    return f"{original_prompt}\n\n{feedback}"
 
 
 @dataclass(frozen=True)
@@ -650,6 +781,7 @@ async def _attempt_model(
     env: LaunchEnv,
     prompt: str,
     on_retry: Callable[[], None],
+    on_extraction_failure: Callable[[ValidationError | json.JSONDecodeError], None],
 ) -> dict[str, Any]:
     """Run ONE model until it succeeds or spends its attempt budget.
 
@@ -669,6 +801,10 @@ async def _attempt_model(
         env: Launch environment (agents dir, output dir, timeout, backend, api key).
         prompt: The original user prompt.
         on_retry: Called once per retry, for the "retrying" display state.
+        on_extraction_failure: Called once per SCHEMA failure (R18 adherence telemetry),
+            including the last one -- the attempt that kills the model is a data point
+            like any other. Injected, not read from a closure, for the same reason
+            ``on_retry`` is: this loop must not know what a report or a display is.
 
     Returns:
         The validated agent output.
@@ -706,14 +842,21 @@ async def _attempt_model(
                 # behind a degraded run (Balthasar, Checkpoint 2). Fail loud.
                 raise
             last = exc
-            if attempt + 1 >= ctx.config.max_attempts_per_model:
-                break
             # isinstance (not ``_classify(exc) == _FAIL_SCHEMA``) so mypy narrows exc to
-            # the type _build_retry_prompt accepts -- the two are equivalent by
-            # construction (_classify returns schema iff it is one of these).
+            # the type _build_retry_prompt and on_extraction_failure accept -- the two are
+            # equivalent by construction (_classify returns schema iff it is one of these).
             if isinstance(exc, (ValidationError, json.JSONDecodeError)):
+                # R18: tally BEFORE the budget check. The attempt that EXHAUSTS the model
+                # is exactly the one a marker-adherence gate must see; counting only the
+                # attempts that got retried reports a rate that is systematically
+                # optimistic -- the instrument would be blind to the failures that matter.
+                on_extraction_failure(exc)
+                if attempt + 1 >= ctx.config.max_attempts_per_model:
+                    break
                 # the model needs correcting; redact the api_key from the embedded error
                 attempt_prompt = _build_retry_prompt(prompt, exc, api_key=env.api_key)
+            elif attempt + 1 >= ctx.config.max_attempts_per_model:
+                break
             else:
                 attempt_prompt = prompt  # nothing to correct
                 await asyncio.sleep(ctx.config.retry_backoff_seconds)
@@ -1116,6 +1259,99 @@ async def select_backend(
     return OllamaBackend(config), dict(config.models), rotation
 
 
+def _default_agents_dir() -> str:
+    """The shipped ``agents/`` directory, next to this script's package.
+
+    ONE definition, used by both the run and the ``--check-prompts`` dry run: two copies of
+    this path is how the dry run ends up validating a directory the run never reads.
+
+    Returns:
+        Absolute path to ``skills/magi/agents``.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(os.path.dirname(script_dir), "agents")
+
+
+def check_prompts(agents_dir: str) -> None:
+    """Validate a directory of agent prompts and exit. The dry run of the startup guard.
+
+    The guard is strict on purpose: a prompt carrying a complete verdict BETWEEN the markers
+    lets the model copy it, and the copy would be accepted -- fabrication, reintroduced in the
+    user's own installation, where none of this repo's tests can see it. But strictness owes
+    the user a way to check their work: until now the only way to discover that an edit was
+    rejected was to START A RUN and watch it abort (MAGI gate, Balthasar, four cycles running).
+
+    This costs no tokens, touches no network, and is the same guard the run itself uses -- not
+    a second implementation that could drift from it.
+
+    Args:
+        agents_dir: The directory of ``{mage}.md`` prompts to validate.
+
+    Raises:
+        SystemExit: Always. ``0`` if every prompt honours the contract, ``1`` otherwise (with
+            the offending file and the reason on stderr).
+    """
+    try:
+        AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
+    except PromptContractError as exc:
+        print(f"[FATAL] {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"OK: the prompts in {agents_dir} honour the verdict-marker contract.")
+    sys.exit(0)
+
+
+def announce_extraction_failures(failures: Mapping[str, Mapping[str, int]]) -> None:
+    """Say out loud that a mage failed to deliver its verdict on some attempt (R18).
+
+    The counts already reach ``magi-report.json``. That was not enough, and the proof is a
+    real run: a gate cycle recorded ``caspar: {missing_markers: 1}`` -- the mage forgot the
+    markers, the retry recovered it, the run came out valid, and the only trace was a field
+    in a file nobody opens. A model drifting under the same tag looks exactly like that, run
+    after run, until it stops being recoverable. **A counter that has to be gone looking for
+    is a counter that gets found too late** (MAGI gate, Caspar).
+
+    Silent on a clean run: a warning that fires every time is a warning nobody reads.
+
+    Args:
+        failures: The per-agent, per-cause tally, exactly as it reaches the report.
+    """
+    if not failures:
+        return
+
+    detail = "; ".join(
+        f"{agent}: " + ", ".join(f"{cause}={count}" for cause, count in sorted(causes.items()))
+        for agent, causes in sorted(failures.items())
+    )
+    print(
+        f"[!] WARNING: verdict extraction failed on some attempts -- {detail}. "
+        "The retry (and rotation) may have recovered it, but a seat that keeps doing this is "
+        "a model drifting away from the marker contract. See docs/ollama-backend.md "
+        "(what each cause means and what to do about it).",
+        file=sys.stderr,
+    )
+
+
+def _record_extraction_failure(
+    tally: dict[str, "Counter[str]"],
+    agent: str,
+    error: ValidationError | json.JSONDecodeError,
+) -> None:
+    """Record the CAUSE of the extraction failure in the adherence telemetry (R18).
+
+    Reuses the same dispatcher that picks the retry's feedback
+    (``retry_feedback.retry_feedback_cause``), so the telemetry and the corrective
+    instruction **cannot disagree**: if the model is told "you were missing the markers",
+    the counter that goes up is ``missing_markers``. Duplicating the classification would
+    plant the seed of the report saying one thing and the prompt another, one day.
+
+    Args:
+        tally: The per-agent accumulator.
+        agent: The mage whose attempt failed.
+        error: The exception that took it down.
+    """
+    tally[agent][retry_feedback_cause(error)] += 1
+
+
 async def run_orchestrator(
     agents_dir: str,
     prompt: str,
@@ -1127,6 +1363,7 @@ async def run_orchestrator(
     backend: AgentBackend | None = None,
     rotation: RotationContext | None = None,
     show_status: bool = True,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> dict[str, Any]:
     """Run all three agents concurrently and synthesize results.
 
@@ -1159,8 +1396,34 @@ async def run_orchestrator(
         'degraded' and 'failed_agents' when < 3 agents succeed.
 
     Raises:
-        RuntimeError: If fewer than 2 agents succeed.
+        RuntimeError: If fewer than 2 agents succeed, or if ``max_attempts`` is < 1.
     """
+    # Validated HERE, at the entry point, not inside the per-agent coroutine: raised in
+    # there it would be captured by the ``gather`` and reported as "Only 0 agent(s)
+    # succeeded", burying its own cause. NOT an assert (``python -O`` strips those, and the
+    # attempt loop would then fall through to an UnboundLocalError on ``result``). The CLI
+    # cannot produce this -- ``_max_attempts`` enforces the range -- but ``run_orchestrator``
+    # is a public entry point with many direct callers.
+    if not MIN_ATTEMPTS <= max_attempts <= MAX_ATTEMPTS_CAP:
+        # BOTH ends. The CLI flag and the Ollama TOML are both bounded above; a direct Python
+        # caller was the last unbounded door, and the budget is spent on PAID calls (MAGI gate,
+        # Balthasar). NOT an assert: ``python -O`` strips those, and the loop below would then
+        # fall through to an UnboundLocalError on ``result``.
+        raise RuntimeError(
+            f"max_attempts must be between {MIN_ATTEMPTS} and {MAX_ATTEMPTS_CAP} "
+            f"(got {max_attempts})"
+        )
+
+    # The prompt-contract guard lives HERE, not only in ``main()`` (MAGI gate finding,
+    # Balthasar): this is the function that actually hands the ``.md`` files to a model, so
+    # this is the door that has to be shut. With the guard only in the CLI, any other caller
+    # -- a test, an integration -- ran with stale prompts or with a fabricable verdict
+    # BETWEEN the markers, which is precisely the last fabrication path MS2 closes.
+    # ``main()`` still calls it earlier to abort as soon as possible (without creating the
+    # temp dir or paying for the preflight); repeating it here costs three file reads and is
+    # idempotent.
+    AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
+
     # Back-compat (BDD-30): KEEP `model` so the ~40 existing call sites in
     # tests keep working untouched; derive agent_models from it when not
     # supplied. Values are ModelSpec now (launch_agent takes a spec); the
@@ -1178,6 +1441,11 @@ async def run_orchestrator(
     # cohorts: ``retried - failed`` is "retry recovered",
     # ``retried & failed`` is "retry also failed".
     retried: set[str] = set()
+    # R18 -- adherence telemetry. R17 measures ONCE, with TODAY's models; models drift under
+    # the same tag. Without this, the day one starts omitting the markers it would look like
+    # "MAGI is slow and rotates a lot" -- a symptom nobody would know how to read. Additive
+    # and fail-soft: ``consensus`` does not read it.
+    extraction_failures: dict[str, Counter[str]] = defaultdict(Counter)
     # Rotation telemetry (T10): agent -> its final AgentRotationState. Registered
     # up-front in the rotation path so even a mage that DIES appears, giving Task 13 a
     # defined source for model_configured / model_used / fallback_reason.
@@ -1228,37 +1496,36 @@ async def run_orchestrator(
         """
         _safe_display_update(display, name, "running", log_gate)
         try:
-            try:
-                result = await launch_agent(
-                    name,
-                    agents_dir,
-                    prompt,
-                    output_dir,
-                    timeout,
-                    agent_models[name],
-                    backend=backend,
-                )
-            except (ValidationError, json.JSONDecodeError) as err:
-                # Single-shot retry (2.2.0 + 2.2.4): fires on schema
-                # drift (ValidationError, 2.2.0 scope) AND on JSON parse
-                # failures (json.JSONDecodeError, 2.2.4 scope expansion).
-                # Never on timeout / subprocess failure / cancellation /
-                # ValueError (config or parser-shape errors). The retry
-                # gets a fresh ``timeout`` budget (not the residual of
-                # the first attempt) and carries the parser/validator
-                # text so the model can target the specific defect —
-                # missing key, truncated output, unbalanced brace, etc.
-                retried.add(name)
-                _safe_display_update(display, name, "retrying", log_gate)
-                result = await launch_agent(
-                    name,
-                    agents_dir,
-                    _build_retry_prompt(prompt, err),
-                    output_dir,
-                    timeout,
-                    agent_models[name],
-                    backend=backend,
-                )
+            # N attempts (MS2/R13): the Claude path had a fixed SINGLE-SHOT retry; it is now
+            # governed by ``--max-attempts`` (default 2 = the previous behaviour, exactly).
+            #
+            # It fires on schema drift (ValidationError -- which includes ALL the sentinel's
+            # extraction failures) and on unparseable JSON (json.JSONDecodeError). NEVER on
+            # timeout / subprocess failure / cancellation / ValueError. Each retry gets a
+            # FRESH ``timeout`` (not the leftover of the previous one) and carries the
+            # CAUSE-SPECIFIC corrective feedback: the exception type selects the instruction,
+            # so a model that forgot the markers is told "you were missing the markers" and
+            # not a generic schema message.
+            attempt_prompt = prompt
+            for attempt in range(max_attempts):
+                try:
+                    result = await launch_agent(
+                        name,
+                        agents_dir,
+                        attempt_prompt,
+                        output_dir,
+                        timeout,
+                        agent_models[name],
+                        backend=backend,
+                    )
+                    break
+                except (ValidationError, json.JSONDecodeError) as err:
+                    _record_extraction_failure(extraction_failures, name, err)
+                    if attempt + 1 >= max_attempts:
+                        raise
+                    retried.add(name)
+                    _safe_display_update(display, name, "retrying", log_gate)
+                    attempt_prompt = _build_retry_prompt(prompt, err)
         except (asyncio.TimeoutError, TimeoutError):
             _safe_display_update(display, name, "timeout", log_gate)
             raise
@@ -1292,11 +1559,23 @@ async def run_orchestrator(
             retried.add(name)
             _safe_display_update(display, name, "retrying", log_gate)
 
+        def on_extraction_failure(err: ValidationError | json.JSONDecodeError) -> None:
+            """Tally a schema failure of THIS mage into the run's adherence telemetry (R18).
+
+            The rotation path is the one R18 exists for: a model that starts omitting the
+            markers shows up here as a cause, instead of as an unreadable "MAGI is slow
+            and rotates a lot". The mage's seat is what is counted -- a rotated model's
+            failures belong to the same seat.
+            """
+            _record_extraction_failure(extraction_failures, name, err)
+
         _safe_display_update(display, name, "running", log_gate)
         async with ctx.registry.agent_slot(name, state) as slot:
             while True:
                 try:
-                    result = await _attempt_model(name, spec, ctx, env, prompt, on_retry)
+                    result = await _attempt_model(
+                        name, spec, ctx, env, prompt, on_retry, on_extraction_failure
+                    )
                 except _AttemptsExhausted as exc:
                     # The model spent its budget. Route the failure by scope (schema
                     # local / transport run-wide) then propose the next model.
@@ -1404,6 +1683,19 @@ async def run_orchestrator(
             successful.append(result)
 
     if len(successful) < 2:
+        # R18 has to SURVIVE the run's death, and this is the only place where it can. A run
+        # that dies below the 2-mage floor does NOT write ``magi-report.json`` -- and with it
+        # would go the only data that explains the death. The day a model starts omitting the
+        # markers, MAGI would die saying "only 0 mages succeeded" and nobody would know why:
+        # exactly the unreadable symptom this telemetry exists to eliminate. It goes to
+        # stderr because that is the only channel left when there is no report.
+        if extraction_failures:
+            causes = {agent: dict(counts) for agent, counts in sorted(extraction_failures.items())}
+            print(
+                f"[!] extraction_failures (R18, the run died before it could be reported): "
+                f"{json.dumps(causes, sort_keys=True)}",
+                file=sys.stderr,
+            )
         raise RuntimeError(
             f"Only {len(successful)} agent(s) succeeded \u2014 fewer than 2 required for synthesis"
         )
@@ -1432,6 +1724,14 @@ async def run_orchestrator(
     # that ignore unknown keys keep working unchanged.
     if retried:
         report["retried_agents"] = sorted(retried)
+    if extraction_failures:
+        # R18. ADDITIVE and FAIL-SOFT: ``consensus`` does not read it, and a report without
+        # this field is still valid (NR3). It is the only thing that will SEE a model's
+        # drift in production -- which, with a sample of 5+2, is the only place the real
+        # rate can be known.
+        report["extraction_failures"] = {
+            agent: dict(causes) for agent, causes in sorted(extraction_failures.items())
+        }
 
     # T13 telemetry (R9/R13/R16): fold each mage's rotation state + the preflight's
     # measured fields into the report. Additive and fail-soft -- absent on the Claude
@@ -1714,6 +2014,13 @@ def main() -> None:
 
     args = parse_args()
 
+    # A dry run of the prompt guard: no mode, no input, no tokens. Decided from the PARSED
+    # args, not by scanning sys.argv -- a raw scan duplicates the flag name as a magic string
+    # and bypasses argparse's abbreviation handling, so ``--check`` would be accepted, expanded,
+    # and then quietly ignored (MAGI gate, Balthasar).
+    if args.check_prompts:
+        check_prompts(_default_agents_dir())
+
     try:
         input_content, input_label = _load_input_content(args.input)
     except ValueError as exc:
@@ -1749,15 +2056,35 @@ def main() -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    skill_dir = os.path.dirname(script_dir)
-    agents_dir = os.path.join(skill_dir, "agents")
+    agents_dir = _default_agents_dir()
 
     # Hard prerequisite check: only required for the Claude path. When --ollama
     # is set the claude CLI is not used, so skip the gate entirely to allow the
     # Ollama backend to run even when claude is absent from PATH.
     if not args.ollama and not shutil.which("claude"):
         print("ERROR: 'claude' CLI not found in PATH", file=sys.stderr)
+        sys.exit(1)
+
+    # --- Prompt-contract startup guard (R9, MS2) -------------------------------------
+    #
+    # Runs BEFORE spending a single token, against the ``agents_dir`` the run will ACTUALLY
+    # use (not a fixed path). It covers what no test of ours can see: **the user's
+    # installation**. The anchoring test runs in the developer's repo; the stale-copy bug
+    # (``mklink /D`` silently degrading to a copy on Windows) produces old prompts with a
+    # new parser on the user's machine.
+    #
+    # And it closes the LAST fabrication path: a user who "improves" the prompt by putting a
+    # complete example BETWEEN the markers lets the model copy it and lets that copy be
+    # accepted as a verdict -- neither the canary (it is not the shipped example) nor the
+    # anchoring test (it runs in OUR repo) would see it.
+    #
+    # ``PromptContractError`` is a SIBLING of ``ValidationError``, not a child: a stale
+    # prompt is NOT fixed by retrying, so the retry guard must not swallow it. Here it is
+    # caught and the run aborts -- exactly like ``OllamaConfigError``.
+    try:
+        AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
+    except PromptContractError as exc:
+        print(f"[FATAL] {exc}", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -1823,6 +2150,7 @@ def main() -> None:
                 backend=backend,
                 rotation=rotation,
                 show_status=args.show_status,
+                max_attempts=args.max_attempts,
             )
         )
     except BaseException:
@@ -1932,6 +2260,11 @@ def main() -> None:
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+
+    # R18 made ACTIVE: filing the counts was not enough (MAGI gate, Caspar). Announced here,
+    # after the report exists, so the message and the file it points to always agree.
+    announce_extraction_failures(report.get("extraction_failures", {}))
+
     print(f"\nFull report saved to: {report_path}")
     print(f"Cost: ${report['cost']['total_usd']:.4f} ({len(report['agents'])} agents)")
     print(f"Input size: ~{est_tokens} tokens ({raw_input_chars} chars)")

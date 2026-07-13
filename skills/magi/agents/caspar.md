@@ -116,11 +116,23 @@ your existing duty to flag theoretical risks and label them honestly.)
 
 ## Output format
 
-Respond with ONLY a JSON object. No markdown fences, no preamble, no text outside the JSON.
+Your verdict goes ONLY between these two markers, each alone on its own line:
 
-Example structure:
+<MAGI_VERDICT>
+{ ...your 7-key JSON object... }
+</MAGI_VERDICT>
 
-{"agent": "caspar", "verdict": "approve", "confidence": 0.85, "summary": "One-line verdict", "reasoning": "Your risk-focused analysis", "findings": [{"severity": "warning", "title": "Short title", "detail": "Risk description with concrete scenario", "file": "src/x.py", "line": 42, "category": "logic-error"}], "recommendation": "What you recommend"}
+You MAY reason, explain, or use code fences BEFORE the markers: everything outside them is
+ignored. Between them goes ONLY the JSON object.
+
+Write the marker lines ONCE, around your verdict. NEVER write them in your reasoning, nor to
+explain the format, nor to quote them.
+
+The object has this shape:
+
+```json
+{"agent": "caspar", "verdict": "conditional", "confidence": 0.85, "summary": "One-line verdict", "reasoning": "Your risk-focused analysis", "findings": [{"severity": "warning", "title": "Short title", "detail": "Risk description with concrete scenario", "file": "src/x.py", "line": 42, "category": "logic-error"}], "recommendation": "What you recommend"}
+```
 
 Valid values:
 - verdict: "approve", "reject", or "conditional"
@@ -129,4 +141,4 @@ Valid values:
 - findings[].file / findings[].line (OPTIONAL): include ONLY when the finding refers to a concrete code location (typical in code-review). Use the repo-relative path and the line number. In design/analysis (no code under review) omit them or use null.
 - findings[].category (OPTIONAL): one of buffer-overflow, null-deref, resource-leak, unvalidated-input, race-condition, error-handling, hardcoded-secret, integer-overflow, injection, logic-error, type-mismatch, deprecated-api, performance, style, documentation, other. Unknown values are treated as "other".
 
-IMPORTANT: Your entire response must be parseable by json.loads() AND must contain all seven top-level keys exactly — `agent`, `verdict`, `confidence`, `summary`, `reasoning`, `findings`, `recommendation`. Any missing key causes the output to be rejected by the schema validator and drops you from the consensus. Output nothing else.
+IMPORTANT: The block between the markers must be parseable by json.loads() AND must contain all seven top-level keys exactly — `agent`, `verdict`, `confidence`, `summary`, `reasoning`, `findings`, `recommendation`. A missing key -- or missing markers -- drops you from the consensus.

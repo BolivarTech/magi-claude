@@ -20,7 +20,7 @@ from functools import partial
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
-from validate import ValidationError
+from validate import MAX_ATTEMPTS_CAP, MIN_ATTEMPTS, ValidationError
 
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
 
@@ -86,7 +86,6 @@ _KNOWN_TOP_KEYS = {
     "base_url",
     "api_key",
     "models",
-    "structured",
     "fallback",
     "max_attempts_per_model",
     "max_rotations",
@@ -112,7 +111,6 @@ class OllamaConfig:
         base_url: Base URL of the OpenAI-compatible endpoint.
         api_key: Bearer token for authentication, or None for no auth.
         models: Mapping of mage name to its :class:`ModelSpec` (tag + lineage).
-        structured: Output structure mode ("schema" | "object" | "off").
         fallback: Ordered fallback specs (strong->weak); () disables rotation (R4).
         max_attempts_per_model: Attempts per active model before rotating (R1).
         max_rotations: Max rotations per mage; 0 disables rotation (R6/R17).
@@ -128,7 +126,6 @@ class OllamaConfig:
     base_url: str
     api_key: str | None
     models: Mapping[str, ModelSpec]
-    structured: str = "schema"  # "schema" | "object" | "off" (R16)
     fallback: Sequence[ModelSpec] = ()
     max_attempts_per_model: int = DEFAULT_MAX_ATTEMPTS_PER_MODEL
     max_rotations: int = DEFAULT_MAX_ROTATIONS
@@ -377,14 +374,18 @@ def _require_bool(value: Any, *, key: str, path: str) -> bool:
     )
 
 
-def _require_int(value: Any, *, key: str, minimum: int, path: str) -> int:
-    """Coerce *value* to an int >= *minimum* or fail closed.
+def _require_int(
+    value: Any, *, key: str, minimum: int, path: str, maximum: int | None = None
+) -> int:
+    """Coerce *value* to an int within ``[minimum, maximum]`` or fail closed.
 
     Args:
         value: Raw value from TOML or env (str from env, int from TOML).
         key: Key name, for the error message.
         minimum: Inclusive lower bound.
         path: Config path, for the error message.
+        maximum: Inclusive upper bound, when the key has one. The attempt budget does:
+            it is spent on PAID calls, and a mistyped zero is a thousand of them.
 
     Returns:
         The validated integer.
@@ -419,6 +420,8 @@ def _require_int(value: Any, *, key: str, minimum: int, path: str) -> int:
         raise OllamaConfigError(f"{key} must be an integer (got {value!r})", path)
     if parsed < minimum:
         raise OllamaConfigError(f"{key} must be >= {minimum} (got {parsed})", path)
+    if maximum is not None and parsed > maximum:
+        raise OllamaConfigError(f"{key} must be <= {maximum} (got {parsed})", path)
     return parsed
 
 
@@ -429,7 +432,10 @@ _SCALAR_SPECS: tuple[tuple[str, str, Callable[..., Any], Any], ...] = (
     (
         "max_attempts_per_model",
         "MAGI_OLLAMA_MAX_ATTEMPTS",
-        partial(_require_int, minimum=1),
+        # The SAME bounds the --max-attempts flag enforces, from the same constants: the two
+        # set the same budget, and until the MAGI gate caught it only the flag was bounded --
+        # the TOML accepted 1000, i.e. a thousand paid calls from one mistyped zero.
+        partial(_require_int, minimum=MIN_ATTEMPTS, maximum=MAX_ATTEMPTS_CAP),
         DEFAULT_MAX_ATTEMPTS_PER_MODEL,
     ),
     (
@@ -611,11 +617,6 @@ def resolve_config(
     else:
         api_key = None
 
-    # structured mode (R16)
-    structured = (
-        env.get("MAGI_OLLAMA_STRUCTURED") or r.get("structured") or g.get("structured") or "schema"
-    )
-
     # models per mage (presence-based; per-key fallback to DEFAULT_MODELS).
     # Repo/global entries are now tables parsed into ModelSpec (R3, BREAKING);
     # a bare string raises the migration error. An env MODEL_* override forces
@@ -658,7 +659,6 @@ def resolve_config(
         base_url=base_url,
         api_key=api_key,
         models=models,
-        structured=structured,
         fallback=fallback,
         **scalars,
     )

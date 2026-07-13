@@ -63,3 +63,10 @@ experiments/
 /checkpoint2-bundle.md
 /magi-review-*.md
 /claude-usage.txt
+
+# R17a release-gate artifact (tools/measure_marker_adherence.py). It is EVIDENCE of a
+# real, paid MAGI-run measurement -- attached to a GitHub Release, not the source tree --
+# same reasoning that keeps magi-report.json audit bundles out of git. The script that
+# PRODUCES and CHECKS it lives in tools/ and IS tracked (see that module's docstring for
+# why: a tracked `make release-check` calling a gitignored script is the v5.0.3 bug).
+/marker-adherence-report.json

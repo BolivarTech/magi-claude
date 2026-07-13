@@ -23,6 +23,13 @@ from fallback_policy import ModelCapability
 from ollama_config import OllamaConfig
 from redaction import redact_secrets
 
+#: ``retry_feedback`` DERIVES the feedback block's bound from the real templates.
+#: Hardcoding it here was a bomb: if a template grows, this guard would keep reserving the
+#: old value -> under-reservation -> SILENT TRUNCATION (the failure R5b exists to prevent).
+#: A single source makes that impossible. Re-exported for the consumers that already read
+#: it from here.
+from retry_feedback import MAX_RETRY_FEEDBACK_TOKENS as MAX_RETRY_FEEDBACK_TOKENS
+
 PREFLIGHT_RETRIES = 2
 CAPABILITY_COMPLETION = "completion"
 _WINDOW_KEYS = ("context_length", "context_window")
@@ -247,15 +254,6 @@ def _default_probe(config: OllamaConfig) -> ProbeFn:
 
     return _post
 
-
-MAX_ERROR_CHARS = 400
-#: Fixed block ~355 chars (~90 tok) + 400 error chars priced at the TRUE worst ratio.
-#: That ratio is 4 TOKENS PER CHARACTER, not 1 and not 3: an EMOJI is 4 UTF-8 bytes,
-#: and a byte-level BPE that fails to merge them emits one token per byte. This bound
-#: has now been wrong twice (1 tok/char, then 3) -- each time by assuming a comfortable
-#: ratio instead of the worst one that actually exists. 400 * 4 + 90 + reserve = 2048.
-#: Bounding CHARS does not bound TOKENS.
-MAX_RETRY_FEEDBACK_TOKENS = 2048
 
 #: Percent-to-fraction base for the input-margin sizing (no bare ``100`` in the body).
 #: ``(_PERCENT + input_margin_pct) / _PERCENT`` == ``1 + margin%``.

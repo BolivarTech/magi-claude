@@ -20,6 +20,14 @@ from fallback_policy import AgentRotationState
 from ollama_config import ModelSpec
 from rotation_harness import FALLBACK, REQUIRED, TRIO, _rotation, _run, _valid
 from validate import ValidationError
+from prompt_guard import PromptContractError
+from verdict_markers import (
+    AgentIdentityError,
+    AmbiguousVerdictMarkers,
+    EchoedExampleRejected,
+    MissingVerdictMarkers,
+    UnterminatedVerdictBlock,
+)
 
 
 async def _preflight_ok(config, prompt=""):
@@ -707,7 +715,9 @@ class TestCleanupOldRuns:
         # No gettempdir patch: correctness depends on the run_root arg.
         cleanup_old_runs(1, str(tmp_path))
 
-        survivors = sorted(p.name for p in tmp_path.iterdir())
+        # Run directories only: ``tmp_path`` also carries the prompts seeded by the
+        # ``seeded_agents_dir`` fixture (the orchestrator demands a real agents_dir).
+        survivors = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("magi-run-"))
         assert survivors == ["magi-run-0002"]
 
     def test_missing_run_root_is_noop(self, tmp_path):
@@ -1360,19 +1370,18 @@ class TestLaunchAgentTimeoutReaping:
         assert not (tmp_path / "melchior.stderr.log").exists()
 
 
-_FAKE_AGENT_JSON = (
+# MS2: the verdict goes between line-anchored markers. A mock with NO markers no longer
+# gets past the parser -- which is exactly the point (R15): a bare verdict is not accepted.
+_FAKE_VERDICT_OBJECT = (
     '{"agent": "melchior", "verdict": "approve", "confidence": 0.8, '
     '"summary": "ok", "reasoning": "looks fine", "findings": [], '
     '"recommendation": "merge"}'
 )
-# The ``claude -p --output-format json`` envelope wraps the agent JSON
-# as a string under ``result`` — match that shape so the real
-# ``parse_agent_output`` pipeline accepts the mock.
-_FAKE_CLAUDE_ENVELOPE = (
-    '{"result": "{\\"agent\\": \\"melchior\\", \\"verdict\\": \\"approve\\", '
-    '\\"confidence\\": 0.8, \\"summary\\": \\"ok\\", \\"reasoning\\": '
-    '\\"looks fine\\", \\"findings\\": [], \\"recommendation\\": \\"merge\\"}"}'
-).encode("utf-8")
+_FAKE_AGENT_JSON = f"<MAGI_VERDICT>\n{_FAKE_VERDICT_OBJECT}\n</MAGI_VERDICT>"
+
+# The ``claude -p --output-format json`` envelope wraps the agent's TEXT as a string
+# under ``result`` -- and that text, since MS2, is the delimited block.
+_FAKE_CLAUDE_ENVELOPE = json.dumps({"result": _FAKE_AGENT_JSON}).encode("utf-8")
 
 
 class _FakeSuccessProc:
@@ -4943,16 +4952,18 @@ def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
             out: str,
         ) -> bytes:
             seen[name] = model
-            return (
-                b'{"agent":"' + name.encode() + b'",'
-                b'"verdict":"approve","confidence":0.5,'
-                b'"summary":"s","reasoning":"r","findings":[],'
-                b'"recommendation":"ok"}'
+            # MS2: the backend returns the model's TEXT, which carries the delimited block.
+            verdict = (
+                '{"agent":"' + name + '",'
+                '"verdict":"approve","confidence":0.5,'
+                '"summary":"s","reasoning":"r","findings":[],'
+                '"recommendation":"ok"}'
             )
+            return f"<MAGI_VERDICT>\n{verdict}\n</MAGI_VERDICT>".encode()
 
-    for a in ("melchior", "balthasar", "caspar"):
-        (tmp_path / f"{a}.md").write_text("S", encoding="utf-8")
-
+    # The agents_dir is seeded by the ``seeded_agents_dir`` fixture with the REAL prompts.
+    # This test used to write ``"S"`` as the system prompt: a one-character file passing
+    # itself off as the contract, which the guard (now in the orchestrator) rejects -- rightly.
     asyncio.run(
         run_orchestrator(
             str(tmp_path),
@@ -5081,7 +5092,7 @@ def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
 
 def test_retry_feedback_truncates_a_huge_error():
     # BDD-45: the error is bounded so the retry prompt cannot grow without limit.
-    from model_context import MAX_ERROR_CHARS
+    from retry_feedback import MAX_ERROR_CHARS
     from run_magi import _build_retry_prompt
     from validate import ValidationError
 
@@ -5091,18 +5102,36 @@ def test_retry_feedback_truncates_a_huge_error():
     assert "..." in out
 
 
-def test_retry_feedback_bound_holds_for_NON_ASCII_errors():
-    # Truncating CHARS does not bound TOKENS. Exercise the TRUE worst case: an emoji
-    # is 4 UTF-8 bytes, and a byte-level BPE emits up to one token per byte (C2-3).
+@pytest.mark.parametrize(
+    "error",
+    [
+        MissingVerdictMarkers("\U0001f525" * 10_000),
+        UnterminatedVerdictBlock("\U0001f525" * 10_000),
+        AmbiguousVerdictMarkers("\U0001f525" * 10_000),
+        EchoedExampleRejected("\U0001f525" * 10_000),
+        AgentIdentityError("\U0001f525" * 10_000),
+        ValidationError("\U0001f525" * 10_000),
+        json.JSONDecodeError("\U0001f525" * 10_000, "{", 0),
+    ],
+    ids=["missing", "unterminated", "ambiguous", "echoed", "identity", "schema", "invalid_json"],
+)
+def test_the_feedback_bound_holds_for_EVERY_cause(error):
+    """A bound the code does not impose is not a bound -- and it must hold for ALL SEVEN.
+
+    Truncating CHARS does not bound TOKENS: an emoji is 4 UTF-8 bytes, and a byte-level BPE
+    emits up to one token per byte. This was pinned for one template only (the schema one) while
+    the bound is DERIVED from the longest of seven -- so the six that were never exercised were
+    trusted, not tested (MAGI gate, Melchior). Each cause selects a different template, and each
+    template is a different length: the one that is longest today is not the one that will be
+    longest tomorrow.
+    """
     from model_context import MAX_RETRY_FEEDBACK_TOKENS
     from run_magi import _build_retry_prompt
-    from validate import ValidationError
 
-    err = ValidationError("\U0001f525" * 10_000)
-    block = _build_retry_prompt("", err)
+    block = _build_retry_prompt("", error)
+
     # UTF-8 byte count is a strict upper bound on tokens for any byte-level BPE.
-    worst_case_tokens = len(block.encode("utf-8"))
-    assert worst_case_tokens <= MAX_RETRY_FEEDBACK_TOKENS
+    assert len(block.encode("utf-8")) <= MAX_RETRY_FEEDBACK_TOKENS
 
 
 @pytest.mark.parametrize(
@@ -6203,3 +6232,550 @@ def test_write_report_file_cleans_temp_and_raises_on_failure(tmp_path, monkeypat
         _write_report_file("verdict", str(out))
     assert not out.exists(), "target untouched on failure"
     assert not list(tmp_path.glob("r.txt*.tmp")), "temp cleaned up on failure"
+
+
+# ---------------------------------------------------------------------------
+# MS2 -- anti-echo canary (R6), agent identity (R10), classification (R14)
+# ---------------------------------------------------------------------------
+
+
+class TestEchoCanaryAndAgentIdentity:
+    """The two guards that run AFTER the schema validates."""
+
+    @staticmethod
+    def _marked(obj: dict) -> bytes:
+        return f"<MAGI_VERDICT>\n{json.dumps(obj)}\n</MAGI_VERDICT>".encode()
+
+    @staticmethod
+    def _verdict(**over):
+        base = {
+            "agent": "caspar",
+            "verdict": "reject",
+            "confidence": 0.9,
+            "summary": "a real verdict",
+            "reasoning": "real reasoning",
+            "findings": [],
+            "recommendation": "fix X",
+        }
+        base.update(over)
+        return base
+
+    async def _launch(self, tmp_path, raw: bytes, agent: str = "caspar"):
+        import run_magi
+        from backend import AgentBackend
+
+        class _Fake(AgentBackend):
+            async def run(self, *a, **k):
+                return raw
+
+        # The system prompt is placed by the ``seeded_agents_dir`` fixture, with the REAL
+        # .md. This helper used to write "SYS" over it (MAGI gate, Balthasar): today that
+        # breaks nothing because ``launch_agent`` does not run the guard, but it leaves the
+        # agents_dir CORRUPTED for any later test that uses the same ``tmp_path`` with
+        # ``run_orchestrator`` -- which does run it, and would abort with a baffling
+        # ``[FATAL]``. A three-letter prompt added nothing the real one does not give.
+        return await run_magi.launch_agent(
+            agent, str(tmp_path), "P", str(tmp_path), 900, backend=_Fake()
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_verdict_passes_both_guards(self, tmp_path):
+        got = await self._launch(tmp_path, self._marked(self._verdict()))
+        assert got["verdict"] == "reject"
+
+    @pytest.mark.asyncio
+    async def test_the_ECHOED_example_is_rejected(self, tmp_path):
+        """R6: the system prompt's example, copied, is NOT a verdict.
+
+        It is the last belt: if the model copies the example from OUTSIDE the markers and
+        wraps it in markers itself, the canary catches it by its fingerprint.
+        """
+        from verdict_markers import ECHO_CANARY, EchoedExampleRejected
+
+        echo = self._verdict(**ECHO_CANARY)
+        with pytest.raises(EchoedExampleRejected):
+            await self._launch(tmp_path, self._marked(echo))
+
+    @pytest.mark.asyncio
+    async def test_a_verdict_claiming_ANOTHER_mage_is_rejected(self, tmp_path):
+        """R10: closes the IMPERSONATION.
+
+        ``load_agent_output`` validates that ``agent`` is in the enum, but **nobody**
+        validated that it was the mage that was launched. A duplicate name kills the whole
+        run; a unique but wrong one puts one mage's text in another's seat, and consensus
+        counts it as an independent perspective **that never existed**.
+        """
+        from verdict_markers import AgentIdentityError
+
+        impostor = self._verdict(agent="melchior")
+        with pytest.raises(AgentIdentityError):
+            await self._launch(tmp_path, self._marked(impostor), agent="caspar")
+
+    @pytest.mark.asyncio
+    async def test_a_capitalised_agent_name_is_caught_UPSTREAM_by_the_schema(self, tmp_path):
+        """MEASURED, not assumed: ``validate.py`` already rejects "Caspar" at the ENUM.
+
+        I had written the identity comparison as *case-insensitive*, assuming a capital
+        letter would reach it. **It does not**: ``load_agent_output``'s enum runs BEFORE and
+        returns *"Unknown agent 'Caspar'. Must be one of [...]"* -- which is a
+        ``ValidationError``, i.e. **a retry with perfectly actionable feedback**.
+
+        The identity guard's ``casefold()`` is kept as a belt (it costs nothing and stays
+        correct if the enum were ever relaxed), but **today it is unreachable**, and that is
+        said here instead of pretending this test proves it.
+        """
+        from validate import ValidationError
+
+        with pytest.raises(ValidationError, match="Unknown agent"):
+            await self._launch(tmp_path, self._marked(self._verdict(agent="Caspar")))
+
+
+@pytest.mark.parametrize(
+    "exc_name",
+    [
+        "MissingVerdictMarkers",
+        "UnterminatedVerdictBlock",
+        "AmbiguousVerdictMarkers",
+        "EchoedExampleRejected",
+        "AgentIdentityError",
+    ],
+)
+def test_every_extraction_failure_is_classified_as_SCHEMA(exc_name):
+    """R14: the model DID ANSWER -- what it could not do was meet the contract.
+
+    The failure is therefore **local to the mage**: it carries corrective feedback and, once
+    the attempts run out, it ROTATES (Ollama) or dies (Claude). **It does not condemn the
+    lineage run-wide** (that is for transport). It comes "for free" because the errors
+    inherit from ``ValidationError``... and "for free" is exactly the class of assumption
+    this project has already paid dearly for.
+    """
+    import run_magi
+    import verdict_markers
+
+    exc = getattr(verdict_markers, exc_name)("x")
+    assert run_magi._classify(exc) == run_magi._FAIL_SCHEMA
+
+
+# ---------------------------------------------------------------------------
+# Task 7 (MS2): cause-specific retry feedback + a DERIVED token bound.
+# ---------------------------------------------------------------------------
+
+
+def test_feedback_templates_cover_exactly_the_seven_known_causes():
+    """One template per verdict-extraction/schema cause -- no more, no less.
+
+    A missing cause silently falls back to the generic "schema" wording (still
+    correct, just less specific); an EXTRA key would be dead code no cause ever
+    selects. Both are worth catching at the seam.
+    """
+    from run_magi import FEEDBACK_TEMPLATES
+
+    assert set(FEEDBACK_TEMPLATES) == {
+        "missing_markers",
+        "unterminated_block",
+        "ambiguous_markers",
+        "echoed_example",
+        "agent_identity",
+        "invalid_json",
+        "schema",
+    }
+
+
+def test_missing_markers_feedback_names_the_markers_not_the_ambiguity_wording():
+    """[CRITICAL] found in review: the WRONG instruction burns the retry.
+
+    A model that emitted NO markers must be told about ``<MAGI_VERDICT>`` /
+    ``</MAGI_VERDICT>`` -- never the "more than one block" wording that belongs to
+    :class:`AmbiguousVerdictMarkers`. Telling it the wrong thing wastes the one
+    retry it gets on a diagnosis that does not apply, and the mage dies.
+    """
+    from verdict_markers import AmbiguousVerdictMarkers, MissingVerdictMarkers
+
+    from run_magi import _build_retry_prompt
+
+    out = _build_retry_prompt("PROMPT", MissingVerdictMarkers("no markers found"))
+    assert "<MAGI_VERDICT>" in out
+    assert "</MAGI_VERDICT>" in out
+    assert "more than one" not in out.lower()
+
+    # Sanity: the sibling cause gets its OWN distinct wording, not this one's.
+    ambiguous_err = AmbiguousVerdictMarkers("found 2 open and 2 close markers")
+    ambiguous_out = _build_retry_prompt("PROMPT", ambiguous_err)
+    assert "more than one" in ambiguous_out.lower()
+
+
+def test_ambiguous_markers_feedback_asks_for_exactly_one_block():
+    """AmbiguousVerdictMarkers must not be answered with the missing-markers wording."""
+    from verdict_markers import AmbiguousVerdictMarkers
+
+    from run_magi import _build_retry_prompt
+
+    out = _build_retry_prompt("PROMPT", AmbiguousVerdictMarkers("found 2 open and 1 close markers"))
+    assert "exactly one" in out.lower()
+    assert "did not include the required verdict markers" not in out
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        "missing_markers",
+        "unterminated_block",
+        "ambiguous_markers",
+        "echoed_example",
+        "agent_identity",
+        "invalid_json",
+        "schema",
+    ],
+)
+def test_retry_feedback_bound_holds_for_every_template_under_NON_ASCII_errors(cause):
+    """A cota the CODE does not enforce is not a cota (MS1, three wrong guesses).
+
+    Exercises the TRUE worst case for every one of the seven templates: a
+    10,000-char error made entirely of an emoji (4 UTF-8 bytes each, and a
+    byte-level BPE can emit up to one token per byte). The UTF-8 byte count of
+    the resulting block is a strict upper bound on tokens for any such BPE, so
+    it must never exceed the DERIVED ``MAX_RETRY_FEEDBACK_TOKENS``.
+    """
+    from retry_feedback import (
+        FEEDBACK_TEMPLATES,
+        MAX_ERROR_CHARS,
+        MAX_RETRY_FEEDBACK_TOKENS,
+    )
+
+    huge_non_ascii_error = "\U0001f525" * 10_000
+    detail = huge_non_ascii_error[:MAX_ERROR_CHARS] + "..."
+    block = FEEDBACK_TEMPLATES[cause].format(error=detail)
+    worst_case_tokens = len(block.encode("utf-8"))
+    assert worst_case_tokens <= MAX_RETRY_FEEDBACK_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# MS2 -- T8: --max-attempts, backend-agnostic (R13)
+# ---------------------------------------------------------------------------
+
+
+class TestMaxAttemptsFlag:
+    """The Claude path had a fixed SINGLE-SHOT retry; now it is configurable.
+
+    **Why a FLAG and not reading Ollama's TOML from Claude:** ``magi-ollama.toml`` is, by
+    design, the config **of the Ollama backend**. Having ``ClaudeBackend`` read it means
+    either **inverting the coupling** (the default backend depending on the optional one) or
+    inventing a config file for Claude, which **does not exist** (the Claude path is 100 %
+    CLI flags, with no state on disk).
+    """
+
+    def test_the_default_is_two_attempts(self):
+        import run_magi
+
+        args = run_magi.parse_args(["code-review", "x.md"])
+        assert args.max_attempts == 2
+
+    @pytest.mark.parametrize("bad", ["0", "-1", "11"])
+    def test_out_of_range_is_rejected_fail_closed(self, bad):
+        """With no upper bound, a ``--max-attempts 1000`` (one zero too many) is **a
+        thousand calls**: expensive on Ollama (`:cloud` is paid) and **hundreds of dollars
+        on Claude**. The project already validates the TOML's integers this way."""
+        import run_magi
+
+        with pytest.raises(SystemExit):
+            run_magi.parse_args(["code-review", "x.md", "--max-attempts", bad])
+
+    def test_the_cap_is_a_named_constant(self):
+        import run_magi
+
+        assert run_magi.MAX_ATTEMPTS_CAP == 10
+
+    def test_passing_it_WITH_ollama_says_out_loud_that_the_toml_wins(self, capsys):
+        """The TOML wins (R13) -- but until now it won **in silence**.
+
+        A user who asks for ``--max-attempts 5 --ollama`` believes they configured
+        something. They configured nothing, and there is no way for them to find out: the
+        flag is ignored without a single line. A silent override is a polite lie.
+        """
+        import run_magi
+
+        run_magi.parse_args(["code-review", "x.md", "--ollama", "--max-attempts", "5"])
+
+        assert "max_attempts_per_model" in capsys.readouterr().err
+
+    def test_NOT_passing_it_with_ollama_stays_quiet(self, capsys):
+        """The warning is for a REAL override, not for the default: otherwise it is noise."""
+        import run_magi
+
+        run_magi.parse_args(["code-review", "x.md", "--ollama"])
+
+        assert capsys.readouterr().err == ""
+
+    def test_passing_the_DEFAULT_VALUE_explicitly_still_warns(self, capsys):
+        """*"Did you pass it?"* and *"what is it worth?"* are DIFFERENT questions.
+
+        Answering the first with ``!= DEFAULT`` gets it wrong for exactly one value: the
+        default. A user who types ``--ollama --max-attempts 2`` **did pass the flag**, the
+        TOML overrides it all the same (and their ``max_attempts_per_model`` may not be 2),
+        and they got no warning -- the same polite lie, surviving in the one gap left.
+        """
+        import run_magi
+
+        run_magi.parse_args(
+            [
+                "code-review",
+                "x.md",
+                "--ollama",
+                "--max-attempts",
+                str(run_magi.DEFAULT_MAX_ATTEMPTS),
+            ]
+        )
+
+        assert "max_attempts_per_model" in capsys.readouterr().err
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("budget", [0, 1000])
+    async def test_the_programmatic_budget_is_bounded_at_BOTH_ends(self, tmp_path, budget):
+        """The guard lives at the ENTRY POINT, and it bounds both ends (MAGI gate, Balthasar).
+
+        At the entry point, because inside the per-mage coroutine the ``gather`` catches it and
+        the user reads *"Only 0 agent(s) succeeded"* -- the error buries its own cause. Bounded
+        ABOVE, because the CLI flag and the Ollama TOML both cap the budget and a direct Python
+        caller was the last door left open on a budget that is spent on PAID calls.
+        """
+        from run_magi import run_orchestrator
+
+        with pytest.raises(RuntimeError, match="max_attempts must be between"):
+            await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="x",
+                output_dir=str(tmp_path),
+                timeout=10,
+                show_status=False,
+                max_attempts=budget,
+            )
+
+
+# ---------------------------------------------------------------------------
+# MS2 -- T9: adherence telemetry (R18)
+# ---------------------------------------------------------------------------
+
+
+class TestAdherenceTelemetry:
+    """R17 measures ONCE, with TODAY's models. Models drift under the very same tag.
+
+    Without this telemetry, the day a model starts omitting the markers it would look like
+    *"MAGI is slow and rotates a lot"* -- a symptom **nobody would know how to read**. And
+    with a sample of 5+2 at the gate, **the real rate will only ever be known in
+    production**: this is the only thing that will see it.
+    """
+
+    def test_a_marker_omission_is_ANNOUNCED_not_just_filed(self, capsys):
+        """MAGI gate (Caspar, cycle 6): a counter nobody reads is not a safety net.
+
+        This is not hypothetical. **That very gate run recorded the first real omission**
+        (``caspar: {missing_markers: 1}``): the mage forgot the markers, the retry recovered
+        it, the run came out valid -- and the only trace was a field in a JSON file that no
+        one opens. A model drifting under the same tag would look exactly like that, run after
+        run, until it stopped being recoverable. Telemetry that has to be gone looking for is
+        telemetry that gets found too late.
+
+        So a run that saw ANY extraction failure says so, on stderr, where the operator
+        already is -- with the counts and where to read about them.
+        """
+        from run_magi import announce_extraction_failures
+
+        announce_extraction_failures({"caspar": {"missing_markers": 2, "invalid_json": 1}})
+
+        err = capsys.readouterr().err
+        assert "caspar" in err
+        assert "missing_markers" in err
+        assert "docs/ollama-backend.md" in err, "tell them WHERE to read what to do about it"
+
+    def test_a_clean_run_stays_quiet(self, capsys):
+        """No failures, no noise: a warning that fires on every run is a warning nobody reads."""
+        from run_magi import announce_extraction_failures
+
+        announce_extraction_failures({})
+
+        assert capsys.readouterr().err == ""
+
+    def test_the_recorder_reuses_the_SAME_dispatcher_as_the_retry_feedback(self):
+        """Telemetry and feedback **cannot disagree**.
+
+        If the model is told *"you left out the markers"*, the counter that goes up is
+        ``missing_markers``. Duplicating the classification would plant the seed for the
+        day the report says one thing and the prompt another.
+        """
+        from collections import Counter, defaultdict
+
+        import run_magi
+        from retry_feedback import retry_feedback_cause
+        from verdict_markers import MissingVerdictMarkers
+
+        err = MissingVerdictMarkers("x")
+        tally: dict[str, Counter[str]] = defaultdict(Counter)
+        run_magi._record_extraction_failure(tally, "caspar", err)
+
+        assert tally["caspar"][retry_feedback_cause(err)] == 1
+        assert dict(tally["caspar"]) == {"missing_markers": 1}
+
+    def test_every_cause_lands_in_its_own_counter(self):
+        from collections import Counter, defaultdict
+
+        import run_magi
+        from verdict_markers import (
+            AgentIdentityError,
+            AmbiguousVerdictMarkers,
+            EchoedExampleRejected,
+            MissingVerdictMarkers,
+            UnterminatedVerdictBlock,
+        )
+
+        tally: dict[str, Counter[str]] = defaultdict(Counter)
+        for err in (
+            MissingVerdictMarkers("a"),
+            UnterminatedVerdictBlock("b"),
+            AmbiguousVerdictMarkers("c"),
+            EchoedExampleRejected("d"),
+            AgentIdentityError("e"),
+        ):
+            run_magi._record_extraction_failure(tally, "caspar", err)
+
+        assert dict(tally["caspar"]) == {
+            "missing_markers": 1,
+            "unterminated_block": 1,
+            "ambiguous_markers": 1,
+            "echoed_example": 1,
+            "agent_identity": 1,
+        }
+
+    def test_the_field_is_ADDITIVE_and_fail_soft(self):
+        """``consensus`` does not read it, and a report WITHOUT the field is still valid
+        (NR3)."""
+        import inspect
+
+        import consensus
+
+        assert "extraction_failures" not in inspect.getsource(consensus)
+
+    @pytest.mark.asyncio
+    async def test_the_CLAUDE_path_emits_the_field_in_the_REPORT(self, tmp_path):
+        """The counter has to reach the report, not stay in an internal accumulator.
+
+        The tests above exercise ``_record_extraction_failure`` as a unit. None of them
+        checked that the field **shows up in the report** -- which is the only thing the
+        user (and the R17a gate) ever get to see.
+        """
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and "MAGI_VERDICT" not in prompt:
+                raise MissingVerdictMarkers("no <MAGI_VERDICT> block in the output")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch)
+
+        assert result["extraction_failures"] == {"caspar": {"missing_markers": 1}}
+
+    @pytest.mark.asyncio
+    async def test_a_ROTATING_mage_records_its_omission_too(self, tmp_path):
+        """R18 was written FOR the rotation path -- and that is the backend actually in use.
+
+        Without this, ``extraction_failures`` is **always absent under ``--ollama``**: a
+        model's drift would look like *"MAGI is slow and rotates a lot"*, which is exactly
+        the symptom nobody would know how to read. And the README **promises** the field.
+        """
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name == "caspar" and "MAGI_VERDICT" not in prompt:
+                raise MissingVerdictMarkers("no <MAGI_VERDICT> block in the output")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation())
+
+        assert result.get("degraded") is not True, "the retry saves it: valid run"
+        assert result["extraction_failures"] == {"caspar": {"missing_markers": 1}}
+
+    @pytest.mark.asyncio
+    async def test_the_prompt_guard_covers_the_ORCHESTRATOR_not_just_the_CLI(self, tmp_path):
+        """MAGI gate finding (Balthasar, cycles 1 and 2): the guard had a seam.
+
+        It lived in ``main()``, so **any** caller of ``run_orchestrator`` -- the point where
+        the ``.md`` files are actually handed to a model -- skipped it. The guard is the LAST
+        defence against a stale installation and against an "improved" prompt carrying a
+        fabricable verdict between the markers; a defence that covers only one of the two
+        doors is not defence in depth, it is one door locked and the other one open.
+        """
+        from run_magi import run_orchestrator
+
+        dangerous = "## Output format\n<MAGI_VERDICT>\n" + json.dumps(
+            {
+                "agent": "caspar",
+                "verdict": "approve",
+                "confidence": 0.9,
+                "summary": "s",
+                "reasoning": "r",
+                "findings": [],
+                "recommendation": "rec",
+            }
+        )
+        for name in ("melchior", "balthasar", "caspar"):
+            (tmp_path / f"{name}.md").write_text(
+                dangerous + "\n</MAGI_VERDICT>\n", encoding="utf-8"
+            )
+
+        with pytest.raises(PromptContractError):
+            await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="x",
+                output_dir=str(tmp_path),
+                timeout=10,
+                show_status=False,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_DIES_still_surfaces_why(self, tmp_path, capsys):
+        """The catastrophic case: all three mages omit the markers -> the run dies.
+
+        It dies **below the floor of 2 mages**, so it never gets to write
+        ``magi-report.json`` -- and with it went the only datum that explained the death.
+        The day a model really starts omitting the markers, MAGI would die saying *"only 0
+        agents succeeded"* and **nobody would know why**: precisely the illegible symptom
+        R18 exists to eliminate. The telemetry has to survive the death of the run.
+        """
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            raise MissingVerdictMarkers("no <MAGI_VERDICT> block in the output")
+
+        with pytest.raises(RuntimeError, match="fewer than 2"):
+            await _run(tmp_path, mock_launch)
+
+        err = capsys.readouterr().err
+        assert "extraction_failures" in err
+        assert "missing_markers" in err
+        assert "caspar" in err
+
+    @pytest.mark.asyncio
+    async def test_a_rotating_mage_records_EVERY_failed_attempt_across_models(self, tmp_path):
+        """A mage that omits the markers on ALL its attempts, across two models, counts 4.
+
+        Rotation does not wipe the count: every attempt that failed extraction is an
+        adherence data point, and the rotated model's attempts count too (same seat).
+        """
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            raise MissingVerdictMarkers("no <MAGI_VERDICT> block in the output")
+
+        result = await _run(
+            tmp_path, mock_launch, rotation=_rotation(max_attempts=2, max_rotations=1)
+        )
+
+        assert result.get("degraded") is True, "caspar spends model + fallback and dies"
+        assert result["extraction_failures"] == {"caspar": {"missing_markers": 4}}, (
+            "2 attempts x 2 models -- including the LAST one, the one that killed it"
+        )

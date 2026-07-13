@@ -1,4 +1,4 @@
-.PHONY: test lint format typecheck lockcheck verify
+.PHONY: test lint format typecheck lockcheck verify release-check
 
 # uv is a hard prerequisite for developing (not for using) the plugin. Say so here rather
 # than letting the first target die with a bare "uv: command not found".
@@ -29,3 +29,11 @@ lockcheck:
 	uv lock --check
 
 verify: lockcheck test lint format typecheck
+
+# R17a release gate: verifies the marker-adherence artifact (tools/measure_marker_adherence.py)
+# exists, is GREEN, and is FRESH (measured at the current HEAD, against the current
+# agents/*.md). Deliberately NOT part of `verify`: producing that artifact means running
+# real, paid MAGI runs, and `verify` runs before every TDD-phase commit. This target only
+# checks the artifact that a separate, deliberate `measure` invocation already produced.
+release-check:
+	uv run python tools/measure_marker_adherence.py check

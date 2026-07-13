@@ -88,6 +88,69 @@ untouched scaffold behaves exactly as the built-in defaults. Full table in
 > (three mages, synthesis, and report) runs without any Claude/Anthropic API call. It is
 > runnable standalone as a CI gate: `python skills/magi/scripts/run_magi.py <mode> <file_or_text> --ollama`.
 
+**New in v5.1.0 — the verdict sentinel (BREAKING, agent prompt contract):** MAGI no
+longer *searches* an agent's raw output for something that looks like a verdict — it
+*extracts* the JSON between two literal marker lines, `<MAGI_VERDICT>` /
+`</MAGI_VERDICT>`, each alone on its own line. A response missing either marker, or
+carrying more than one block, is rejected outright and retried with corrective feedback
+instead of being scanned for a lookalike. This closes a long-standing residual where a
+truncated or ambiguous response could cause the old parser to silently accept the
+**worked example already sitting in the agent's own system prompt** as its verdict — a
+fabricated `approve`, in the adversarial seat, indistinguishable from a real one. A new
+installation-time guard also refuses to start if any of the three shipped agent prompts
+has malformed markers or a complete example sitting *between* them (see
+[`docs/faq-prompt-guard.md`](docs/faq-prompt-guard.md) for every `[FATAL]` message and how
+to fix it). Full rationale, evidence, and the alternatives considered and rejected:
+[`docs/adr/0001-no-runtime-heuristic-fallback.md`](docs/adr/0001-no-runtime-heuristic-fallback.md).
+
+> **There is no runtime fallback to the old heuristic — read this before you need it.**
+> If a model in your trio cannot reliably emit the marker lines, MAGI retries it with a
+> cause-specific correction and, absent a fix, drops that mage to a degraded run rather
+> than silently guessing (watch `extraction_failures` in `magi-report.json` — it is the
+> counter that tells you if this is happening). There is intentionally no config flag or
+> environment variable to re-enable the pre-5.1.0 heuristic: a flag like that would be a
+> switch that restores silent fabrication of an `approve`, not a safety valve (the ADR
+> above has the full argument, made after the proposal was raised and rejected seven
+> times during design review).
+>
+> **The downgrade path is the only production safety net for this change**, so it is
+> documented here instead of buried in a changelog — a net nobody knows about is not a
+> net. Every release is tagged (`vX.Y.Z`, annotated), so reverting to the last pre-sentinel
+> release is a normal local checkout, not an emergency patch:
+> ```bash
+> git clone https://github.com/BolivarTech/magi-claude.git
+> cd magi-claude
+> git checkout v5.0.3
+> claude --plugin-dir "$(pwd)"
+> ```
+> If you installed via the marketplace (`/plugin install magi@bolivartech-plugins`), the
+> checkout above (dev-mode `--plugin-dir`) is the reliable way to pin an older version,
+> since the marketplace itself tracks whatever ref its source points to. Uninstall the
+> marketplace copy first (`/plugin uninstall magi@bolivartech-plugins`) to avoid running
+> two copies of the plugin at once.
+
+#### What the sentinel does *not* protect you from
+
+Stated plainly, because a guarantee you misunderstand is worse than one you don't have:
+
+- **A mage that copies the prompt's worked example and edits a word.** The anti-echo canary
+  matches that example's exact fingerprint, so a *verbatim* copy is rejected — a *modified*
+  copy is not. This is deliberate: widening the fingerprint would shrink a false-positive
+  rate already measured at 0 in 170 real verdicts while enlarging the evasion, and every
+  past attempt in this codebase to "tighten" a check by widening an exclusion shipped a
+  fail-open. The real protection is upstream: **between the markers the prompt shows a
+  placeholder, never a valid verdict**, so there is nothing there worth copying. A mage that
+  emits an altered copy of the example is not a parser failure — it is a **degraded seat**,
+  indistinguishable from a mage that simply reasons badly, and no parser can catch that.
+  Rotate the model; don't argue with it.
+- **A verdict that is well-formed and worthless.** The sentinel guarantees the verdict came
+  from *that mage, between its own markers*. It cannot tell you the reasoning behind it was
+  any good.
+- **Silence.** Watch `extraction_failures` in `magi-report.json`. If a seat's marker-omission
+  rate climbs past ~10% of attempts, iterate that prompt or rotate that model — the answer is
+  never to restore a heuristic that guesses. If a run dies before it can write a report, the
+  same counts are printed to stderr, so the cause survives the run.
+
 ---
 
 ## Agents

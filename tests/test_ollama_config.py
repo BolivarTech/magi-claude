@@ -129,13 +129,24 @@ def test_unknown_keys_warn_and_proceed(tmp_path, capsys):
     assert "wat" in capsys.readouterr().err
 
 
-def test_ollama_config_structured_default_is_schema():
-    cfg = OllamaConfig(
-        base_url=DEFAULT_BASE_URL,
-        api_key=None,
-        models=dict(DEFAULT_MODELS),
-    )
-    assert cfg.structured == "schema"
+def test_the_inert_structured_key_is_GONE_and_the_toml_says_so(tmp_path, capsys):
+    """MS2/R7: ``structured`` governed ``response_format``, which is no longer sent.
+
+    Keeping the field would have been **a config key that LIES**: the user sets it, MAGI
+    accepts it... and ignores it. This project forbids *silent failures*, and a user's
+    intent discarded in silence is one.
+
+    Removing it breaks NOBODY: the resolver **already warns** on unknown keys, so a TOML
+    carrying ``structured`` gets an **actionable** warning instead of a mute no-op.
+    """
+    from ollama_config import _load_toml
+
+    toml = tmp_path / "magi-ollama.toml"
+    toml.write_text('structured = "schema"\n', encoding="utf-8")
+
+    assert not hasattr(OllamaConfig, "structured")
+    _load_toml(str(toml))
+    assert "unknown key 'structured'" in capsys.readouterr().err
 
 
 def test_empty_base_url_in_toml_falls_through_to_default(tmp_path):
@@ -382,3 +393,32 @@ def test_no_shipped_default_carries_a_provisional_tag():
         if any(provisional.match(token) for token in re.split(r"[^a-z0-9]+", tag.lower()))
     ]
     assert offenders == [], f"provisional tags shipped as defaults: {offenders}"
+
+
+def test_the_TOML_attempt_budget_obeys_the_SAME_cap_as_the_CLI(tmp_path):
+    """MAGI gate (Balthasar, cycle 10): two doors, one lock -- and this one had none.
+
+    ``--max-attempts`` is capped at ``MAX_ATTEMPTS_CAP`` precisely because a zero too many
+    turns one obstinate mage into a thousand calls: expensive on Ollama, where the ``:cloud``
+    tags are a paid tier, and hundreds of dollars on Claude. The TOML sets the very same budget
+    and accepted **1000** -- measured, not supposed. A bound that only guards one of the two
+    ways in is not a bound.
+    """
+    from run_magi import MAX_ATTEMPTS_CAP
+
+    toml = tmp_path / "magi-ollama.toml"
+    toml.write_text(
+        'base_url = "http://localhost:11434/v1"\n'
+        f"max_attempts_per_model = {MAX_ATTEMPTS_CAP + 1}\n"
+        "\n[models]\n"
+        'melchior  = { model = "a:cloud", lineage = "alibaba" }\n'
+        'balthasar = { model = "b:cloud", lineage = "moonshot" }\n'
+        'caspar    = { model = "c:cloud", lineage = "deepseek" }\n'
+        "\n[[fallback]]\n"
+        'model = "d:cloud"\n'
+        'lineage = "zhipu"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(OllamaConfigError, match="max_attempts_per_model"):
+        resolve_config(repo_path=toml, global_path=tmp_path / "absent.toml", env={})
