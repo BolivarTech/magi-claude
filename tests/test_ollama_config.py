@@ -129,13 +129,24 @@ def test_unknown_keys_warn_and_proceed(tmp_path, capsys):
     assert "wat" in capsys.readouterr().err
 
 
-def test_ollama_config_structured_default_is_schema():
-    cfg = OllamaConfig(
-        base_url=DEFAULT_BASE_URL,
-        api_key=None,
-        models=dict(DEFAULT_MODELS),
-    )
-    assert cfg.structured == "schema"
+def test_the_inert_structured_key_is_GONE_and_the_toml_says_so(tmp_path, capsys):
+    """MS2/R7: ``structured`` gobernaba ``response_format``, que ya no se envia.
+
+    Dejar el campo habria sido **una clave de config que MIENTE**: el usuario la pone, MAGI
+    la acepta... y la ignora. Este proyecto prohibe los *silent failures*, y la intencion
+    del usuario descartada en silencio es uno.
+
+    Quitarla NO rompe a nadie: el resolver **ya avisa** ante claves desconocidas, asi que un
+    TOML con ``structured`` recibe un aviso **accionable** en vez de un no-op mudo.
+    """
+    from ollama_config import _load_toml
+
+    toml = tmp_path / "magi-ollama.toml"
+    toml.write_text('structured = "schema"\n', encoding="utf-8")
+
+    assert not hasattr(OllamaConfig, "structured")
+    _load_toml(str(toml))
+    assert "unknown key 'structured'" in capsys.readouterr().err
 
 
 def test_empty_base_url_in_toml_falls_through_to_default(tmp_path):

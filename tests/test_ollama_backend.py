@@ -60,7 +60,7 @@ def _run(cfg, tmp_path, model="m"):
     return asyncio.run(OllamaBackend(cfg).run("melchior", str(sp), "P", model, 900, str(tmp_path)))
 
 
-def test_builds_chat_completions_request_with_schema(monkeypatch, tmp_path):
+def test_builds_chat_completions_request(monkeypatch, tmp_path):
     cap = _backend_with(monkeypatch)
     _run(_cfg(), tmp_path)
     req = cap["req"]
@@ -69,7 +69,6 @@ def test_builds_chat_completions_request_with_schema(monkeypatch, tmp_path):
     assert body["model"] == "m" and body["stream"] is False
     assert body["messages"][0]["role"] == "system"
     assert body["messages"][1]["content"] == "P"
-    assert body["response_format"]["type"] == "json_schema"
 
 
 def test_auth_header_present_only_with_key(monkeypatch, tmp_path):
@@ -114,34 +113,17 @@ def test_missing_choices_maps_to_valueerror(monkeypatch, tmp_path):
         _run(_cfg(), tmp_path)
 
 
-def test_downgrade_on_400_response_format(monkeypatch, tmp_path):  # BDD-25
-    calls = {"n": 0}
+def test_the_request_body_NEVER_carries_response_format(monkeypatch, tmp_path):
+    """R7: ``response_format`` y las marcas son MUTUAMENTE EXCLUYENTES.
 
-    def fake_urlopen(req, timeout=None):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise urllib.error.HTTPError(
-                "u", 400, "Bad", {}, io.BytesIO(b"unsupported response_format")
-            )
-        return _Resp(_OK_BODY)
-
-    monkeypatch.setattr("ollama_backend.urllib.request.urlopen", fake_urlopen)
-    raw = _run(_cfg(), tmp_path)
-    assert calls["n"] == 2  # downgraded then retried without response_format
-    assert raw.decode() == _OK_CONTENT  # MS2: el contenido llega VERBATIM, con marcas
-
-
-def test_structured_off_omits_response_format(monkeypatch, tmp_path):  # BDD-28
+    Un modelo que **honra** ``json_schema`` esta constrenido a emitir un objeto JSON y por
+    tanto **no puede** emitir ``<MAGI_VERDICT>``. Y lo que ``response_format`` compraba
+    --suprimir la prosa-- es justo lo que el sentinel vuelve irrelevante: **todo lo que
+    esta fuera de las marcas se ignora**. (Y nunca lo garantizo: glm-5.2 fenceo su salida
+    **teniendo** ``json_schema`` activo.)
+    """
     cap = _backend_with(monkeypatch)
-    cfg = OllamaConfig(
-        base_url="http://h:11434/v1",
-        api_key=None,
-        models={"melchior": "m", "balthasar": "b", "caspar": "c"},
-        structured="off",
-    )
-    sp = tmp_path / "melchior.md"
-    sp.write_text("S", encoding="utf-8")
-    asyncio.run(OllamaBackend(cfg).run("melchior", str(sp), "P", "m", 900, str(tmp_path)))
+    _run(_cfg(), tmp_path)
     assert "response_format" not in json.loads(cap["req"].data)
 
 

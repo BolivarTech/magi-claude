@@ -5082,7 +5082,7 @@ def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
 
 def test_retry_feedback_truncates_a_huge_error():
     # BDD-45: the error is bounded so the retry prompt cannot grow without limit.
-    from model_context import MAX_ERROR_CHARS
+    from retry_feedback import MAX_ERROR_CHARS
     from run_magi import _build_retry_prompt
     from validate import ValidationError
 
@@ -6320,3 +6320,96 @@ def test_every_extraction_failure_is_classified_as_SCHEMA(exc_name):
 
     exc = getattr(verdict_markers, exc_name)("x")
     assert run_magi._classify(exc) == run_magi._FAIL_SCHEMA
+
+
+# ---------------------------------------------------------------------------
+# Task 7 (MS2): cause-specific retry feedback + a DERIVED token bound.
+# ---------------------------------------------------------------------------
+
+
+def test_feedback_templates_cover_exactly_the_seven_known_causes():
+    """One template per verdict-extraction/schema cause -- no more, no less.
+
+    A missing cause silently falls back to the generic "schema" wording (still
+    correct, just less specific); an EXTRA key would be dead code no cause ever
+    selects. Both are worth catching at the seam.
+    """
+    from run_magi import FEEDBACK_TEMPLATES
+
+    assert set(FEEDBACK_TEMPLATES) == {
+        "missing_markers",
+        "unterminated_block",
+        "ambiguous_markers",
+        "echoed_example",
+        "agent_identity",
+        "invalid_json",
+        "schema",
+    }
+
+
+def test_missing_markers_feedback_names_the_markers_not_the_ambiguity_wording():
+    """[CRITICAL] found in review: the WRONG instruction burns the retry.
+
+    A model that emitted NO markers must be told about ``<MAGI_VERDICT>`` /
+    ``</MAGI_VERDICT>`` -- never the "more than one block" wording that belongs to
+    :class:`AmbiguousVerdictMarkers`. Telling it the wrong thing wastes the one
+    retry it gets on a diagnosis that does not apply, and the mage dies.
+    """
+    from verdict_markers import AmbiguousVerdictMarkers, MissingVerdictMarkers
+
+    from run_magi import _build_retry_prompt
+
+    out = _build_retry_prompt("PROMPT", MissingVerdictMarkers("no markers found"))
+    assert "<MAGI_VERDICT>" in out
+    assert "</MAGI_VERDICT>" in out
+    assert "more than one" not in out.lower()
+
+    # Sanity: the sibling cause gets its OWN distinct wording, not this one's.
+    ambiguous_err = AmbiguousVerdictMarkers("found 2 open and 2 close markers")
+    ambiguous_out = _build_retry_prompt("PROMPT", ambiguous_err)
+    assert "more than one" in ambiguous_out.lower()
+
+
+def test_ambiguous_markers_feedback_asks_for_exactly_one_block():
+    """AmbiguousVerdictMarkers must not be answered with the missing-markers wording."""
+    from verdict_markers import AmbiguousVerdictMarkers
+
+    from run_magi import _build_retry_prompt
+
+    out = _build_retry_prompt("PROMPT", AmbiguousVerdictMarkers("found 2 open and 1 close markers"))
+    assert "exactly one" in out.lower()
+    assert "did not include the required verdict markers" not in out
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        "missing_markers",
+        "unterminated_block",
+        "ambiguous_markers",
+        "echoed_example",
+        "agent_identity",
+        "invalid_json",
+        "schema",
+    ],
+)
+def test_retry_feedback_bound_holds_for_every_template_under_NON_ASCII_errors(cause):
+    """A cota the CODE does not enforce is not a cota (MS1, three wrong guesses).
+
+    Exercises the TRUE worst case for every one of the seven templates: a
+    10,000-char error made entirely of an emoji (4 UTF-8 bytes each, and a
+    byte-level BPE can emit up to one token per byte). The UTF-8 byte count of
+    the resulting block is a strict upper bound on tokens for any such BPE, so
+    it must never exceed the DERIVED ``MAX_RETRY_FEEDBACK_TOKENS``.
+    """
+    from retry_feedback import (
+        FEEDBACK_TEMPLATES,
+        MAX_ERROR_CHARS,
+        MAX_RETRY_FEEDBACK_TOKENS,
+    )
+
+    huge_non_ascii_error = "\U0001f525" * 10_000
+    detail = huge_non_ascii_error[:MAX_ERROR_CHARS] + "..."
+    block = FEEDBACK_TEMPLATES[cause].format(error=detail)
+    worst_case_tokens = len(block.encode("utf-8"))
+    assert worst_case_tokens <= MAX_RETRY_FEEDBACK_TOKENS
