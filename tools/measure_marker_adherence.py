@@ -130,7 +130,7 @@ tally: "collections.defaultdict[str, collections.Counter[str]]" = collections.de
 
 #: Set by :func:`agent_context` immediately before parsing ONE mage's raw output, and
 #: cleared right after. NEVER a parameter of ``_spy``: the real caller
-#: (``parse_agent_output._loads_lenient``) invokes ``sentinel.extract(text)`` with
+#: (``parse_agent_output._extract_verdict``) invokes ``sentinel.extract(text)`` with
 #: exactly that signature, and a required keyword here would raise ``TypeError`` on
 #: every real call -- the instrumentation would break the parser it exists to measure.
 _current_agent: str = ""

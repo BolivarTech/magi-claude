@@ -120,13 +120,13 @@ def _extract_text(data: object) -> str:
     )
 
 
-def _loads_lenient(text: str) -> Any:
+def _extract_verdict(text: str) -> Any:
     """Extract the verdict from between the markers and decode it. **Extracts, never searches.**
 
-    Replaces the heuristic recovery MS2 deleted. The name is kept for the module's internal
-    contract, but **there is nothing "lenient" left underneath**: the only thing tolerated is
-    NORMALIZATION inside an **already-delimited** region (stripping a fence). **Outside the
-    markers nothing is ever looked at, ever.**
+    Replaces the heuristic recovery MS2 deleted -- and it was called ``_loads_lenient`` until
+    the MAGI gate pointed out that the name now lies: **there is nothing lenient left
+    underneath**. The only thing tolerated is NORMALIZATION inside an **already-delimited**
+    region (stripping a fence). **Outside the markers nothing is ever looked at, ever.**
 
     What was deleted, and why it does not come back: the scanner decoded every JSON object it
     found in the output and kept whichever one "looked like" a verdict. Like every heuristic
@@ -258,7 +258,7 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         # the run — the mage is excluded and the run degrades. But the retry at
         # ``run_magi.py`` only catches ``(ValidationError, JSONDecodeError)``, so the
         # mage would be dropped **without its second attempt**. Mapping it here buys
-        # back the retry, exactly as ``_loads_lenient`` does on the decode side.
+        # back the retry, exactly as ``_extract_verdict`` does on the decode side.
         #
         # Scope of the behaviour change: a WELL-FORMED envelope is untouched (it
         # parses here exactly as before). A *malformed* Claude envelope, which used
@@ -314,8 +314,8 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     # Extract the verdict from between the marker lines and decode ONLY that. Prose,
     # <think> blocks, tool-use JSON and the prompt's own worked example all live OUTSIDE
     # the markers, so none of them is ever a candidate -- there is nothing left to
-    # disambiguate. No markers -> no verdict (fail closed). See ``_loads_lenient``.
-    parsed = _loads_lenient(text)
+    # disambiguate. No markers -> no verdict (fail closed). See ``_extract_verdict``.
+    parsed = _extract_verdict(text)
 
     try:
         # COMPACT, not ``indent=2``. Reading-as-text-first routes a deeply-nested valid
@@ -332,7 +332,7 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         # ~3.0k on 3.12 — see the table above), so an object that decoded cleanly can
         # still fail to re-encode. An escaping RecursionError is not caught by the
         # orchestrator's ``(ValidationError, JSONDecodeError)`` retry, so the mage would
-        # be dropped without a second attempt. Map it, as ``_loads_lenient`` maps the
+        # be dropped without a second attempt. Map it, as ``_extract_verdict`` maps the
         # decode side.
         raise json.JSONDecodeError(
             "Recovered verdict is nested too deeply to re-encode", text, 0
