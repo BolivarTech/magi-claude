@@ -321,30 +321,6 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         # check whose error message the retry is built from. The size-cap ``ValueError``
         # is raised before this block, so it is not swallowed.
         raise json.JSONDecodeError(f"Unrecognised agent output shape: {exc}", raw, 0) from exc
-    except RecursionError as exc:
-        # A SECOND encode site, on a DIFFERENT route. ``_extract_text``'s bare-verdict
-        # branch re-serialises with ``json.dumps``, so a BARE (unfenced) verdict blows up
-        # here, while a FENCED one reaches the encode further down instead. Mapping only
-        # the fenced route left the plainest Ollama payload there is escaping, and the
-        # mage losing the retry that ``run_magi``'s ``(ValidationError, JSONDecodeError)``
-        # guard would otherwise have given it.
-        #
-        # MEASURED, because two earlier versions of this comment reasoned instead and were
-        # both wrong. Both encode sites now use the compact ``json.dumps`` (no indent).
-        # Max nesting depth before RecursionError (approximate — it shifts with how much
-        # stack the caller has already used; the ORDERING is what is stable):
-        #
-        #                    decoder   json.dumps()
-        #     CPython 3.14    ~16.9k    ~15.5k
-        #     CPython 3.12     ~3.0k     ~3.0k
-        #
-        # The encoder is weaker than (3.14) or level with (3.12) the decoder, so an object
-        # that decoded can still fail to encode — which is why both encode catches exist.
-        # Which of the two fires depends only on the ROUTE (bare hits this one, fenced
-        # hits the final one), so neither is redundant.
-        raise json.JSONDecodeError(
-            "Agent output is nested too deeply to re-serialise", raw, 0
-        ) from exc
 
     # Extract the verdict from between the marker lines and decode ONLY that. Prose,
     # <think> blocks, tool-use JSON and the prompt's own worked example all live OUTSIDE

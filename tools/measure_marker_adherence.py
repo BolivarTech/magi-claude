@@ -211,10 +211,11 @@ def _spy(self, text: str) -> str:  # type: ignore[no-untyped-def]
 def install_spy() -> None:
     """Patch :class:`VerdictSentinel` so every ``extract`` call in this process tallies.
 
-    IDEMPOTENT (MAGI gate, Balthasar): a second install would leave ``VerdictSentinel.extract``
-    already pointing at the spy, and ``uninstall_spy`` would then restore... the spy. The
-    instrument would stay attached, silently, for the rest of the process -- and an instrument
-    you cannot remove is one you can no longer trust.
+    Calling it twice WITHOUT an uninstall in between is a no-op (MAGI gate, Balthasar): the
+    second install would otherwise leave ``VerdictSentinel.extract`` already pointing at the spy,
+    and ``uninstall_spy`` would then restore... the spy. The instrument would stay attached,
+    silently, for the rest of the process -- and an instrument you cannot remove is one you can
+    no longer trust. Install -> uninstall -> install DOES re-patch, which is the intended cycle.
 
     Patches the CLASS attribute, not an instance: ``parse_agent_output.py`` already
     holds a constructed ``VerdictSentinel`` at import time, and Python resolves a

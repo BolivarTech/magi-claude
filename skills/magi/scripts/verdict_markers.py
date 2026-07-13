@@ -62,7 +62,7 @@ _LINE_BREAK = re.compile(r"\r\n|\r|\n")
 #: is **free**: the fence is only stripped if the first **AND** the last line are fences,
 #: and what is inside **is decided by ``json.loads``**. Permissive where it does not matter,
 #: strict where it does (the markers).
-_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)\s*[^\s`~]*\s*$")
+_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)[^`~]*$")
 
 #: The CLOSING fence tolerates an info string too, because models echo the opening one on the
 #: close (```json ... ```json). Demanding a bare fence there left both fence lines inside the
