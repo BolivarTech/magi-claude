@@ -237,6 +237,30 @@ class TestExtract:
         with pytest.raises(AmbiguousVerdictMarkers):
             self.sentinel.extract(_block(body))
 
+    @pytest.mark.parametrize("separator", [" ", " ", ""])
+    def test_a_JSON_LEGAL_line_separator_does_not_cut_the_block(self, separator):
+        """Un veredicto VALIDO que cita la marca tras un separador **legal en JSON**.
+
+        ``str.splitlines()`` corta ademas por ``\\v``, ``\\f``, ``\\x1c-\\x1e``, ``U+0085``,
+        ``U+2028`` y ``U+2029`` -- y los tres ultimos **son legales crudos dentro de un
+        string JSON** (``json.loads`` los acepta). Un finding sobre el sentinel que cite la
+        marca detras de uno de ellos deja `</MAGI_VERDICT>` **solo en su renglon** -> 2
+        cierres -> `AmbiguousVerdictMarkers` -> el mago muere por un separador invisible.
+
+        Falla cerrado (nunca fabrica), pero la garantia que la docstring promete --*"JSON
+        escapa los saltos de linea, asi que una marca citada no puede quedar sola en un
+        renglon"*-- es **mas ancha que el codigo**: vale para ``\\n``, no para el juego de
+        separadores de ``splitlines()``. Y el escenario es el que MAGI produce **al
+        revisarse a si mismo**.
+        """
+        detail = f"el finding cita la marca:{separator}</MAGI_VERDICT>{separator}y sigue"
+        payload = json.dumps({"agent": "caspar", "detail": detail}, ensure_ascii=False)
+        json.loads(payload)  # premisa: el separador CRUDO es JSON valido
+
+        extracted = self.sentinel.extract(_block(payload))
+
+        assert json.loads(extracted)["detail"] == detail
+
     def test_extract_documents_every_cause_it_raises(self):
         """El ``Raises:`` es LOAD-BEARING: uno incompleto es un reintento a ciegas."""
         doc = VerdictSentinel.extract.__doc__ or ""
