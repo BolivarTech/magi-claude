@@ -57,6 +57,14 @@ _SENTINEL = VerdictSentinel()
 #: malformed envelope is the transport's fault -- telling the model "you left out the markers"
 #: would be a false instruction about text it never wrote -- while anything else IS the model's
 #: text, and there the missing markers are exactly the defect it can fix.
+#:
+#: This is a CONTRACT with the ``claude -p`` CLI, and it is pinned by the fixtures in
+#: ``tests/fixtures/claude-cli-outputs/`` -- captured from the real CLI, one per shape. If a
+#: future CLI adds an envelope key, those fixtures are where it must be re-captured, and the
+#: failure mode until then is a mage retried with the wrong instruction (fail-closed, never a
+#: fabricated verdict). Guessing at unknown keys instead -- "if it looks like a wrapper" -- is
+#: the same shape-guessing this milestone deleted, so the tuple stays explicit (MAGI gate,
+#: Caspar).
 _ENVELOPE_KEYS = ("result", "content")
 
 

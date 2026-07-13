@@ -91,11 +91,24 @@ class AgentPromptGuard:
         closes = sum(self._sentinel.is_exact_marker_line(ln, VERDICT_CLOSE) for ln in lines)
 
         if opens != EXPECTED_MARKER_COUNT or closes != EXPECTED_MARKER_COUNT:
+            # The count tells us WHO is reading this, so the message tells each of them the
+            # right thing (MAGI gate, Balthasar). ZERO markers is a stale install: the prompts
+            # predate the sentinel, and reinstalling is the fix. TOO MANY is almost always
+            # someone customising who documented the format twice -- telling THEM to reinstall
+            # would throw their work away and not even fix it. One message for both audiences
+            # is a message that misdirects one of them.
+            cause = (
+                "Reinstall the plugin (likely cause: prompts from v5.0.x, which predate the "
+                "verdict markers)."
+                if opens == 0 and closes == 0
+                else "If you customised this prompt, keep exactly ONE pair of marker lines: "
+                "they are the contract the parser reads, not an illustration. Teach the format "
+                "in prose or with a placeholder -- a second pair, even inside a code block, "
+                "makes the model emit two blocks and the verdict becomes ambiguous."
+            )
             raise PromptContractError(
-                f"{path}: found {opens} open and {closes} close marker lines. "
-                "Marker lines are ONLY for the verdict block; repeating them, "
-                "even inside a code block, makes the model emit two examples. "
-                f"Reinstall the plugin (likely cause: v5.0.x prompts). {FAQ_HINT}"
+                f"{path}: found {opens} open and {closes} close marker lines "
+                f"(expected exactly {EXPECTED_MARKER_COUNT} of each). {cause} {FAQ_HINT}"
             )
 
         try:

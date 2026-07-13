@@ -58,22 +58,25 @@ The file's bytes do not decode as UTF-8 (a UTF-8 BOM is handled transparently an
 **not** trigger this — see the note on encoding below). **Fix:** re-save the file as UTF-8,
 or reinstall.
 
-### `<path>: found N open and M close marker lines. Marker lines are ONLY for the verdict block; repeating them, even inside a code block, makes the model emit two examples. Reinstall the plugin (likely cause: v5.0.x prompts).`
+### `<path>: found N open and M close marker lines (expected exactly 1 of each). ...`
 
 The file does not contain **exactly one** `<MAGI_VERDICT>` line and **exactly one**
-`</MAGI_VERDICT>` line. Two common causes:
+`</MAGI_VERDICT>` line. The rest of the message depends on which of the two causes it is —
+they have opposite fixes, and a single message would have misdirected one of the two
+audiences:
 
-- **A pre-5.1.0 prompt.** v5.0.x agent prompts predate the sentinel and never had marker
-  lines at all (`N=0, M=0`). This is the message's "likely cause" — reinstall/update the
-  plugin.
-- **The markers were quoted or repeated** — e.g. the prompt was "improved" by adding a
-  second demonstration of the format elsewhere in the file (a walkthrough that shows the
-  markers again to explain them). Every extra marker line is a rival: a model reading a
-  prompt with two open/close pairs has been shown two examples of where a verdict can go,
-  and may emit two blocks. **Fix:** the marker lines must appear **once** in the whole file,
-  exactly where the "Output format" section places them. If you want to explain the format
-  elsewhere in the prose, describe it in words — do not paste the marker lines again, not
-  even inside a fenced code block.
+- **`N=0, M=0` — a pre-5.1.0 prompt.** v5.0.x agent prompts predate the sentinel and never
+  had marker lines at all. The message says **reinstall the plugin**, because that is the fix.
+- **Too many — the markers were repeated.** Almost always someone customising the prompt who
+  demonstrated the format a second time (a walkthrough that shows the markers again to explain
+  them). The message does **not** tell you to reinstall: that would throw your work away and
+  would not even fix it. Every extra marker line is a rival — a model reading a prompt with two
+  open/close pairs has been shown two places a verdict can go, and may emit two blocks. **Fix:**
+  keep exactly one pair, where the "Output format" section places it, and explain the format
+  elsewhere in prose or with a placeholder — do not paste the marker lines again, not even
+  inside a fenced code block.
+
+Check your edit before you spend a run on it: `run_magi.py --check-prompts`.
 
 ### `<path>: <sentinel error message>` (wraps `MissingVerdictMarkers` / `UnterminatedVerdictBlock` / `AmbiguousVerdictMarkers`)
 
