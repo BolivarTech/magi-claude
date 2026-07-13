@@ -61,7 +61,12 @@ experiments/
 # future *tracked* doc that happened to be named that way. A .gitignore that
 # eats a file you meant to commit is worse than one that misses an artifact.
 /checkpoint2-bundle.md
-/magi-review-*.md
+# Every extension, not just .md: the gate's diff was written as magi-review-<v>-diff.TXT,
+# the pattern below only matched .md, and a `git add -A` swept a 312 KB review artifact into
+# the v5.1.0 tag. A pattern that covers the file you happen to name today and not the one you
+# name tomorrow is a pattern that will be beaten by a file extension.
+/magi-review-*
+/smoke-bundles/
 /claude-usage.txt
 
 # R17a release-gate artifact (tools/measure_marker_adherence.py). It is EVIDENCE of a

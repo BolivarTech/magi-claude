@@ -102,11 +102,13 @@ skills/magi/
     validate.py               -- ValidationError + load_agent_output (schema validation)
     consensus.py              -- VERDICT_WEIGHT + determine_consensus (weight-based scoring)
     reporting.py              -- AGENT_TITLES + format_banner + format_report (ASCII)
-    parse_agent_output.py     -- agent-output extractor (Claude envelope + bare/fenced content)
+    parse_agent_output.py     -- transport unwrap + verdict extraction between the markers
 tests/
-  test_synthesize.py          -- 166 tests: validation, consensus, confidence, dedup, labels
-  test_parse_agent_output.py  -- 76 tests: envelopes, fenced/bare content, fail-closed recovery
-  test_run_magi.py            -- 169 tests: arg parsing, model flag, orchestration, validation
+  test_synthesize.py          -- validation, consensus, confidence, dedup, labels
+  test_verdict_markers.py     -- the sentinel: extraction, both marker predicates, hypothesis
+  test_parse_agent_output.py  -- transport envelopes, the delimited block, fail-closed paths
+  test_prompt_guard.py        -- the installation-time guard and its dry run
+  test_run_magi.py            -- args, orchestration, rotation, retry feedback, telemetry
 docs/
   MAGI-System-Documentation.md  -- This document
 pyproject.toml                -- Python >= 3.12, dual license, dev deps, tool config
@@ -495,13 +497,22 @@ Changes are picked up with `/reload-plugins` without restarting.
 
 ## 13. Test Suite
 
-707 tests across the suite; the three original files, which the table below details:
+994 tests. The load-bearing files:
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `test_synthesize.py` | 166 | Validation, weight-based consensus, confidence formula (symmetric), findings dedup, empty titles, dynamic labels, banner alignment, report formatting |
-| `test_parse_agent_output.py` | 76 | Envelope extraction (3 CLI formats), fence stripping, **bare content** (Ollama), embedded-verdict recovery and its fail-closed guards |
-| `test_run_magi.py` | 169 | Arg parsing, model flag, model passthrough, orchestration, degraded mode, input validation |
+| `test_run_magi.py` | 286 | Args, orchestration, degraded mode, lineage rotation, the retry's cause-specific feedback and its derived bound, marker-adherence telemetry, the attempt budget bounded at both ends |
+| `test_synthesize.py` | 167 | Validation, weight-based consensus, confidence formula (symmetric), findings dedup, dynamic labels, banner alignment, report formatting |
+| `test_verdict_markers.py` | 50 | The sentinel: the extraction algorithm and its fail-closed ORDER, both marker predicates (permissive for the model, strict for our own files), invisibles, homoglyphs, fences, and two `hypothesis` properties whose noise is hostile |
+| `test_measure_marker_adherence.py` | 37 | The release gate: a run measured blind cannot certify green, the instrument survives what it tallies, and it observes the parser without perturbing it |
+| `test_parse_agent_output.py` | 32 | Transport envelopes (3 CLI shapes), the delimited block, and every path that fails closed |
+| `test_prompt_guard.py` | 22 | The installation-time guard, its two audiences, and the `--check-prompts` dry run |
+| `test_agent_prompt_contract.py` | 15 | The markers and the canary's fingerprint, anchored in all three shipped prompts |
+
+**Note.** Until v5.1.0 this table advertised *"embedded-verdict recovery and its fail-closed
+guards"* — the heuristic that scanned an agent's whole response for an object that looked like a
+verdict. That heuristic is **deleted**; the parser extracts what the mage placed between its own
+markers, and nothing else.
 
 ```bash
 # Run all tests
