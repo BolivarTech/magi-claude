@@ -295,14 +295,19 @@ def _check_fallback_lineages_are_unique(
 
 
 def check_config_offline(config: OllamaConfig) -> list[str]:
-    """Run every config check that needs no network. The single source of truth.
+    """Run every config check that needs no network. ``validate_magi_toml.py``'s
+    single source of truth for the OFFLINE lineage rules.
 
-    Both the preflight (before a run) and ``validate_magi_toml.py`` (before you even
-    have a run) must answer the SAME question -- "is this config acceptable?" -- so
-    they call this, not their own copy. The validator used to re-derive one of these
-    checks by hand and consequently said ``OK`` to a duplicate-lineage fallback that
-    the preflight fail-closes on: a pre-run tool that green-lights what the product
-    refuses to run is worse than no tool.
+    ``validate_magi_toml.py`` (before you even have a run) must answer the SAME
+    question the live run does -- "is this config acceptable?" -- so it calls this,
+    not its own copy. The validator used to re-derive one of these checks by hand and
+    consequently said ``OK`` to a duplicate-lineage fallback that the preflight
+    fail-closes on: a pre-run tool that green-lights what the product refuses to run
+    is worse than no tool. The two ABORT checks (`_check_trio_lineages_are_distinct`,
+    `_check_fallback_lineages_are_unique`) are the shared source of truth. The live
+    ``preflight()`` calls those two directly (MS4) so it can then run the
+    architecture-AWARE R21 degradation, which needs the probed architecture this
+    offline function cannot see; the WARNING half here stays purely offline.
 
     Args:
         config: The resolved configuration.
