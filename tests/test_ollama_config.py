@@ -444,3 +444,44 @@ def test_the_TOML_attempt_budget_obeys_the_SAME_cap_as_the_CLI(tmp_path):
 
     with pytest.raises(OllamaConfigError, match="max_attempts_per_model"):
         resolve_config(repo_path=toml, global_path=tmp_path / "absent.toml", env={})
+
+
+# ----------------------------------------------------------------------------
+# Task 5a: strict_lineage config key (Grieta 2 -- family contradiction gate)
+# ----------------------------------------------------------------------------
+
+
+def test_strict_lineage_defaults_to_false_when_key_absent(tmp_path):
+    """A TOML that never sets strict_lineage keeps the warn-only path (default
+    False): a family contradiction warns instead of aborting the run."""
+    from ollama_config import DEFAULT_STRICT_LINEAGE
+
+    assert DEFAULT_STRICT_LINEAGE is False
+
+    cfg = resolve_config(repo_path=_write_toml(tmp_path, NEW_TOML), global_path=None, env={})
+    assert cfg.strict_lineage is False
+
+
+def test_strict_lineage_reads_from_file_and_env(tmp_path):
+    toml = "strict_lineage = true\n" + NEW_TOML
+    cfg = resolve_config(repo_path=_write_toml(tmp_path, toml), global_path=None, env={})
+    assert cfg.strict_lineage is True
+
+    cfg_env = resolve_config(
+        repo_path=_write_toml(tmp_path, NEW_TOML),
+        global_path=None,
+        env={"MAGI_OLLAMA_STRICT_LINEAGE": "true"},
+    )
+    assert cfg_env.strict_lineage is True
+
+
+def test_ollama_init_template_scaffolds_strict_lineage_at_its_default(tmp_path):
+    """The scaffold must emit strict_lineage (visible + editable), not omit it and
+    rely on a hidden default (decision mirrored from strict_context_guard)."""
+    from ollama_init import render_template
+
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(render_template(), encoding="utf-8")
+    cfg = resolve_config(repo_path=str(path), global_path=None, env={})
+    assert cfg.strict_lineage is False
+    assert "strict_lineage" in path.read_text(encoding="utf-8")

@@ -19,6 +19,7 @@ from ollama_preflight import (
     FamilyContradictionError,
     MissingDigestError,
     OllamaPreflightError,
+    PreflightResult,
     _is_cloud_tag,
     _list_models,
     preflight,
@@ -393,3 +394,209 @@ async def test_payload_probes_run_concurrently_not_sequentially(ollama_config, m
     measured, _deltas, _est = await _measure_payload(ollama_config, "payload")
     assert inflight["max"] == 3, "all three probes must be in flight at once, not serialized"
     assert len(measured) == 3
+
+
+# --------------------------------------------------------------------------
+# Task 5a (Grieta 2): digest collision, missing digest (R5b), family check (R6),
+# R6b unmapped-architecture info note, and R21/family mutual exclusivity.
+# --------------------------------------------------------------------------
+
+
+async def test_digest_collision_between_two_trio_mages_aborts(ollama_config, preflight_env):
+    """R5/R5a: two trio mages resolving to the SAME digest is ensemble collapse --
+    checked regardless of strict_lineage."""
+    a, b, c = (s.model for s in ollama_config.models.values())
+    same = ModelCapability(window=200_000, supports_completion=True, digest="sha256:same")
+    other = ModelCapability(window=200_000, supports_completion=True, digest="sha256:other")
+    preflight_env["caps"] = {a: same, b: same, c: other}
+    with pytest.raises(DigestCollisionError) as exc:
+        await preflight(ollama_config, "payload")
+    assert "melchior" in str(exc.value) and "balthasar" in str(exc.value)
+
+
+async def test_missing_digest_on_a_non_cloud_trio_model_aborts(config_factory, preflight_env):
+    """R5b: a NON-cloud trio model whose /api/show gave no digest cannot have its
+    uniqueness verified -- fail closed."""
+    cfg = config_factory(
+        models={
+            "melchior": ModelSpec("qwen3.5:32b-local", "alibaba"),
+            "balthasar": ModelSpec("kimi-k2.6:cloud", "moonshot"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
+        }
+    )
+    preflight_env["available"] |= {"qwen3.5:32b-local"}
+    preflight_env["caps"] = {
+        "qwen3.5:32b-local": ModelCapability(window=200_000, supports_completion=True, digest=None)
+    }
+    with pytest.raises(MissingDigestError, match="melchior"):
+        await preflight(cfg, "payload")
+
+
+async def test_missing_digest_on_a_cloud_trio_model_does_not_abort(ollama_config, preflight_env):
+    """_CLOUD_HAS_DIGEST: a :cloud tag's absent digest is EXPECTED, not a failure --
+    the default preflight_env caps (digest=None) model exactly this."""
+    result = await preflight(ollama_config, "payload")
+    assert result.digest_by_model == {}
+
+
+async def test_family_contradiction_aborts_when_strict_lineage_is_true(config_factory, preflight_env):
+    """R6: strict_lineage=True upgrades a probed-architecture/declared-lineage
+    contradiction to a fail-closed abort."""
+    cfg = config_factory(
+        strict_lineage=True,
+        models={
+            "melchior": ModelSpec("qwen3.5:397b-cloud", "wrongvendor"),
+            "balthasar": ModelSpec("kimi-k2.6:cloud", "moonshot"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
+        },
+    )
+    a = cfg.models["melchior"].model
+    preflight_env["caps"] = {
+        a: ModelCapability(window=200_000, supports_completion=True, architecture="qwen3.5")
+    }
+    with pytest.raises(FamilyContradictionError, match="melchior"):
+        await preflight(cfg, "payload")
+
+
+async def test_family_contradiction_warns_and_proceeds_by_default(config_factory, preflight_env):
+    """Default strict_lineage=False: a contradiction only WARNS -- in the SAME
+    lineage_warnings collection R21 uses -- and the run proceeds."""
+    cfg = config_factory(
+        models={
+            "melchior": ModelSpec("qwen3.5:397b-cloud", "wrongvendor"),
+            "balthasar": ModelSpec("kimi-k2.6:cloud", "moonshot"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
+        }
+    )
+    a = cfg.models["melchior"].model
+    preflight_env["caps"] = {
+        a: ModelCapability(window=200_000, supports_completion=True, architecture="qwen3.5")
+    }
+    result = await preflight(cfg, "payload")
+    assert any("melchior" in w and "wrongvendor" in w for w in result.lineage_warnings)
+
+
+async def test_family_unknown_architecture_never_blocks(ollama_config, preflight_env):
+    """family_verdict fails OPEN for an unmapped architecture -- it must never
+    block a run, even under strict_lineage."""
+    a, _b, _c = (s.model for s in ollama_config.models.values())
+    unmapped = ModelCapability(
+        window=200_000, supports_completion=True, architecture="some-selfhosted-arch"
+    )
+    preflight_env["caps"] = {a: unmapped}
+    result = await preflight(ollama_config, "payload")  # must not raise
+    assert isinstance(result, PreflightResult)
+
+
+async def test_unmapped_architecture_with_real_lineage_adds_an_info_note(
+    ollama_config, preflight_env
+):
+    """R6b: architecture WAS probed but is not in the known vendor map, and the
+    declared lineage is real (non-trivial) -- an INFO note joins lineage_warnings."""
+    a = ollama_config.models["melchior"].model
+    preflight_env["caps"] = {
+        a: ModelCapability(window=200_000, supports_completion=True, architecture="llama")
+    }
+    result = await preflight(ollama_config, "payload")
+    assert any(w.startswith("INFO:") and "melchior" in w for w in result.lineage_warnings)
+
+
+async def test_unmapped_architecture_with_trivial_lineage_adds_no_note(
+    config_factory, preflight_env
+):
+    """R6b: a TRIVIAL declared lineage has nothing for the note to cross-check --
+    no INFO note fires."""
+    cfg = config_factory(
+        models={
+            "melchior": ModelSpec("qwen3.5:397b-cloud", "unknown"),
+            "balthasar": ModelSpec("kimi-k2.6:cloud", "moonshot"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
+        }
+    )
+    a = cfg.models["melchior"].model
+    preflight_env["caps"] = {
+        a: ModelCapability(window=200_000, supports_completion=True, architecture="llama")
+    }
+    result = await preflight(cfg, "payload")
+    assert not any("melchior" in w for w in result.lineage_warnings)
+
+
+async def test_tag_prefix_check_fires_for_trio_when_architecture_is_absent(
+    config_factory, preflight_env
+):
+    """R21: with no /api/show architecture data (the preflight_env default), the
+    trio still falls back to the tag-prefix typo detector (unchanged behaviour)."""
+    cfg = config_factory(
+        models={
+            "melchior": ModelSpec("qwen3.5:397b-cloud", "acme"),  # tag prefix says alibaba
+            "balthasar": ModelSpec("kimi-k2.6:cloud", "moonshot"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
+        }
+    )
+    result = await preflight(cfg, "payload")
+    assert any("qwen3.5:397b-cloud" in w and "acme" in w for w in result.lineage_warnings)
+
+
+async def test_tag_prefix_check_is_superseded_once_architecture_is_known(
+    config_factory, preflight_env
+):
+    """R21 vs R6 mutual exclusivity: once /api/show reports a real architecture,
+    the family check supersedes the tag-prefix guess for that model -- no
+    redundant tag-based warning, only the (more informative) family warning."""
+    cfg = config_factory(
+        models={
+            "melchior": ModelSpec("qwen3.5:397b-cloud", "acme"),
+            "balthasar": ModelSpec("kimi-k2.6:cloud", "moonshot"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
+        }
+    )
+    a = cfg.models["melchior"].model
+    preflight_env["caps"] = {
+        a: ModelCapability(window=200_000, supports_completion=True, architecture="qwen3.5")
+    }
+    result = await preflight(cfg, "payload")
+    assert not any("tag suggests" in w for w in result.lineage_warnings)
+    assert any("melchior" in w and "acme" in w for w in result.lineage_warnings)
+
+
+async def test_preflight_result_carries_digest_by_model_as_a_seed_field():
+    """PreflightResult must expose digest_by_model (Task 5b's rotation lookup
+    seed), defaulting to empty so every existing call site keeps working."""
+    from dataclasses import fields
+
+    names = {f.name for f in fields(PreflightResult)}
+    assert "digest_by_model" in names
+
+
+async def test_digest_by_model_is_seeded_only_for_trio_models_that_have_one(
+    config_factory, preflight_env
+):
+    """Populated with trio model -> digest ONLY for models that HAVE one -- never
+    pre-populated for a fallback (no I/O the preflight would not otherwise do)."""
+    cfg = config_factory(
+        models={
+            "melchior": ModelSpec("qwen3.5:32b-local", "alibaba"),
+            "balthasar": ModelSpec("kimi-k2.6:cloud", "moonshot"),
+            "caspar": ModelSpec("deepseek-v4-pro:cloud", "deepseek"),
+        }
+    )
+    preflight_env["available"] |= {"qwen3.5:32b-local"}
+    preflight_env["caps"] = {
+        "qwen3.5:32b-local": ModelCapability(
+            window=200_000, supports_completion=True, digest="sha256:local1"
+        )
+    }
+    result = await preflight(cfg, "payload")
+    assert result.digest_by_model == {"qwen3.5:32b-local": "sha256:local1"}
+
+
+async def test_digest_by_model_is_not_read_anywhere_in_the_report_builder():
+    """digest_by_model is internal preflight seed data (Task 5b): it must never
+    leak into the 7-key agent JSON or magi-report.json. Proven by inspecting the
+    module that actually builds the report, not merely asserted."""
+    import inspect
+
+    import run_magi
+
+    source = inspect.getsource(run_magi)
+    assert "digest_by_model" not in source
