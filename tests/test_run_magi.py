@@ -5922,6 +5922,544 @@ class TestRotationFaultInjection:
 
 
 # ---------------------------------------------------------------------------
+# Task 5b: model-digest uniqueness enforced at the rotation COMMIT (R5a/R5b/R5c)
+# ---------------------------------------------------------------------------
+
+
+class TestDigestUniquenessAtRotationCommit:
+    """MS4 Task 5b: ensemble-collapse prevention extended from preflight (Task 5a,
+    the trio only) to every rotation commit, for the run's whole lifetime."""
+
+    @pytest.mark.asyncio
+    async def test_second_commit_deterministically_sees_the_first_and_rejects(self):
+        """Step 2b -- THE correctness gate. Two SEQUENTIAL, fully-awaited
+        ``claim_next`` calls: no gather, no scheduling trick, no flakiness possible.
+        The second call must observe the first's just-committed digest and reject
+        its only candidate as a collision -- proof the check is serialized under
+        the SAME lock the commit itself uses, not a separate, racy comparison."""
+        from fallback_policy import (
+            AgentRotationState,
+            LineageRegistry,
+            ModelCapability,
+            RotationPolicy,
+        )
+        from ollama_preflight import _is_cloud_tag
+
+        shared_fallback = ModelSpec("shared-fallback:cloud", "zhipu")
+        policy = RotationPolicy(
+            fallback=[shared_fallback],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities={
+                shared_fallback.model: ModelCapability(
+                    window=200_000, supports_completion=True, digest="sha:shared"
+                )
+            },
+            strict_context_guard=False,
+        )
+        registry = LineageRegistry(
+            {
+                "melchior": ModelSpec("melchior-seed:cloud", "alibaba"),
+                "caspar": ModelSpec("caspar-seed:cloud", "deepseek"),
+            }
+        )
+        digest_by_model: dict[str, str] = {}
+
+        first = await registry.claim_next(
+            "melchior", policy, AgentRotationState(), digest_by_model, is_cloud=_is_cloud_tag
+        )
+        assert first == shared_fallback
+        assert digest_by_model[shared_fallback.model] == "sha:shared", (
+            "the lookup must GROW append-only from the policy's zero-I/O capability cache"
+        )
+
+        second = await registry.claim_next(
+            "caspar", policy, AgentRotationState(), digest_by_model, is_cloud=_is_cloud_tag
+        )
+
+        assert second is None, (
+            "caspar's only candidate is the SAME digest melchior just committed -- the "
+            "commit must reject it, serialized entirely under the registry lock"
+        )
+
+    @pytest.mark.asyncio
+    async def test_colliding_candidate_is_rejected_and_the_next_candidate_wins(self):
+        """Step 1 / R5a: a digest collision rejects and RE-PROPOSES, all within the
+        same commit call -- it does not just fail the whole rotation."""
+        from fallback_policy import (
+            REJECT_DIGEST_COLLISION,
+            AgentRotationState,
+            LineageRegistry,
+            ModelCapability,
+            RotationPolicy,
+        )
+        from ollama_preflight import _is_cloud_tag
+
+        colliding = ModelSpec("colliding-fallback:cloud", "zhipu")
+        clean = ModelSpec("clean-fallback:cloud", "openai")
+        policy = RotationPolicy(
+            fallback=[colliding, clean],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities={
+                colliding.model: ModelCapability(
+                    window=200_000, supports_completion=True, digest="sha:active"
+                ),
+                clean.model: ModelCapability(
+                    window=200_000, supports_completion=True, digest="sha:unique"
+                ),
+            },
+            strict_context_guard=False,
+        )
+        registry = LineageRegistry(
+            {
+                "melchior": ModelSpec("melchior-active:cloud", "alibaba"),
+                "caspar": ModelSpec("caspar-seed:cloud", "deepseek"),
+            }
+        )
+        digest_by_model = {"melchior-active:cloud": "sha:active"}
+        state = AgentRotationState()
+
+        got = await registry.claim_next(
+            "caspar", policy, state, digest_by_model, is_cloud=_is_cloud_tag
+        )
+
+        assert got == clean, "the colliding candidate must be skipped, the clean one taken"
+        assert state.window_rejected[colliding.model] == REJECT_DIGEST_COLLISION
+
+    @pytest.mark.asyncio
+    async def test_all_candidates_colliding_exhausts_to_none_not_a_partial_state(self):
+        """Step 1 / R5a: every candidate colliding must exhaust cleanly -- no
+        candidate committed, the registry left exactly as it was."""
+        from fallback_policy import (
+            REJECT_DIGEST_COLLISION,
+            AgentRotationState,
+            LineageRegistry,
+            ModelCapability,
+            RotationPolicy,
+        )
+        from ollama_preflight import _is_cloud_tag
+
+        f1 = ModelSpec("fallback-one:cloud", "zhipu")
+        f2 = ModelSpec("fallback-two:cloud", "openai")
+        policy = RotationPolicy(
+            fallback=[f1, f2],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities={
+                f1.model: ModelCapability(
+                    window=200_000, supports_completion=True, digest="sha:active"
+                ),
+                f2.model: ModelCapability(
+                    window=200_000, supports_completion=True, digest="sha:active"
+                ),
+            },
+            strict_context_guard=False,
+        )
+        registry = LineageRegistry(
+            {
+                "melchior": ModelSpec("melchior-active:cloud", "alibaba"),
+                "caspar": ModelSpec("caspar-seed:cloud", "deepseek"),
+            }
+        )
+        digest_by_model = {"melchior-active:cloud": "sha:active"}
+        state = AgentRotationState()
+        before = await registry.lineages_in_play(exclude=None)
+
+        got = await registry.claim_next(
+            "caspar", policy, state, digest_by_model, is_cloud=_is_cloud_tag
+        )
+
+        assert got is None, "a mage with NO digest-safe candidate must not rotate"
+        assert state.window_rejected[f1.model] == REJECT_DIGEST_COLLISION
+        assert state.window_rejected[f2.model] == REJECT_DIGEST_COLLISION
+        assert await registry.lineages_in_play(exclude=None) == before, (
+            "the registry must be UNCHANGED -- a rejected candidate never becomes active"
+        )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_rotations_sharing_a_colliding_candidate_serialize_to_one_winner(
+        self,
+    ):
+        """Step 2 (race, SUPPLEMENTARY, non-blocking): a barrier forces both mages
+        to reach the commit at essentially the same tick. The lock has NO ``await``
+        inside its critical section (both the digest check and ``next_model`` are
+        pure), so this is deterministic by construction rather than timing-lucky --
+        kept as a belt-and-suspenders check alongside Step 2b, never the gate."""
+        from fallback_policy import (
+            AgentRotationState,
+            LineageRegistry,
+            ModelCapability,
+            RotationPolicy,
+        )
+        from ollama_preflight import _is_cloud_tag
+
+        shared_fallback = ModelSpec("shared-fallback:cloud", "zhipu")
+        policy = RotationPolicy(
+            fallback=[shared_fallback],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities={
+                shared_fallback.model: ModelCapability(
+                    window=200_000, supports_completion=True, digest="sha:shared"
+                )
+            },
+            strict_context_guard=False,
+        )
+        registry = LineageRegistry(
+            {
+                "melchior": ModelSpec("melchior-seed:cloud", "alibaba"),
+                "caspar": ModelSpec("caspar-seed:cloud", "deepseek"),
+            }
+        )
+        digest_by_model: dict[str, str] = {}
+        barrier = asyncio.Event()
+        arrived = {"n": 0}
+
+        async def claim(agent: str):
+            arrived["n"] += 1
+            if arrived["n"] == 2:
+                barrier.set()
+            await barrier.wait()
+            return await registry.claim_next(
+                agent, policy, AgentRotationState(), digest_by_model, is_cloud=_is_cloud_tag
+            )
+
+        results = await asyncio.gather(claim("melchior"), claim("caspar"))
+
+        winners = [r for r in results if r is not None]
+        losers = [r for r in results if r is None]
+        assert len(winners) == 1, f"expected exactly one commit, got {results}"
+        assert len(losers) == 1
+
+    @pytest.mark.asyncio
+    async def test_candidate_colliding_with_a_mid_run_rotated_mage_is_rejected(self):
+        """Step 2c: the lookup must be consulted against the CURRENT (post-rotation)
+        registry state, not the initial trio -- a candidate colliding with a
+        sibling's ROTATED model must be caught, not just collisions with the
+        original trio."""
+        from fallback_policy import (
+            AgentRotationState,
+            LineageRegistry,
+            ModelCapability,
+            RotationPolicy,
+        )
+        from ollama_preflight import _is_cloud_tag
+
+        caspar_fallback = ModelSpec("caspar-fallback:cloud", "zhipu")
+        melchior_fallback = ModelSpec("melchior-fallback:cloud", "openai")
+        caspar_policy = RotationPolicy(
+            fallback=[caspar_fallback],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities={
+                caspar_fallback.model: ModelCapability(
+                    window=200_000, supports_completion=True, digest="sha:rotated-caspar"
+                )
+            },
+            strict_context_guard=False,
+        )
+        melchior_policy = RotationPolicy(
+            fallback=[melchior_fallback],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities={
+                melchior_fallback.model: ModelCapability(
+                    window=200_000,
+                    supports_completion=True,
+                    digest="sha:rotated-caspar",  # SAME digest caspar will rotate to
+                )
+            },
+            strict_context_guard=False,
+        )
+        registry = LineageRegistry(
+            {
+                "melchior": ModelSpec("melchior-seed:cloud", "alibaba"),
+                "caspar": ModelSpec("caspar-seed:cloud", "deepseek"),
+            }
+        )
+        digest_by_model: dict[str, str] = {}
+
+        caspar_rotated = await registry.claim_next(
+            "caspar", caspar_policy, AgentRotationState(), digest_by_model, is_cloud=_is_cloud_tag
+        )
+        assert caspar_rotated == caspar_fallback
+
+        melchior_result = await registry.claim_next(
+            "melchior",
+            melchior_policy,
+            AgentRotationState(),
+            digest_by_model,
+            is_cloud=_is_cloud_tag,
+        )
+
+        assert melchior_result is None, (
+            "melchior's candidate collides with caspar's POST-rotation digest -- the "
+            "check must read live registry state, not the trio caspar started with"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_cloud_candidate_missing_digest_fails_closed(self):
+        """Step 3b / R5b: a NON-cloud candidate with no digest cannot have its
+        uniqueness verified -- it must be rejected, never silently accepted."""
+        from fallback_policy import (
+            REJECT_DIGEST_UNVERIFIABLE,
+            AgentRotationState,
+            LineageRegistry,
+            ModelCapability,
+            RotationPolicy,
+        )
+        from ollama_preflight import _is_cloud_tag
+
+        local_no_digest = ModelSpec("local-solo:14b", "acme")  # NOT a :cloud tag
+        assert not _is_cloud_tag(local_no_digest.model)
+        policy = RotationPolicy(
+            fallback=[local_no_digest],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities={
+                local_no_digest.model: ModelCapability(
+                    window=200_000, supports_completion=True, digest=None
+                )
+            },
+            strict_context_guard=False,
+        )
+        registry = LineageRegistry({"caspar": ModelSpec("caspar-seed:cloud", "deepseek")})
+        state = AgentRotationState()
+
+        got = await registry.claim_next("caspar", policy, state, {}, is_cloud=_is_cloud_tag)
+
+        assert got is None, "a non-cloud candidate with no digest must fail CLOSED"
+        assert state.window_rejected[local_no_digest.model] == REJECT_DIGEST_UNVERIFIABLE
+
+    @pytest.mark.asyncio
+    async def test_cloud_candidate_missing_digest_is_allowed(self):
+        """Cloud-digest-absent semantics: a :cloud candidate's absent digest is
+        EXPECTED (Task 0 spike) -- it must be accepted, not fail closed."""
+        from fallback_policy import (
+            AgentRotationState,
+            LineageRegistry,
+            ModelCapability,
+            RotationPolicy,
+        )
+        from ollama_preflight import _is_cloud_tag
+
+        cloud_no_digest = ModelSpec("cloud-solo:cloud", "zhipu")
+        assert _is_cloud_tag(cloud_no_digest.model)
+        policy = RotationPolicy(
+            fallback=[cloud_no_digest],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities={
+                cloud_no_digest.model: ModelCapability(
+                    window=200_000, supports_completion=True, digest=None
+                )
+            },
+            strict_context_guard=False,
+        )
+        registry = LineageRegistry({"caspar": ModelSpec("caspar-seed:cloud", "deepseek")})
+
+        got = await registry.claim_next(
+            "caspar", policy, AgentRotationState(), {}, is_cloud=_is_cloud_tag
+        )
+
+        assert got == cloud_no_digest, "a cloud candidate's missing digest must NOT fail closed"
+
+    @pytest.mark.asyncio
+    async def test_all_non_cloud_candidates_missing_digest_exhausts_without_hanging(self):
+        """Step 3b: every candidate unverifiable must still terminate (the internal
+        retry loop is bounded by the policy's own candidate list -- no infinite loop)."""
+        from fallback_policy import (
+            REJECT_DIGEST_UNVERIFIABLE,
+            AgentRotationState,
+            LineageRegistry,
+            ModelCapability,
+            RotationPolicy,
+        )
+        from ollama_preflight import _is_cloud_tag
+
+        f1 = ModelSpec("local-one:14b", "acme")
+        f2 = ModelSpec("local-two:14b", "widget")
+        policy = RotationPolicy(
+            fallback=[f1, f2],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities={
+                f1.model: ModelCapability(window=200_000, supports_completion=True, digest=None),
+                f2.model: ModelCapability(window=200_000, supports_completion=True, digest=None),
+            },
+            strict_context_guard=False,
+        )
+        registry = LineageRegistry({"caspar": ModelSpec("caspar-seed:cloud", "deepseek")})
+        state = AgentRotationState()
+
+        got = await registry.claim_next("caspar", policy, state, {}, is_cloud=_is_cloud_tag)
+
+        assert got is None
+        assert state.window_rejected[f1.model] == REJECT_DIGEST_UNVERIFIABLE
+        assert state.window_rejected[f2.model] == REJECT_DIGEST_UNVERIFIABLE
+
+    @pytest.mark.asyncio
+    async def test_active_mages_unrecoverable_digest_fails_closed_for_a_sibling_rotation(self):
+        """Step 3 / R5c: an ALREADY-ACTIVE mage's digest cannot be recovered (its
+        model is non-cloud and absent from both the lookup and the capability
+        cache) -- a sibling's candidate must be rejected: collision safety against
+        that mage cannot be PROVEN, so it fails closed instead of silently treating
+        the unresolved digest as non-comparable."""
+        from fallback_policy import (
+            REJECT_DIGEST_UNVERIFIABLE,
+            AgentRotationState,
+            LineageRegistry,
+            ModelCapability,
+            RotationPolicy,
+        )
+        from ollama_preflight import _is_cloud_tag
+
+        active_unrecoverable = ModelSpec(
+            "local-active-unknown:14b", "acme"
+        )  # non-cloud, no caps entry
+        candidate = ModelSpec("clean-fallback:cloud", "zhipu")
+        policy = RotationPolicy(
+            fallback=[candidate],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities={
+                candidate.model: ModelCapability(
+                    window=200_000, supports_completion=True, digest="sha:candidate"
+                )
+                # deliberately NO entry for active_unrecoverable.model
+            },
+            strict_context_guard=False,
+        )
+        registry = LineageRegistry(
+            {"melchior": active_unrecoverable, "caspar": ModelSpec("caspar-seed:cloud", "deepseek")}
+        )
+        state = AgentRotationState()
+
+        got = await registry.claim_next("caspar", policy, state, {}, is_cloud=_is_cloud_tag)
+
+        assert got is None, "an unrecoverable ACTIVE digest must fail the rotation closed"
+        assert state.window_rejected[candidate.model] == REJECT_DIGEST_UNVERIFIABLE
+
+    @pytest.mark.asyncio
+    async def test_digest_resolution_during_rotation_performs_zero_new_api_show_calls(self):
+        """BDD-8/Step 4: resolving digests for the collision check must cost ZERO
+        extra ``/api/show`` calls beyond what preflight already paid for -- the
+        candidate's and every active mage's digest come from the cache, never a
+        fresh probe."""
+        from fallback_policy import AgentRotationState, LineageRegistry, RotationPolicy
+        from model_context import fetch_capabilities
+        from ollama_preflight import _is_cloud_tag
+        from rotation_harness import _cfg
+
+        show_calls = {"n": 0}
+
+        async def fake_show(model: str, timeout: int) -> dict[str, Any]:
+            show_calls["n"] += 1
+            return {
+                "model_info": {"acme.context_length": 200_000},
+                "digest": f"sha:{model}",
+            }
+
+        cfg = _cfg()
+        model_tags = ["glm-5.2:cloud", "gpt-oss:120b-cloud"]
+        caps = await fetch_capabilities(cfg, model_tags, _show=fake_show)
+        assert show_calls["n"] == len(model_tags), "sanity: the fake WAS called during preflight"
+
+        policy = RotationPolicy(
+            fallback=[ModelSpec(model_tags[0], "zhipu"), ModelSpec(model_tags[1], "openai")],
+            max_rotations=2,
+            min_window_tokens=REQUIRED,
+            capabilities=caps,
+            strict_context_guard=False,
+        )
+        registry = LineageRegistry(
+            {
+                "melchior": ModelSpec("melchior-seed:cloud", "alibaba"),
+                "caspar": ModelSpec("caspar-seed:cloud", "deepseek"),
+            }
+        )
+        digest_by_model: dict[str, str] = {}
+
+        await registry.claim_next(
+            "caspar", policy, AgentRotationState(), digest_by_model, is_cloud=_is_cloud_tag
+        )
+        await registry.claim_next(
+            "melchior", policy, AgentRotationState(), digest_by_model, is_cloud=_is_cloud_tag
+        )
+
+        assert show_calls["n"] == len(model_tags), (
+            "digest resolution during rotation must never re-invoke /api/show"
+        )
+
+    @pytest.mark.asyncio
+    async def test_full_run_degrades_when_every_fallback_digest_collides_with_an_active_mage(
+        self, tmp_path
+    ):
+        """Integration: the end-to-end wiring (select_backend -> RotationContext ->
+        _rotate -> claim_next) actually enforces R5a. A mage whose every declared
+        fallback would collapse the ensemble with an ACTIVE sibling never rotates
+        and the run degrades -- exactly like exhausting the fallback list for any
+        other reason (BDD-4b/R5a)."""
+        digests = {
+            TRIO["melchior"].model: "sha:melchior",
+            TRIO["balthasar"].model: "sha:balthasar",
+            TRIO["caspar"].model: "sha:caspar-trio",
+            # every one of caspar's THREE declared fallbacks collides with an
+            # ALREADY-ACTIVE mage's digest:
+            FALLBACK[0].model: "sha:melchior",
+            FALLBACK[1].model: "sha:balthasar",
+            FALLBACK[2].model: "sha:melchior",
+        }
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            raise RuntimeError("HTTP 503 Service Unavailable")  # caspar's model always fails
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation(digests=digests))
+
+        assert result["degraded"] is True, (
+            "every fallback collides with an active mage -- caspar must NOT rotate"
+        )
+        assert len(result["agents"]) == 2
+        assert {a["agent"] for a in result["agents"]} == {"melchior", "balthasar"}
+
+    @pytest.mark.asyncio
+    async def test_digest_by_model_never_reaches_the_report(self, tmp_path):
+        """`digest_by_model` (and the digest strings it carries) is internal-only
+        preflight/rotation data -- it must never leak into ``magi-report.json``
+        (the 7-key agent JSON's envelope), even on a run that actually rotates."""
+        digests = {
+            TRIO["melchior"].model: "sha:melchior-secret",
+            TRIO["balthasar"].model: "sha:balthasar-secret",
+            TRIO["caspar"].model: "sha:caspar-trio-secret",
+            FALLBACK[0].model: "sha:caspar-fallback-secret",  # distinct: caspar may rotate here
+        }
+
+        async def mock_launch(
+            agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+        ):
+            if agent_name != "caspar":
+                return _valid(agent_name)
+            if spec.model == TRIO["caspar"].model:
+                raise RuntimeError("HTTP 503 Service Unavailable")
+            return _valid(agent_name)
+
+        result = await _run(tmp_path, mock_launch, rotation=_rotation(digests=digests))
+
+        assert result.get("degraded") is not True
+        serialized = json.dumps(result)
+        assert "digest_by_model" not in serialized
+        for secret_digest in digests.values():
+            assert secret_digest not in serialized, (
+                f"a digest value ({secret_digest!r}) leaked into the report"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Task 13: noisy telemetry (R9/R13/R16/NR3b) -- no silent fallback ever
 # ---------------------------------------------------------------------------
 

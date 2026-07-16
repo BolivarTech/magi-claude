@@ -1,6 +1,6 @@
 [project]
 name = "magi"
-version = "5.1.2"
+version = "5.2.0"
 requires-python = ">= 3.12"
 description = "MAGI multi-perspective analysis plugin for Claude Code"
 license = "MIT OR Apache-2.0"
@@ -23,8 +23,9 @@ explicit_package_bases = true
 # the plugin's strict typecheck. Harmless in the public repo (the dir is absent).
 # ``scripts/`` and the release-tooling smoke test are gitignored dev tooling
 # (from BolivarTech/AI_Tools); they import the network-bound scripts and are not
-# part of the shipped, type-checked plugin.
-exclude = ['^scripts/', 'tests/test_release_tooling\.py$']
+# part of the shipped, type-checked plugin. ``magi-corpus/`` is the gitignored
+# local MAGI-run analysis corpus + its collector (proto-corpus for MS6).
+exclude = ['^scripts/', '^magi-corpus/', 'tests/test_release_tooling\.py$']
 
 [[tool.mypy.overrides]]
 module = "_pytest.*"

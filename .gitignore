@@ -75,3 +75,4 @@ experiments/
 # PRODUCES and CHECKS it lives in tools/ and IS tracked (see that module's docstring for
 # why: a tracked `make release-check` calling a gitignored script is the v5.0.3 bug).
 /marker-adherence-report.json
+magi-corpus/

@@ -50,7 +50,8 @@ def test_rendered_template_parses_as_valid_toml_with_correct_scalar_types():
     import tomllib
 
     data = tomllib.loads(render_template())
-    assert data["strict_context_guard"] is False  # lowercase TOML bool, not "False"
+    # MS4 flipped the default to fail-closed; lowercase TOML bool, not "True".
+    assert data["strict_context_guard"] is True
     assert isinstance(data["retry_backoff_seconds"], float)  # 2.0, not 2
     assert isinstance(data["max_rotations"], int)
 

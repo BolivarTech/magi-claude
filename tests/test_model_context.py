@@ -8,6 +8,8 @@ import pytest
 from fallback_policy import ModelCapability
 from model_context import (
     MAX_RETRY_FEEDBACK_TOKENS,
+    _read_architecture,
+    _read_digest,
     compute_required_tokens,
     fetch_capabilities,
     probe_prompt_tokens,
@@ -146,3 +148,66 @@ async def test_reads_window_from_nested_model_info(ollama_config):
     )
     caps = await fetch_capabilities(ollama_config, ["a"], _show=show)
     assert caps["a"].window == 262_144
+
+
+def test_read_architecture_from_model_info_prefix():
+    payload = {"model_info": {"qwen3.5.context_length": 262_144, "qwen3.5.attention.heads": 64}}
+    assert _read_architecture(payload) == "qwen3.5"
+
+
+def test_read_architecture_absent_returns_none():
+    assert _read_architecture({"model_info": {}}) is None
+
+
+def test_read_architecture_missing_model_info_returns_none():
+    assert _read_architecture({}) is None
+
+
+def test_read_digest_top_level():
+    assert _read_digest({"digest": "sha256:abc123"}) == "sha256:abc123"
+
+
+def test_read_digest_absent_returns_none():
+    assert _read_digest({}) is None
+
+
+def test_read_digest_empty_string_returns_none():
+    # An empty digest carries no identity; treat it the same as absent.
+    assert _read_digest({"digest": ""}) is None
+
+
+def test_read_digest_non_string_returns_none():
+    assert _read_digest({"digest": 12345}) is None
+
+
+async def test_fetch_capabilities_propagates_digest_and_architecture(ollama_config):
+    show = FakeShow(
+        {
+            "a": {
+                "capabilities": ["completion"],
+                "digest": "sha256:abc123",
+                "model_info": {"qwen3.5.context_length": 262_144},
+            }
+        }
+    )
+    caps = await fetch_capabilities(ollama_config, ["a"], _show=show)
+    assert caps["a"].digest == "sha256:abc123"
+    assert caps["a"].architecture == "qwen3.5"
+
+
+async def test_fetch_capabilities_cloud_model_has_no_digest(ollama_config):
+    # Task 0 spike (real daemon): the :cloud trio omits the top-level digest key
+    # entirely -- None here is EXPECTED and CORRECT, not a probe failure.
+    show = FakeShow(
+        {"a": {"capabilities": ["completion"], "model_info": {"qwen3.5.context_length": 262_144}}}
+    )
+    caps = await fetch_capabilities(ollama_config, ["a"], _show=show)
+    assert caps["a"].digest is None
+    assert caps["a"].architecture == "qwen3.5"
+
+
+async def test_fetch_capabilities_failure_yields_none_digest_and_architecture(ollama_config):
+    show = FakeShow({"a": {"capabilities": ["completion"], "context_length": 1}}, fail={"a"})
+    caps = await fetch_capabilities(ollama_config, ["a"], _show=show)
+    assert caps["a"].digest is None
+    assert caps["a"].architecture is None

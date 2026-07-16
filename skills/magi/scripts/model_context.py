@@ -34,6 +34,11 @@ PREFLIGHT_RETRIES = 2
 CAPABILITY_COMPLETION = "completion"
 _WINDOW_KEYS = ("context_length", "context_window")
 
+#: ``model_info`` nests the window under an architecture-prefixed key, e.g.
+#: ``"qwen3.5.context_length"``. Shared by ``_read_window`` (window value) and
+#: ``_read_architecture`` (the prefix itself) so the two readers never drift.
+_MODEL_INFO_CONTEXT_SUFFIX = ".context_length"
+
 ShowFn = Callable[[str, int], Awaitable[dict[str, Any]]]
 ProbeFn = Callable[[str, str, int], Awaitable[dict[str, Any]]]
 
@@ -108,6 +113,8 @@ async def fetch_capabilities(
             caps[model] = ModelCapability(
                 window=_read_window(res),
                 supports_completion=_read_completion(res),
+                digest=_read_digest(res),
+                architecture=_read_architecture(res),
             )
     return caps
 
@@ -134,7 +141,7 @@ def _read_window(payload: Mapping[str, Any]) -> int | None:
     info = payload.get("model_info")
     if isinstance(info, Mapping):
         for key, value in info.items():
-            if not (key == "context_length" or key.endswith(".context_length")):
+            if not (key == "context_length" or key.endswith(_MODEL_INFO_CONTEXT_SUFFIX)):
                 continue
             if isinstance(value, bool) or not isinstance(value, int):
                 continue
@@ -147,6 +154,56 @@ def _read_window(payload: Mapping[str, Any]) -> int | None:
         if value > 0:
             return value
     return None
+
+
+def _read_architecture(payload: Mapping[str, Any]) -> str | None:
+    """Extract the model's architecture family from an ``/api/show`` payload.
+
+    Ollama nests the context window under ``model_info`` with a key prefixed by
+    the architecture family (e.g. ``model_info["qwen3.5.context_length"]``); the
+    architecture is that key's prefix (Task 0 spike, confirmed against the real
+    daemon). Reuses the same ``model_info`` walk as :func:`_read_window`.
+
+    Args:
+        payload: Untrusted JSON object from Ollama.
+
+    Returns:
+        The architecture family (e.g. ``"qwen3.5"``), or ``None`` if
+        ``/api/show`` did not report ``model_info`` or no key carries the
+        ``.context_length`` suffix.
+
+    Example:
+        >>> _read_architecture({"model_info": {"qwen3.5.context_length": 262144}})
+        'qwen3.5'
+    """
+    info = payload.get("model_info")
+    if isinstance(info, Mapping):
+        for key in info:
+            if isinstance(key, str) and key.endswith(_MODEL_INFO_CONTEXT_SUFFIX):
+                return key[: -len(_MODEL_INFO_CONTEXT_SUFFIX)]
+    return None
+
+
+def _read_digest(payload: Mapping[str, Any]) -> str | None:
+    """Extract the model's identity fingerprint from an ``/api/show`` payload.
+
+    The ``:cloud`` trio OMITS the top-level ``digest`` key entirely (Task 0
+    spike, confirmed against the real daemon) -- returning ``None`` for those
+    models is expected and correct, not a probe failure to fail closed on.
+
+    Args:
+        payload: Untrusted JSON object from Ollama.
+
+    Returns:
+        The non-empty digest string, or ``None`` if absent, empty, or not a
+        string.
+
+    Example:
+        >>> _read_digest({"digest": "sha256:abc123"})
+        'sha256:abc123'
+    """
+    digest = payload.get("digest")
+    return digest if isinstance(digest, str) and digest else None
 
 
 def _read_completion(payload: Mapping[str, Any]) -> bool:

@@ -80,6 +80,7 @@ from ollama_preflight import (  # noqa: E402
     CONTEXT_GUARD_ESTIMATED,
     OllamaPreflightError,
     PreflightResult,
+    _is_cloud_tag,
     preflight,
 )
 from run_lock import remove_lock, staleness_bound_for_timeout, write_lock  # noqa: E402
@@ -733,6 +734,15 @@ class RotationContext:
     #: source for context_guard / lineage_warnings / token_estimate_delta instead
     #: of inventing them (finding by Balthasar, Checkpoint 2).
     preflight: PreflightResult
+    #: The per-run digest lookup (model -> digest; Task 5b, R5a/R5b/R5c). Lives
+    #: HERE, not on ``LineageRegistry`` -- the registry's shared-state SHAPE is
+    #: invariant (spec Sec.8.5) and this is not lineage/reservation state, it is
+    #: preflight-adjacent identity data. Seeded from ``preflight.digest_by_model``
+    #: (the trio) in :func:`select_backend`; grows append-only, with ZERO extra
+    #: I/O, as :func:`_rotate` resolves each candidate's digest (see
+    #: ``fallback_policy._resolve_digest``). NEVER copied into the report or the
+    #: 7-key agent JSON -- internal-only, like the rest of the preflight cache.
+    digest_by_model: dict[str, str] = field(default_factory=dict)
     #: Set the moment the endpoint is declared dead. Every mage checks it before
     #: each attempt and each rotation, so the abort is actually FAST. Without it,
     #: "fast-fail" only aborts after the siblings finish burning their own budgets
@@ -1021,6 +1031,13 @@ async def _rotate(
     and only then do we probe. Holding the lock across a network call would serialize the
     three mages and be a deadlock waiting for a future second lock.
 
+    ``claim_next`` also enforces model-DIGEST uniqueness across the mages ACTIVE right
+    now (Task 5b, R5a/R5b/R5c) -- INSIDE that same lock, since the commit itself is the
+    only point where "who is active" cannot change out from under the check. A
+    digest-unsafe candidate is rejected and re-proposed by ``claim_next`` internally, so
+    by the time this function sees a non-``None`` candidate it is already digest-distinct
+    from every other active mage; only the WINDOW verification remains this function's job.
+
     Args:
         name: The rotating mage.
         state: Its local rotation state (mutated: window_rejected).
@@ -1037,7 +1054,9 @@ async def _rotate(
     for _ in range(ctx.config.max_probe_attempts):
         if ctx.endpoint_down.is_set():
             raise _EndpointDown("endpoint down (detected by another agent)")
-        candidate = await ctx.registry.claim_next(name, ctx.policy, state)
+        candidate = await ctx.registry.claim_next(
+            name, ctx.policy, state, ctx.digest_by_model, is_cloud=_is_cloud_tag
+        )
         if candidate is None:
             return None  # nothing eligible left
 
@@ -1255,6 +1274,9 @@ async def select_backend(
         # from_config exists to prevent (finding by Balthasar, Checkpoint 2).
         config=RotationRuntimeConfig.from_config(config),
         probe=make_probe(config),  # binds config -> (model, prompt, timeout)
+        # Task 5b: seed the per-run digest lookup from the trio (a COPY -- the
+        # frozen PreflightResult.digest_by_model must never be mutated by rotation).
+        digest_by_model=dict(result.digest_by_model),
     )
     return OllamaBackend(config), dict(config.models), rotation
 
