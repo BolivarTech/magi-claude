@@ -66,6 +66,37 @@ class ContextWindowUnmeasurableError(OllamaPreflightError):
     """No valid positive context window could be extracted (R2/R2b)."""
 
 
+#: MS4: single source for the opt-out hint -- duplicating this literal across every
+#: raise site would let one copy drift from the flag's real name/value.
+_STRICT_CONTEXT_GUARD_OPTOUT_HINT = (
+    "strict_context_guard is now true by default (MS4). Set strict_context_guard = "
+    "false to proceed with an estimated guard."
+)
+
+
+def _context_window_unmeasurable_error(
+    unmeasurable_models: Sequence[str],
+) -> ContextWindowUnmeasurableError:
+    """Build the fail-closed error naming the affected model(s) and the opt-out.
+
+    Args:
+        unmeasurable_models: Trio model tags whose payload or context window could
+            not be measured, in the order they should be reported.
+
+    Returns:
+        The exception to raise. Building it does not raise it -- the caller decides
+        whether ``strict_context_guard`` applies.
+
+    Example:
+        >>> "strict_context_guard = false" in str(_context_window_unmeasurable_error(["m1"]))
+        True
+    """
+    return ContextWindowUnmeasurableError(
+        f"context window unmeasurable for {', '.join(unmeasurable_models)}; "
+        f"{_STRICT_CONTEXT_GUARD_OPTOUT_HINT}"
+    )
+
+
 class MissingDigestError(OllamaPreflightError):
     """/api/show omitted the digest -- uniqueness cannot be verified (R5b)."""
 
@@ -336,9 +367,12 @@ async def preflight(config: OllamaConfig, prompt: str) -> PreflightResult:
     Raises:
         OllamaPreflightError: Host unreachable; auth failure; a TRIO model missing;
             two trio mages sharing a lineage (R22); two fallbacks sharing a lineage
-            (R11.3); a configured model without chat capability (R19); a trio model
-            whose window cannot hold the payload (R5b); or an unmeasurable window
-            under ``strict_context_guard`` (R18).
+            (R11.3); a configured model without chat capability (R19); or a trio
+            model whose window cannot hold the payload (R5b).
+        ContextWindowUnmeasurableError: A trio model's payload or context window
+            could not be measured (absent, unmeasurable, or invalid -- R2/R2b) and
+            ``strict_context_guard`` is enabled, which is now the default (MS4). The
+            message names both the unmeasurable model(s) and the opt-out.
     """
     try:
         available = await _list_models(config)
@@ -408,15 +442,22 @@ async def preflight(config: OllamaConfig, prompt: str) -> PreflightResult:
         }
         payload, exact_flag = max(measured.values()), True
     else:
+        # Name the SPECIFIC model(s) that could not be measured -- a model is
+        # unmeasurable if its payload was never probed OR its window is unknown
+        # (R2/R2b; ``_read_window`` already collapses absent/zero/non-positive to
+        # None, so "unknown" and "invalid" are the same case here).
+        unmeasurable = sorted(
+            spec.model
+            for spec in config.models.values()
+            if spec.model not in measured or caps[spec.model].window is None
+        )
+        if config.strict_context_guard:  # R18/MS4: strict is strict -- cannot prove the fit
+            raise _context_window_unmeasurable_error(unmeasurable)
         reason = (
             "the payload could not be measured for every trio model"
             if not payload_measured
             else "the context window is unknown for some trio model (no /api/show data)"
         )
-        if config.strict_context_guard:  # R18: strict is strict -- cannot prove the fit
-            raise OllamaPreflightError(
-                f"cannot enforce the context guard: {reason}, and strict_context_guard is enabled."
-            )
         print(
             f"WARNING: {reason}; falling back to the estimator. NOTE: without measured "
             "payloads AND known windows there is NO reliable truncation protection.",

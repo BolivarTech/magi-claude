@@ -116,6 +116,9 @@ def main() -> int:
     for agent, spec in config.models.items():
         print(f"  {agent:<9} = {spec.model} [{spec.lineage}]")
     print(f"  fallback  = {len(config.fallback)} model(s)")
+    # MS4: echo the RESOLVED value (never a hardcoded "false") -- the default flipped
+    # to fail-closed, and a config that never sets this key now inherits True.
+    print(f"  strict_context_guard = {config.strict_context_guard}")
 
     # The trio above is what the FILE says. If the environment would override it at run
     # time, that echo is a claim the tool cannot keep -- so name what it is not applying.

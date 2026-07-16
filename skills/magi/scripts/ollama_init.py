@@ -84,7 +84,7 @@ def render_template() -> str:
         (
             "strict_context_guard",
             strict_literal,
-            "if true, refuse a model whose context window cannot be measured",
+            "refuse a model whose context window cannot be measured (default: true)",
         ),
         (
             "retry_backoff_seconds",

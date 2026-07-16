@@ -62,7 +62,11 @@ DEFAULT_INPUT_MARGIN_PCT = 40  # pre-filter only; the exact probe decides (R24)
 DEFAULT_RETRY_BACKOFF_SECONDS = 2.0
 DEFAULT_PREFLIGHT_TIMEOUT_SECONDS = 30  # metadata calls
 DEFAULT_PROBE_TIMEOUT_SECONDS = 120  # probe processes the whole prompt
-DEFAULT_STRICT_CONTEXT_GUARD = False
+#: MS4: fail-closed by default -- an unmeasurable context window now ABORTS the run
+#: instead of silently proceeding on an estimate. ``strict_context_guard = false`` is
+#: the one remaining path to the old best-effort behaviour (R2a); it must stay
+#: available, never removed.
+DEFAULT_STRICT_CONTEXT_GUARD = True
 
 #: Ordered strong->weak, ONE model per lineage, none colliding with the trio's
 #: lineages. Verified against registry.ollama.ai on 2026-07-11 (the website lists
