@@ -592,13 +592,40 @@ async def test_digest_by_model_is_seeded_only_for_trio_models_that_have_one(
     assert result.digest_by_model == {"qwen3.5:32b-local": "sha256:local1"}
 
 
-async def test_digest_by_model_is_not_read_anywhere_in_the_report_builder():
-    """digest_by_model is internal preflight seed data (Task 5b): it must never
-    leak into the 7-key agent JSON or magi-report.json. Proven by inspecting the
-    module that actually builds the report, not merely asserted."""
-    import inspect
+async def test_digest_by_model_is_not_copied_into_the_report(tmp_path):
+    """digest_by_model is internal preflight/rotation seed data (Task 5b): it must
+    never leak into the 7-key agent JSON or magi-report.json.
 
-    import run_magi
+    Proven behaviourally -- a real (fake-backed) rotation run, then inspecting the
+    ACTUAL report dict -- rather than by grepping module source: source-text
+    matching is brittle (a docstring or comment naming the field, which Task 5b's
+    own implementation legitimately needs, would false-fail a purely textual
+    check) and does not verify the property that actually matters, namely that
+    the field never reaches the serialised output. The stronger, equivalent
+    behavioural version lives in
+    ``test_run_magi.py::TestDigestUniquenessAtRotationCommit::test_digest_by_model_never_reaches_the_report``.
+    """
+    from rotation_harness import FALLBACK, TRIO, _rotation, _run, _valid
 
-    source = inspect.getsource(run_magi)
-    assert "digest_by_model" not in source
+    digests = {
+        TRIO["melchior"].model: "sha:melchior-secret",
+        TRIO["balthasar"].model: "sha:balthasar-secret",
+        TRIO["caspar"].model: "sha:caspar-trio-secret",
+        FALLBACK[0].model: "sha:caspar-fallback-secret",
+    }
+
+    async def mock_launch(
+        agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+    ):
+        if agent_name != "caspar":
+            return _valid(agent_name)
+        if spec.model == TRIO["caspar"].model:
+            raise RuntimeError("HTTP 503 Service Unavailable")
+        return _valid(agent_name)
+
+    result = await _run(tmp_path, mock_launch, rotation=_rotation(digests=digests))
+
+    serialized = json.dumps(result)
+    assert "digest_by_model" not in serialized
+    for secret_digest in digests.values():
+        assert secret_digest not in serialized

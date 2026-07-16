@@ -16,17 +16,84 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Mapping, Sequence
+from typing import Any, AsyncIterator, Callable, Mapping, MutableMapping, Sequence
 
+from lineage_identity import LineageIdentityGuard
 from ollama_config import ModelSpec
 
 REJECT_TOO_SMALL = "too_small"  # measured; the payload provably does not fit
 REJECT_UNMEASURABLE = "unmeasurable"  # the probe failed; window unknown
+#: A candidate resolves to the same digest as a mage already ACTIVE this run
+#: (Task 5b, R5a-at-rotation) -- ensemble collapse, caught before commit.
+REJECT_DIGEST_COLLISION = "digest_collision"
+#: A model's digest could not be established (candidate: non-cloud with no
+#: reported digest, R5b; or an active mage's digest is unrecoverable from the
+#: lookup, R5c) -- uniqueness cannot be PROVEN, so the candidate is rejected
+#: fail-closed rather than silently treated as non-comparable.
+REJECT_DIGEST_UNVERIFIABLE = "digest_unverifiable"
 
 #: Distinct CONNECTION-level lineages that must refuse before we conclude the
 #: endpoint itself is dead (R15). Two, not one: a single refusal can be one bad
 #: model or one bad route; two distinct lineages refusing means nobody is listening.
 ENDPOINT_DOWN_LINEAGE_THRESHOLD = 2
+
+#: The SOLE digest comparator (SRP): pairwise digest collision detection lives in
+#: exactly one place, ``LineageIdentityGuard.digest_collision``. It is pure and
+#: stateless (a frozen class constant is its only attribute), so ONE module-level
+#: instance is shared by every ``claim_next`` call rather than re-constructed.
+_IDENTITY_GUARD = LineageIdentityGuard()
+
+
+def _assume_cloud(_model: str) -> bool:
+    """Default ``is_cloud`` predicate for callers that do not track tag shape.
+
+    Treats every model as a ``:cloud`` tag, i.e. a missing digest is always
+    EXPECTED and never fails closed. Pre-Task-5b callers of :meth:`claim_next`
+    (and any caller that omits ``is_cloud``) never reasoned about digests at
+    all; assuming cloud reproduces that exact prior behaviour instead of
+    silently introducing a new fail-closed path under them.
+
+    Args:
+        _model: Unused -- the permissive default ignores the model tag.
+
+    Returns:
+        Always ``True``.
+    """
+    return True
+
+
+def _resolve_digest(
+    model: str,
+    digest_by_model: MutableMapping[str, str],
+    policy: "RotationPolicy",
+) -> str | None:
+    """Look up *model*'s digest, growing the per-run lookup with ZERO I/O.
+
+    The per-run ``digest_by_model`` lookup is checked first; on a miss, the
+    digest is served from ``policy``'s already-fetched capability cache (the
+    preflight measured it once, for the trio AND every surviving fallback --
+    R20) and, if found, written into the lookup exactly once (append-only: an
+    existing entry is never overwritten, matching that a model's digest is
+    fixed for the life of the run). Neither branch performs I/O or an
+    ``/api/show`` call (BDD-8/Task 5b).
+
+    Args:
+        model: The model tag to resolve.
+        digest_by_model: The mutable per-run digest lookup (grown in place).
+        policy: The pure rotation policy, whose cached capabilities are the
+            zero-I/O source for a digest not yet in the lookup.
+
+    Returns:
+        The digest string, or ``None`` if no digest is on record for *model*
+        (expected for a ``:cloud`` tag; a gap for anything else).
+    """
+    digest = digest_by_model.get(model)
+    if digest is not None:
+        return digest
+    digest = policy.digest_of(model)
+    if digest is not None:
+        digest_by_model[model] = digest
+    return digest
 
 
 @dataclass(frozen=True)
@@ -154,6 +221,26 @@ class RotationPolicy:
         if cap is None:
             return None
         return cap.window
+
+    def digest_of(self, model: str) -> str | None:
+        """Return the cached digest for a model id, if known.
+
+        Zero I/O: this reads the SAME capability cache the preflight fetched
+        once for the trio and every surviving fallback (R20) -- it never
+        performs a fresh ``/api/show`` call (BDD-8/Task 5b).
+
+        Args:
+            model: Model identifier.
+
+        Returns:
+            The cached digest, or ``None`` if the model is unknown or its
+            ``/api/show`` payload omitted the digest (expected for a
+            ``:cloud`` tag; see ``ollama_preflight._CLOUD_HAS_DIGEST``).
+        """
+        cap = self._capabilities.get(model)
+        if cap is None:
+            return None
+        return cap.digest
 
     def next_model(
         self,
@@ -311,44 +398,127 @@ class LineageRegistry:
             self._active.pop(agent, None)
 
     async def claim_next(
-        self, agent: str, policy: RotationPolicy, state: AgentRotationState
+        self,
+        agent: str,
+        policy: RotationPolicy,
+        state: AgentRotationState,
+        digest_by_model: MutableMapping[str, str] | None = None,
+        is_cloud: Callable[[str], bool] = _assume_cloud,
     ) -> ModelSpec | None:
-        """Decide and reserve *agent*'s next model, atomically.
+        """Decide and reserve *agent*'s next model, atomically -- digest-unique too.
 
-        Under the lock: read the lineages in play, delegate the decision to the
-        PURE ``policy.next_model`` (no I/O, no await), and -- only if there is a
-        candidate -- replace *agent*'s entry. The mutation is the LAST statement,
-        so a failure to decide cannot leave the registry half-updated.
+        Under the SAME lock that guards the lineage commit (no second lock is ever
+        taken -- deadlock stays impossible by construction), this now also enforces
+        model-DIGEST uniqueness across the currently-ACTIVE mages (Task 5b,
+        R5a/R5b/R5c), delegating every pairwise comparison to
+        :data:`_IDENTITY_GUARD` (SRP -- no comparison is re-implemented here).
+        ``policy.next_model`` stays PURE (no I/O, no await); the digest lookup is
+        equally I/O-free (:func:`_resolve_digest` only ever reads *digest_by_model*
+        or ``policy``'s already-fetched capability cache).
+
+        A candidate is retried (not just rejected once) IN THE SAME lock
+        acquisition: a digest problem marks the model in ``state.window_rejected``
+        (the same exclusion set the window/probe checks use) and the loop asks
+        ``policy.next_model`` again, so a rotation that must skip several
+        digest-unsafe candidates still resolves to one commit call. Three
+        digest-shaped rejections, each fail-CLOSED (never a silent skip):
+
+            * R5a (collision): the candidate's digest equals an ACTIVE mage's
+              digest -- ensemble collapse, caught before it can ever run.
+            * R5b (candidate unverifiable): the candidate is NOT a ``:cloud`` tag
+              (per *is_cloud*) and has no digest -- uniqueness cannot be proven.
+              A ``:cloud`` candidate with no digest is exempt (expected, per
+              ``ollama_preflight._CLOUD_HAS_DIGEST``) and treated as
+              non-comparable, exactly as :meth:`LineageIdentityGuard.digest_collision`
+              already treats ``None``.
+            * R5c (active unverifiable): an already-ACTIVE mage's model is NOT
+              cloud and its digest cannot be resolved -- collision safety against
+              THAT mage cannot be proven, so the candidate is rejected even though
+              the fault is not the candidate's own.
+
+        The candidate enters ``self._active`` ONLY on a successful commit, so a
+        rejected candidate never becomes active and never compares against itself.
 
         Args:
             agent: The rotating mage.
-            policy: The pure eligibility policy.
-            state: The mage's local rotation state.
+            policy: The pure eligibility policy (also the zero-I/O digest source).
+            state: The mage's local rotation state (mutated: ``window_rejected``
+                gains an entry for every digest-rejected candidate).
+            digest_by_model: The per-run digest lookup (model -> digest), seeded
+                from the trio (``PreflightResult.digest_by_model``) and grown
+                append-only as candidates are resolved. Lives OUTSIDE this
+                registry's own state (never stored on ``self``); omit it (``None``)
+                to get a throwaway dict scoped to this one call -- the permissive
+                default for callers that do not track digests at all.
+            is_cloud: Predicate for whether a model tag is a ``:cloud`` tag.
+                Defaults to :func:`_assume_cloud` (always ``True``), which
+                reproduces the exact pre-Task-5b behaviour for any caller that
+                does not pass one.
 
         Returns:
-            The reserved ``ModelSpec``, or None if no candidate qualifies.
+            The reserved ``ModelSpec``, or None if no candidate qualifies (the
+            eligibility policy is exhausted, or every remaining candidate is
+            digest-unsafe).
 
         Postconditions:
             * ModelSpec returned -> *agent*'s entry HAS been replaced (old lineage
-              freed, new one reserved).
+              freed, new one reserved) AND is digest-distinct from every other
+              currently-active mage.
             * None returned -> the registry is UNCHANGED; releasing the mage's
               current lineage is the caller's job, via ``agent_slot``'s finally.
         """
+        lookup: MutableMapping[str, str] = {} if digest_by_model is None else digest_by_model
         async with self._lock:
             in_play = self._in_play_excluding(agent)
-            chosen = policy.next_model(
-                agent=agent,
-                failed_lineages=state.failed_lineages,
-                run_failed_lineages=self._run_failed,
-                lineages_in_play=in_play,
-                used=state.used,
-                window_rejected=state.window_rejected,
-                rotations_done=state.rotations_done,
-            )
-            if chosen is None:
-                return None
-            self._active[agent] = chosen
-            return chosen
+            while True:
+                chosen = policy.next_model(
+                    agent=agent,
+                    failed_lineages=state.failed_lineages,
+                    run_failed_lineages=self._run_failed,
+                    lineages_in_play=in_play,
+                    used=state.used,
+                    window_rejected=state.window_rejected,
+                    rotations_done=state.rotations_done,
+                )
+                if chosen is None:
+                    return None
+
+                candidate_digest = _resolve_digest(chosen.model, lookup, policy)
+                if candidate_digest is None and not is_cloud(chosen.model):
+                    # R5b: a non-cloud candidate with no digest leaves uniqueness
+                    # unverifiable -- fail closed and try the next candidate.
+                    state.window_rejected[chosen.model] = REJECT_DIGEST_UNVERIFIABLE
+                    continue
+
+                active_digests: list[str | None] = []
+                active_unverifiable = False
+                for other_agent, spec in self._active.items():
+                    if other_agent == agent:
+                        continue  # never compare the candidate against itself
+                    other_digest = _resolve_digest(spec.model, lookup, policy)
+                    if other_digest is None and not is_cloud(spec.model):
+                        # R5c: an already-active mage's digest cannot be
+                        # recovered -- collision safety cannot be PROVEN, so this
+                        # candidate is rejected rather than silently treated as
+                        # non-comparable.
+                        active_unverifiable = True
+                        break
+                    active_digests.append(other_digest)
+                if active_unverifiable:
+                    state.window_rejected[chosen.model] = REJECT_DIGEST_UNVERIFIABLE
+                    continue
+
+                if (
+                    _IDENTITY_GUARD.digest_collision([candidate_digest, *active_digests])
+                    is not None
+                ):
+                    # R5a: the candidate would collapse the ensemble with a mage
+                    # already active this run -- reject and re-propose.
+                    state.window_rejected[chosen.model] = REJECT_DIGEST_COLLISION
+                    continue
+
+                self._active[agent] = chosen
+                return chosen
 
     @asynccontextmanager
     async def agent_slot(
