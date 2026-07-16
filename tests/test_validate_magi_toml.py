@@ -231,6 +231,33 @@ def test_validator_is_silent_about_the_environment_when_it_is_clean(tmp_path, mo
     assert "MAGI_OLLAMA" not in capsys.readouterr().err
 
 
+def test_validator_defaults_strict_context_guard_to_true_when_key_absent(
+    tmp_path, monkeypatch, capsys
+):
+    """MS4: a config that never sets strict_context_guard still validates -- resolved
+    with the new fail-closed default (True) -- and the report echoes it explicitly,
+    not just a bare 'OK'."""
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(
+        'base_url = "http://localhost:11434/v1"\n'
+        "[models]\n"
+        'melchior  = { model = "qwen3.5:397b-cloud", lineage = "alibaba" }\n'
+        'balthasar = { model = "kimi-k2.6:cloud", lineage = "moonshot" }\n'
+        'caspar    = { model = "deepseek-v4-pro:cloud", lineage = "deepseek" }\n',
+        encoding="utf-8",
+    )
+
+    config = resolve_config(repo_path=str(path), global_path="", env={})
+    assert config.strict_context_guard is True
+
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+    assert validate_magi_toml.main() == 0
+
+    out = capsys.readouterr().out
+    assert "strict_context_guard" in out
+    assert "True" in out
+
+
 def test_validator_reports_a_missing_path_as_cli_misuse(tmp_path, monkeypatch, capsys):
     """A missing file is CLI misuse (exit 2), pinned -- it must never be a silent OK.
 

@@ -221,15 +221,19 @@ async def test_a_trio_model_is_checked_against_its_OWN_count_not_a_global_max(
     assert result.context_guard == CONTEXT_GUARD_ENFORCED
 
 
-async def test_unmeasurable_payload_warns_by_default_and_aborts_under_strict(
+async def test_unmeasurable_payload_aborts_by_default_and_estimates_when_opted_out(
     ollama_config, config_factory, preflight_env
 ):
-    """BDD-32 / BDD-53: 'could not measure' is REPORTED, never hidden."""
+    """BDD-32 / BDD-53, updated for MS4: strict_context_guard now DEFAULTS to True, so
+    an unmeasurable payload aborts unless the user opts out with
+    strict_context_guard=false -- in which case it is REPORTED (never hidden), not
+    silently accepted."""
     preflight_env["probe"] = None  # the endpoint reports no usage
-    result = await preflight(ollama_config, "payload")
+    with pytest.raises(ContextWindowUnmeasurableError):
+        await preflight(ollama_config, "payload")  # ollama_config keeps the built-in default
+
+    result = await preflight(config_factory(strict_context_guard=False), "payload")
     assert result.context_guard == CONTEXT_GUARD_ESTIMATED
-    with pytest.raises(OllamaPreflightError):
-        await preflight(config_factory(strict_context_guard=True), "payload")
 
 
 async def test_measured_payload_reports_enforced(ollama_config, preflight_env):
@@ -267,13 +271,26 @@ async def test_suspicious_lineage_label_warns_without_overriding_the_user(
 async def test_no_preflight_error_path_ever_leaks_the_api_key(
     config_factory, preflight_env, capsys
 ):
-    """NR3b: a scattered redaction is a forgotten redaction. Prove there is none."""
-    cfg = config_factory(api_key="sk-supersecret-do-not-leak")
+    """NR3b: a scattered redaction is a forgotten redaction. Prove there is none.
+
+    strict_context_guard=False is explicit here: MS4 flipped the default to True,
+    which would abort before ever reaching the warning/estimated path this targets.
+    """
+    cfg = config_factory(api_key="sk-supersecret-do-not-leak", strict_context_guard=False)
     preflight_env["probe"] = None  # force the estimated/warning path
     result = await preflight(cfg, "payload")
     captured = capsys.readouterr()
     blob = captured.out + captured.err + json.dumps(result.lineage_warnings)
     assert "sk-supersecret-do-not-leak" not in blob
+
+
+async def test_the_strict_abort_path_does_not_leak_the_api_key(config_factory, preflight_env):
+    """NR4: the fail-closed MS4 abort must not echo the api_key either."""
+    cfg = config_factory(api_key="sk-supersecret-do-not-leak")  # strict is the default now
+    preflight_env["probe"] = None
+    with pytest.raises(ContextWindowUnmeasurableError) as ei:
+        await preflight(cfg, "payload")
+    assert "sk-supersecret-do-not-leak" not in str(ei.value)
 
 
 async def test_the_list_models_abort_path_redacts_the_api_key(config_factory, monkeypatch):
@@ -292,23 +309,68 @@ async def test_the_list_models_abort_path_redacts_the_api_key(config_factory, mo
     assert "sk-supersecret-do-not-leak" not in str(ei.value)
 
 
-async def test_measured_payload_with_unknown_windows_is_estimated_not_enforced(
+async def test_measured_payload_with_unknown_windows_aborts_by_default_and_estimates_when_opted_out(
     ollama_config, config_factory, preflight_env
 ):
     """The guard is 'enforced' only when the payload was measured AND every window is
-    known. Measured payload + unknown windows cannot prove invariant #3 -> 'estimated',
-    and strict must abort (else strict fails OPEN on a no-/api/show endpoint)."""
+    known. Measured payload + unknown windows cannot prove invariant #3 -> unmeasurable,
+    and MS4's new default (strict_context_guard=True) aborts; opting out with false still
+    reports it, as 'estimated', never silently."""
     a, b, c = (s.model for s in ollama_config.models.values())
     preflight_env["probe"] = 16_232  # payload measured for all three
     unknown = ModelCapability(window=None, supports_completion=True)
     preflight_env["caps"] = {a: unknown, b: unknown, c: unknown}
 
-    result = await preflight(ollama_config, "payload")
+    with pytest.raises(ContextWindowUnmeasurableError):
+        await preflight(ollama_config, "payload")  # default is strict (True)
+
+    result = await preflight(config_factory(strict_context_guard=False), "payload")
     assert result.context_guard == CONTEXT_GUARD_ESTIMATED, (
         "measured payload but unknown windows cannot be reported 'enforced'"
     )
-    with pytest.raises(OllamaPreflightError):
-        await preflight(config_factory(strict_context_guard=True), "payload")
+
+
+# --------------------------------------------------------------------------
+# MS4: strict_context_guard defaults to True -- fail-closed on an unmeasurable window.
+# --------------------------------------------------------------------------
+
+
+async def test_unmeasurable_window_aborts_by_default(ollama_config, preflight_env):
+    """BDD-3: a payload that cannot be measured, on the (now fail-closed) default
+    config, aborts the run instead of silently falling back to an estimate."""
+    preflight_env["probe"] = None  # the endpoint reports no usage
+    with pytest.raises(ContextWindowUnmeasurableError):
+        await preflight(ollama_config, "payload")
+
+
+async def test_abort_message_names_the_optout(ollama_config, preflight_env):
+    """The abort must NAME the opt-out -- a guard that flips its default and gives no
+    escape hatch in its own error message is a trap, not a fail-closed design."""
+    preflight_env["probe"] = None
+    with pytest.raises(ContextWindowUnmeasurableError) as ei:
+        await preflight(ollama_config, "payload")
+    message = str(ei.value)
+    assert "strict_context_guard" in message
+    assert "false" in message
+
+
+async def test_window_present_but_invalid_is_unmeasurable(ollama_config, preflight_env):
+    """BDD-3c: /api/show responds, but the window is absent/zero/non-numeric -- already
+    collapsed to None by ``_read_window`` (model_context.py) -- and the preflight treats
+    that exactly like never hearing back: unmeasurable, and strict aborts."""
+    a, b, c = (s.model for s in ollama_config.models.values())
+    invalid_window = ModelCapability(window=None, supports_completion=True)
+    preflight_env["caps"] = {a: invalid_window, b: invalid_window, c: invalid_window}
+    with pytest.raises(ContextWindowUnmeasurableError):
+        await preflight(ollama_config, "payload")
+
+
+async def test_explicit_false_proceeds_with_estimated_guard(config_factory, preflight_env):
+    """BDD-3b: the opt-out remains -- strict_context_guard=false on an unmeasurable
+    payload still proceeds, downgraded to 'estimated', never silently 'enforced'."""
+    preflight_env["probe"] = None
+    result = await preflight(config_factory(strict_context_guard=False), "payload")
+    assert result.context_guard == CONTEXT_GUARD_ESTIMATED
 
 
 async def test_payload_probes_run_concurrently_not_sequentially(ollama_config, monkeypatch):

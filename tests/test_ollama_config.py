@@ -359,6 +359,28 @@ def test_require_bool_accepts_integer_1_and_0_but_not_other_ints():
             _require_bool(bad, key="strict_context_guard", path="t.toml")
 
 
+def test_strict_context_guard_defaults_to_true():
+    """MS4: the context guard is fail-closed by default -- an unmeasurable window now
+    aborts a run unless the user opts out explicitly with strict_context_guard=false."""
+    from ollama_config import DEFAULT_STRICT_CONTEXT_GUARD, ModelSpec, OllamaConfig
+
+    assert DEFAULT_STRICT_CONTEXT_GUARD is True
+
+    cfg = OllamaConfig(
+        base_url=DEFAULT_BASE_URL,
+        api_key=None,
+        models={"melchior": ModelSpec("m", "la")},
+    )
+    assert cfg.strict_context_guard is True
+
+
+def test_strict_context_guard_resolves_to_true_when_absent_from_every_source(monkeypatch):
+    """The default flip must reach resolve_config too, not just the dataclass field."""
+    monkeypatch.delenv("MAGI_OLLAMA_STRICT_CONTEXT", raising=False)
+    cfg = resolve_config(global_path="/nope/g.toml", repo_path="/nope/r.toml", env={})
+    assert cfg.strict_context_guard is True
+
+
 def test_no_shipped_default_carries_a_provisional_tag():
     """A default we ship must not be a tag the vendor has told us is provisional.
 
