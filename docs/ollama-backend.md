@@ -208,7 +208,8 @@ max_rotations             = 2     # fallback models a mage may rotate through (0
 max_probe_attempts        = 3     # fallback candidates to size-check before a mage gives up (>= 1)
 output_headroom_tokens    = 8192  # context tokens reserved for the model's answer plus its thinking
 input_margin_pct          = 40    # extra margin when checking the input fits a model's window, percent
-strict_context_guard      = false # if true, refuse a model whose context window cannot be measured
+strict_context_guard      = true  # default true: abort if a window cannot be measured; false to estimate
+strict_lineage            = false # if true, abort when a model's architecture contradicts its declared lineage
 retry_backoff_seconds     = 2.0   # seconds to wait between transport retries (0 = no wait)
 preflight_timeout_seconds = 30    # timeout for preflight metadata calls, seconds
 probe_timeout_seconds     = 120   # timeout for the context-probe call, seconds
@@ -236,7 +237,8 @@ These are top-level keys (they apply to all three mages) and must appear **befor
 | `max_probe_attempts` | 3 | When rotating, how many candidate models to size-check (does the payload fit?) before the mage gives up. |
 | `output_headroom_tokens` | 8192 | Context space reserved for the model's **answer plus its thinking**, so the reply is never cut off. Raise it for very verbose reasoning models. |
 | `input_margin_pct` | 40 | Safety cushion (percent) when estimating whether the input fits a model's context window, for the models MAGI can only estimate rather than measure exactly. |
-| `strict_context_guard` | false | If `true`, refuse to run a model whose context window **cannot be measured** (fail closed) instead of proceeding on an estimate. |
+| `strict_context_guard` | **true** | Default `true` (v5.2.0): **abort** if a model's context window **cannot be measured**, instead of proceeding on an estimate. Set `false` to opt out and run with an estimated guard. |
+| `strict_lineage` | false | If `true`, **abort** when a model's real architecture family (from `/api/show`) contradicts its declared `lineage`; default `false` makes a contradiction a non-fatal warning. See "Lineage identity" below. |
 | `retry_backoff_seconds` | 2.0 | Seconds to wait between **connection/transport** retries (e.g. after a 503). `0` = no wait. Schema-error retries never wait. |
 | `preflight_timeout_seconds` | 30 | Timeout for the small preflight metadata calls (`/models`, `/api/show`). |
 | `probe_timeout_seconds` | 120 | Timeout for the context probe, which processes the **whole prompt** once — larger than the metadata timeout on purpose. |
@@ -260,13 +262,43 @@ field is `"enforced"` only when the payload was measured **and** every window is
 reads `"estimated"` (and the banner says so) whenever measurement was not possible — for a
 rotated mage too.
 
-### Hard limitation — no `/api/show`, no protection
+### Hard limitation — no `/api/show`, no window
 
 On an endpoint that does **not** expose `/api/show` (a generic OpenAI-compatible server),
-the window cannot be read, so with `strict_context_guard = false` (the default) there is
-**no truncation protection at all** — not partial protection, *none*. A noisy warning names
-the affected models and the run proceeds on the estimator. Set **`strict_context_guard =
-true`** to fail closed (abort in preflight, skip in rotation) when a window is unknown.
+the window cannot be read. Since **v5.2.0** `strict_context_guard` defaults to **`true`**, so
+this now **fails closed**: the preflight aborts (and rotation skips such a model) rather than
+run on an unverified estimate. Set **`strict_context_guard = false`** to opt back into the
+old behaviour — a noisy warning names the affected models and the run proceeds on the
+estimator, with **no truncation protection at all** for those models.
+
+### Lineage identity (`strict_lineage`, and the digest check)
+
+Three **distinct lineages** is the whole point of the ensemble. MS1 already enforces that the
+declared `lineage` strings differ per mage. **v5.2.0** adds two deeper identity checks:
+
+- **Family check (`strict_lineage`, opt-in, default `false`):** when `true`, MAGI reads each
+  model's real architecture family from `/api/show` and compares it to the declared `lineage`;
+  a contradiction (e.g. `lineage = "deepseek"` but the architecture maps to another vendor)
+  **aborts** the run. With the default `false`, a contradiction is a non-fatal **warning** in
+  `lineage_warnings`, not an abort. The architecture-to-vendor map is deliberately
+  **non-exhaustive** — only unambiguous vendor-specific families (e.g. `qwen3.5 -> alibaba`,
+  `deepseek4 -> deepseek`); ambiguous bases like `llama`/`mistral` are excluded. An unmapped or
+  unknown architecture **never blocks** — it fails **open** (the TOML declaration always wins;
+  the map is a typo detector, never an authority). Adding entries as new models appear is a
+  maintenance point.
+
+- **Digest uniqueness (always on):** two mages must never resolve to the **same model digest**
+  — running the same model twice is forbidden on purpose, because it would collapse the
+  ensemble into a single opinion wearing three hats. This is checked in the preflight and again
+  at every rotation commit. **Cloud caveat (honest):** the `:cloud` trio's `/api/show` does
+  **not** report a digest, so for cloud models the digest check has nothing to compare and
+  **degrades gracefully** to the lineage-string uniqueness (MS1) plus the family check above;
+  the digest check is only fully active for **local** models that report a digest. A *non-cloud*
+  model that unexpectedly omits its digest **fails closed** (uniqueness cannot be proven).
+
+```toml
+strict_lineage = true   # opt in: a family contradiction aborts, not just warns
+```
 
 ### Telemetry (never a silent fallback)
 

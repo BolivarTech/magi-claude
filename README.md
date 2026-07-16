@@ -62,10 +62,11 @@ schema**: `[models]` entries go from a bare string to a table with an explicit `
 fails closed with an actionable error — run `python skills/magi/scripts/validate_magi_toml.py` to see
 exactly what to change (the lineage is never inferred). **Kill-switch:**
 `MAGI_OLLAMA_MAX_ROTATIONS=0` disables rotation entirely (a shadow-rollout mode that keeps
-the new preflight/probe active while rotation is off). **Hard limitation:** on an endpoint
-that does **not** expose `/api/show`, with `strict_context_guard = false` (the default),
-there is **no truncation protection** — set `strict_context_guard = true` to fail closed
-instead. Rotation, its telemetry, the probe cost, and migration are documented in
+the new preflight/probe active while rotation is off). **Fail-closed by default (v5.2.0):**
+`strict_context_guard` now defaults to **`true`** — on an endpoint that does **not** expose
+`/api/show` (so the window cannot be measured), MAGI **aborts** rather than run on an
+unverified estimate. Set `strict_context_guard = false` to opt out and proceed with an
+estimated guard. Rotation, its telemetry, the probe cost, and migration are documented in
 [`docs/ollama-backend.md`](docs/ollama-backend.md).
 
 **New in v5.0.2 — the scaffold shows every knob:** `--ollama-init` now writes all nine
@@ -76,7 +77,7 @@ many times a mage retries the same model before rotating; **`max_rotations`** = 
 fallbacks it may try (`0` turns rotation off); **`output_headroom_tokens`** = context space
 reserved for the model's reply so it is never cut off; **`input_margin_pct`** = safety
 cushion when estimating whether the input fits a model's window; **`strict_context_guard`**
-= refuse a model whose window cannot be measured (instead of estimating);
+= refuse a model whose window cannot be measured (default `true`; set `false` to estimate);
 **`retry_backoff_seconds`** = wait between connection retries; **`preflight_timeout_seconds`**
 / **`probe_timeout_seconds`** = timeouts for the metadata calls and the context probe. An
 untouched scaffold behaves exactly as the built-in defaults. Full table in
