@@ -439,7 +439,9 @@ async def test_missing_digest_on_a_cloud_trio_model_does_not_abort(ollama_config
     assert result.digest_by_model == {}
 
 
-async def test_family_contradiction_aborts_when_strict_lineage_is_true(config_factory, preflight_env):
+async def test_family_contradiction_aborts_when_strict_lineage_is_true(
+    config_factory, preflight_env
+):
     """R6: strict_lineage=True upgrades a probed-architecture/declared-lineage
     contradiction to a fail-closed abort."""
     cfg = config_factory(
