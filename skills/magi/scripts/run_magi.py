@@ -695,6 +695,10 @@ def _retry_wait(
     Returns:
         Seconds to sleep (``>= 0``).
     """
+    # Duck-typed (getattr) not isinstance(OllamaHTTPError): the fields ride on the
+    # exception the Ollama backend raises, and any exc WITHOUT them (a hypothetical
+    # non-OllamaHTTPError transport RuntimeError) simply falls to flat backoff below --
+    # fail-CLOSED, never fail-open (gate CP2/§6 loop 1 note).
     status = getattr(exc, "status", None)
     if classified == _FAIL_HTTP and status in _TRANSIENT_HTTP_STATUS:
         receipt = getattr(exc, "receipt", None) or datetime.now(timezone.utc)

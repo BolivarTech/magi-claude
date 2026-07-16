@@ -4,9 +4,9 @@
 """Exponential backoff for transient transport retries (MS3).
 
 Pure, I/O-free helpers: :func:`next_backoff` computes the wait before the next
-retry, and :func:`parse_retry_after` (Task 2) turns an HTTP ``Retry-After``
-header into capped seconds. Both are side-effect-free so the retry loop's timing
-is testable without a network or an event loop.
+retry, and :func:`parse_retry_after` turns an HTTP ``Retry-After`` header into
+capped seconds. Both are side-effect-free so the retry loop's timing is testable
+without a network or an event loop.
 """
 
 from __future__ import annotations
