@@ -90,18 +90,41 @@ def _rotation(
     max_rotations: int = 2,
     max_probe_attempts: int = 3,
     strict: bool = False,
+    fallback: Any = None,
+    digests: dict[str, str] | None = None,
 ) -> Any:
-    """Build a RotationContext wired to fakes: no sockets, no sleeping."""
+    """Build a RotationContext wired to fakes: no sockets, no sleeping.
+
+    Args:
+        windows: Optional per-model context-window override.
+        probe: Optional token-probe stand-in.
+        max_attempts: Attempts per model before a mage rotates.
+        max_rotations: Rotation budget.
+        max_probe_attempts: Probe-retry budget inside a single rotation.
+        strict: ``strict_context_guard`` value.
+        fallback: Optional override for the fallback list (defaults to the
+            module's ``FALLBACK``) -- Task 5b digest tests use this to inject
+            NON-cloud candidates the shared trio/fallback never has.
+        digests: Optional model -> digest map (Task 5b). Trio entries seed
+            ``RotationContext.digest_by_model`` (mirroring
+            ``PreflightResult.digest_by_model``); every entry also flows into
+            the fake ``ModelCapability.digest`` so ``policy.digest_of`` can
+            resolve it with zero I/O, exactly like the real preflight cache.
+    """
     from run_magi import RotationContext, RotationRuntimeConfig
 
+    fb = list(FALLBACK if fallback is None else fallback)
+    digest_map = digests or {}
     caps = {
         spec.model: ModelCapability(
-            window=(windows or {}).get(spec.model, BIG_WINDOW), supports_completion=True
+            window=(windows or {}).get(spec.model, BIG_WINDOW),
+            supports_completion=True,
+            digest=digest_map.get(spec.model),
         )
-        for spec in list(TRIO.values()) + FALLBACK
+        for spec in list(TRIO.values()) + fb
     }
     policy = RotationPolicy(
-        fallback=FALLBACK,
+        fallback=fb,
         max_rotations=max_rotations,
         min_window_tokens=REQUIRED,  # RAW payload: pre-filter only (C2-1)
         capabilities=caps,
@@ -110,6 +133,10 @@ def _rotation(
 
     async def _default_probe(model: str, prompt: str, timeout: int) -> int | None:
         return REQUIRED  # measured and it fits
+
+    trio_digest_seed = {
+        spec.model: digest_map[spec.model] for spec in TRIO.values() if spec.model in digest_map
+    }
 
     return RotationContext(
         registry=LineageRegistry(TRIO),
@@ -123,6 +150,7 @@ def _rotation(
             output_headroom_tokens=0,  # the fakes measure exactly; no headroom noise
         ),
         probe=probe or _default_probe,
+        digest_by_model=trio_digest_seed,
     )
 
 
