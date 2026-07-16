@@ -41,10 +41,17 @@ class ModelCapability:
             probe could not measure it.
         supports_completion: Whether the model exposes chat/completions
             (embeddings-only rejection is enforced by preflight, not here).
+        digest: The model's identity fingerprint from ``/api/show``, or
+            ``None``. Absent for the ``:cloud`` trio -- that is EXPECTED and
+            CORRECT (Task 0 spike), not a probe failure.
+        architecture: The model's architecture family (e.g. ``"qwen3.5"``),
+            or ``None`` if ``/api/show`` did not report one.
     """
 
     window: int | None
     supports_completion: bool
+    digest: str | None = None
+    architecture: str | None = None
 
 
 @dataclass
