@@ -67,6 +67,13 @@ DEFAULT_PROBE_TIMEOUT_SECONDS = 120  # probe processes the whole prompt
 #: the one remaining path to the old best-effort behaviour (R2a); it must stay
 #: available, never removed.
 DEFAULT_STRICT_CONTEXT_GUARD = True
+#: Grieta 2 (MS4): a family CONTRADICTION (probed architecture maps to a vendor
+#: other than the declared lineage) only WARNS by default -- the architecture map is
+#: non-exhaustive and a false positive must never abort a run. Setting
+#: ``strict_lineage = true`` upgrades that warning to a fail-closed abort
+#: (``FamilyContradictionError``); a digest collision aborts regardless of this flag
+#: (ensemble collapse has no benign explanation).
+DEFAULT_STRICT_LINEAGE = False
 
 #: Ordered strong->weak, ONE model per lineage, none colliding with the trio's
 #: lineages. Verified against registry.ollama.ai on 2026-07-11 (the website lists
@@ -100,6 +107,7 @@ _KNOWN_TOP_KEYS = {
     "retry_backoff_seconds",
     "preflight_timeout_seconds",
     "probe_timeout_seconds",
+    "strict_lineage",
 }
 
 
@@ -125,6 +133,9 @@ class OllamaConfig:
         retry_backoff_seconds: Backoff between transport retries; 0 disables (R12).
         preflight_timeout_seconds: Timeout for preflight metadata calls (R18).
         probe_timeout_seconds: Timeout for the context probe call (R24).
+        strict_lineage: Treat a probed-architecture/declared-lineage contradiction
+            as fail-closed (Grieta 2). Default False: a contradiction only warns,
+            since the architecture map is a best-effort, non-exhaustive hint.
     """
 
     base_url: str
@@ -140,6 +151,7 @@ class OllamaConfig:
     retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS
     preflight_timeout_seconds: int = DEFAULT_PREFLIGHT_TIMEOUT_SECONDS
     probe_timeout_seconds: int = DEFAULT_PROBE_TIMEOUT_SECONDS
+    strict_lineage: bool = DEFAULT_STRICT_LINEAGE
 
 
 def _load_toml(path: str) -> dict[str, Any]:
@@ -489,6 +501,12 @@ _SCALAR_SPECS: tuple[tuple[str, str, Callable[..., Any], Any], ...] = (
         "MAGI_OLLAMA_STRICT_CONTEXT",
         _require_bool,
         DEFAULT_STRICT_CONTEXT_GUARD,
+    ),
+    (
+        "strict_lineage",
+        "MAGI_OLLAMA_STRICT_LINEAGE",
+        _require_bool,
+        DEFAULT_STRICT_LINEAGE,
     ),
 )
 

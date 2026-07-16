@@ -21,6 +21,7 @@ from ollama_config import (
     DEFAULT_PROBE_TIMEOUT_SECONDS,
     DEFAULT_RETRY_BACKOFF_SECONDS,
     DEFAULT_STRICT_CONTEXT_GUARD,
+    DEFAULT_STRICT_LINEAGE,
 )
 
 REPO_CONFIG_RELPATH = os.path.join(".claude", "magi-ollama.toml")
@@ -55,6 +56,7 @@ def render_template() -> str:
     # DEFAULT_* constants -- one source of truth -- so an untouched scaffold round-trips
     # to the defaults while every knob (and the kill-switch) stays visible and editable.
     strict_literal = "true" if DEFAULT_STRICT_CONTEXT_GUARD else "false"
+    strict_lineage_literal = "true" if DEFAULT_STRICT_LINEAGE else "false"
     tunable_specs = (
         (
             "max_attempts_per_model",
@@ -100,6 +102,12 @@ def render_template() -> str:
             "probe_timeout_seconds",
             DEFAULT_PROBE_TIMEOUT_SECONDS,
             "timeout for the context-probe call, seconds",
+        ),
+        (
+            "strict_lineage",
+            strict_lineage_literal,
+            "abort (not just warn) when a probed architecture contradicts a "
+            "declared lineage (default: false)",
         ),
     )
     key_width = max(len(key) for key, _, _ in tunable_specs)
