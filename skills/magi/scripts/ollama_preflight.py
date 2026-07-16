@@ -406,8 +406,12 @@ def _check_missing_digest(
         MissingDigestError: If a non-cloud trio model has no digest.
     """
     for agent, spec in models.items():
-        if _is_cloud_tag(spec.model):
-            continue  # _CLOUD_HAS_DIGEST: expected absence, not a failure.
+        # `_CLOUD_HAS_DIGEST` is the SWITCH (Task 0 Step 3b): today the cloud trio
+        # omits digests, so a cloud tag's absent digest is expected and skipped. If a
+        # future spike shows cloud DOES report digests, flipping the flag to True makes
+        # this line stop skipping -> R5b then guards cloud too, a one-line change.
+        if _is_cloud_tag(spec.model) and not _CLOUD_HAS_DIGEST:
+            continue
         if caps[spec.model].digest is None:
             raise MissingDigestError(
                 f"{agent} ({spec.model}) is not a :cloud tag but /api/show gave no "
