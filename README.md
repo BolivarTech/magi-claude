@@ -78,9 +78,11 @@ fallbacks it may try (`0` turns rotation off); **`output_headroom_tokens`** = co
 reserved for the model's reply so it is never cut off; **`input_margin_pct`** = safety
 cushion when estimating whether the input fits a model's window; **`strict_context_guard`**
 = refuse a model whose window cannot be measured (default `true`; set `false` to estimate);
-**`retry_backoff_seconds`** = wait between connection retries; **`preflight_timeout_seconds`**
-/ **`probe_timeout_seconds`** = timeouts for the metadata calls and the context probe. An
-untouched scaffold behaves exactly as the built-in defaults. Full table in
+**`retry_backoff_seconds`** = **base** of the exponential retry backoff (v5.3.0; `0` = retry
+immediately), capped by **`retry_backoff_max_seconds`**; a server `Retry-After` is honored up to
+**`retry_after_max_seconds`**; **`timeout`** = per-agent request timeout (`--timeout` overrides);
+**`preflight_timeout_seconds`** / **`probe_timeout_seconds`** = timeouts for the metadata calls and
+the context probe. An untouched scaffold behaves exactly as the built-in defaults. Full table in
 [`docs/ollama-backend.md`](docs/ollama-backend.md).
 
 > **`--ollama` runs the gate Claude-free, end-to-end.** The consensus verdict and the
