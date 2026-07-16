@@ -272,3 +272,57 @@ def test_validator_reports_a_missing_path_as_cli_misuse(tmp_path, monkeypatch, c
 
     assert exc.value.code == 2
     assert "no such config file" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# MS3: the retry/timeout tunables validate through the SAME resolve_config path
+# the validator already delegates to -- no separate key list, so no divergence.
+# ---------------------------------------------------------------------------
+
+
+def test_validator_accepts_the_ms3_retry_and_timeout_tunables_at_defaults(tmp_path, monkeypatch):
+    """The --ollama-init scaffold's new MS3 keys validate via resolve_config (DRY)."""
+    cfg = render_template()
+    assert "retry_backoff_max_seconds" in cfg and "retry_after_max_seconds" in cfg
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(cfg, encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+
+    assert validate_magi_toml.main() == 0
+
+
+def test_validator_rejects_timeout_below_floor(tmp_path, monkeypatch):
+    """MS3: `timeout` has a >= 1 floor; `0` is rejected (an instant-fail timeout)."""
+    cfg = render_template().replace(
+        "timeout                   = 900.0", "timeout                   = 0"
+    )
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(cfg, encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+
+    assert validate_magi_toml.main() == 1
+
+
+def test_validator_accepts_retry_backoff_seconds_zero(tmp_path, monkeypatch):
+    """MS3/R12: `retry_backoff_seconds = 0` DISABLES backoff and stays valid -- the base
+    is NOT floored to 1 (that would break the documented MS1 disable feature)."""
+    cfg = render_template().replace(
+        "retry_backoff_seconds     = 2.0", "retry_backoff_seconds     = 0"
+    )
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(cfg, encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+
+    assert validate_magi_toml.main() == 0
+
+
+def test_validator_rejects_a_negative_backoff_ceiling(tmp_path, monkeypatch):
+    """MS3: the ceilings floor at 0; a negative value is rejected."""
+    cfg = render_template().replace(
+        "retry_backoff_max_seconds = 60.0", "retry_backoff_max_seconds = -1"
+    )
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(cfg, encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["validate_magi_toml.py", str(path)])
+
+    assert validate_magi_toml.main() == 1
