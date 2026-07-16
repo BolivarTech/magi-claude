@@ -14,11 +14,32 @@ from ollama_config import ModelSpec
 from ollama_preflight import (
     CONTEXT_GUARD_ENFORCED,
     CONTEXT_GUARD_ESTIMATED,
+    ContextWindowUnmeasurableError,
+    DigestCollisionError,
+    FamilyContradictionError,
+    MissingDigestError,
     OllamaPreflightError,
     _is_cloud_tag,
     _list_models,
     preflight,
 )
+from validate import ValidationError
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        DigestCollisionError,
+        FamilyContradictionError,
+        ContextWindowUnmeasurableError,
+        MissingDigestError,
+    ],
+)
+def test_ms4_exceptions_are_preflight_errors(exc):
+    """Every MS4 preflight exception is an OllamaPreflightError (and thus a
+    ValidationError), so the orchestrator's fail-closed handling catches them (R9)."""
+    assert issubclass(exc, OllamaPreflightError)
+    assert issubclass(exc, ValidationError)
 
 
 class _Resp(io.BytesIO):

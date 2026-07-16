@@ -54,6 +54,22 @@ class OllamaPreflightError(ValidationError):
     """Raised when the Ollama host is unreachable or a config guard fails."""
 
 
+class DigestCollisionError(OllamaPreflightError):
+    """Two magi resolve to the SAME model digest (R5/R5a) -- ensemble collapse."""
+
+
+class FamilyContradictionError(OllamaPreflightError):
+    """Declared lineage contradicts the model's real architecture family (R6, strict)."""
+
+
+class ContextWindowUnmeasurableError(OllamaPreflightError):
+    """No valid positive context window could be extracted (R2/R2b)."""
+
+
+class MissingDigestError(OllamaPreflightError):
+    """/api/show omitted the digest -- uniqueness cannot be verified (R5b)."""
+
+
 def _is_cloud_tag(tag: str) -> bool:
     """True for Ollama cloud tags, whose suffix is exactly ':cloud' or '-cloud'.
 
