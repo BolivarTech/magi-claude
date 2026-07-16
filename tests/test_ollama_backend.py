@@ -9,9 +9,11 @@ import io
 import json
 import socket
 import urllib.error
+from datetime import timezone
+
 import pytest
 from ollama_config import OllamaConfig
-from ollama_backend import OllamaBackend
+from ollama_backend import OllamaBackend, OllamaHTTPError, _raise_http_error
 
 # MS2: the model's content carries the delimited block. With no markers, the sentinel
 # rejects -- which is exactly the point: a bare verdict is no longer accepted (R15).
@@ -178,3 +180,69 @@ def test_roundtrip_bare_content_parses(monkeypatch, tmp_path):  # BDD-29
     parse_raw_output(str(raw_file), str(parsed_file))
     data = load_agent_output(str(parsed_file))
     assert data["agent"] == "melchior" and data["verdict"] == "approve"
+
+
+# ----------------------------------------------------------------------------
+# Task 4 (MS3): OllamaHTTPError exposes status / Retry-After / receipt so the
+# retry loop's backoff can pick exponential-vs-flat and honor Retry-After (R2, R5).
+# ----------------------------------------------------------------------------
+
+
+def test_http_error_carries_status_retry_after_and_receipt():
+    hdrs = {"Retry-After": "42"}
+    exc = urllib.error.HTTPError("u", 429, "Too Many Requests", hdrs, None)
+    with pytest.raises(OllamaHTTPError) as ei:
+        _raise_http_error(exc, redact=lambda s: s)
+    err = ei.value
+    assert err.status == 429
+    assert err.retry_after == "42"
+    assert err.receipt.tzinfo is timezone.utc
+    assert isinstance(err, RuntimeError)  # _classify still sees a RuntimeError
+
+
+def test_http_error_without_retry_after_header_is_none():
+    exc = urllib.error.HTTPError("u", 500, "ServerErr", {}, None)
+    with pytest.raises(OllamaHTTPError) as ei:
+        _raise_http_error(exc, redact=lambda s: s)
+    assert ei.value.retry_after is None
+
+
+def test_raise_http_error_redacts_the_message():
+    exc = urllib.error.HTTPError("u", 500, "sk-secret leaked", {}, None)
+    with pytest.raises(OllamaHTTPError) as ei:
+        _raise_http_error(exc, redact=lambda s: s.replace("sk-secret", "***"))
+    assert "sk-secret" not in str(ei.value)
+
+
+def test_ollama_http_error_is_classified_as_http_directly():
+    # gate CP2 loop 6 (Balthasar): a DIRECT guard on the message->classify coupling, in
+    # T4's own task, so a message-format drift breaks HERE (not only via the backend
+    # message-contract test). Imported locally to avoid a run_magi import cycle at top.
+    from run_magi import _classify, _FAIL_HTTP
+
+    exc = urllib.error.HTTPError("u", 503, "Service Unavailable", {}, None)
+    with pytest.raises(OllamaHTTPError) as ei:
+        _raise_http_error(exc, redact=lambda s: s)
+    assert _classify(ei.value) == _FAIL_HTTP
+
+
+def test_run_raises_ollama_http_error_with_retry_after_end_to_end(monkeypatch, tmp_path):
+    """The real _call() path (not just the helper in isolation) surfaces the new
+    fields -- guards against _raise_http_error being wired up but never called."""
+    hdrs = {"Retry-After": "7"}
+    err = urllib.error.HTTPError("u", 503, "Service Unavailable", hdrs, None)
+    _backend_with(monkeypatch, exc=err)
+    with pytest.raises(OllamaHTTPError) as ei:
+        _run(_cfg(), tmp_path)
+    assert ei.value.status == 503
+    assert ei.value.retry_after == "7"
+
+
+def test_404_path_is_unaffected_still_plain_runtimeerror(monkeypatch, tmp_path):
+    """The 404 branch is untouched by T4 -- it stays a plain RuntimeError, not
+    OllamaHTTPError (it is not reintentable/transitory, R5)."""
+    err = urllib.error.HTTPError("u", 404, "NotFound", {}, io.BytesIO(b"gone"))
+    _backend_with(monkeypatch, exc=err)
+    with pytest.raises(RuntimeError) as ei:
+        _run(_cfg(), tmp_path)
+    assert not isinstance(ei.value, OllamaHTTPError)
