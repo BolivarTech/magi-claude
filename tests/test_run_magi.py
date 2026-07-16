@@ -51,7 +51,11 @@ class TestParseArgs:
         args = parse_args(["code-review", "input.py"])
         assert args.mode == "code-review"
         assert args.input == "input.py"
-        assert args.timeout == 900
+        # MS3 (R6): the flag itself now defaults to None -- not 900 -- so the TOML
+        # `timeout` can win when the flag is absent. _resolve_timeout applies the
+        # flag > TOML > 900 precedence; see test_timeout_precedence_flag_over_toml_
+        # over_default and test_timeout_flag_defaults_to_none_so_toml_is_consulted.
+        assert args.timeout is None
         assert args.output_dir is None
 
     def test_custom_timeout(self):
@@ -4076,10 +4080,11 @@ class TestFindingGuardWiring:
         )
         ollama_backend = OllamaBackend(cfg)
 
-        # select_backend is async now (T9) and returns a 3-tuple; run_orchestrator is
-        # faked below, so rotation=None is fine (the banner only reads .model).
+        # select_backend is async now (T9) and returns a 4-tuple (MS3 added the TOML
+        # timeout); run_orchestrator is faked below, so rotation=None is fine (the
+        # banner only reads .model).
         async def fake_select(args, prompt):
-            return ollama_backend, dict(cfg.models), None
+            return ollama_backend, dict(cfg.models), None, cfg.timeout
 
         monkeypatch.setattr(run_magi, "select_backend", fake_select)
 
@@ -4899,10 +4904,11 @@ def test_select_backend_claude_default():
     from claude_backend import ClaudeBackend
 
     args = parse_args(["design", "x"])
-    backend, agent_models, rotation = asyncio.run(select_backend(args, "payload"))
+    backend, agent_models, rotation, toml_timeout = asyncio.run(select_backend(args, "payload"))
     assert isinstance(backend, ClaudeBackend)
     assert {s.model for s in agent_models.values()} == {"opus"}
     assert rotation is None  # Claude path keeps v4 single-shot retry, no rotation
+    assert toml_timeout is None  # no TOML on the Claude path (MS3, R6)
 
 
 def test_select_backend_ollama_uses_trio(monkeypatch):
@@ -4924,7 +4930,7 @@ def test_select_backend_ollama_uses_trio(monkeypatch):
     monkeypatch.setattr(run_magi, "resolve_config", lambda **k: cfg)
     monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
     args = parse_args(["design", "x", "--ollama"])
-    backend, agent_models, rotation = asyncio.run(select_backend(args, "payload"))
+    backend, agent_models, rotation, toml_timeout = asyncio.run(select_backend(args, "payload"))
     assert isinstance(backend, OllamaBackend)
     assert agent_models == {
         "melchior": ModelSpec("m", "la"),
@@ -4932,6 +4938,7 @@ def test_select_backend_ollama_uses_trio(monkeypatch):
         "caspar": ModelSpec("c", "lc"),
     }
     assert isinstance(rotation, RotationContext)  # Ollama path carries the apparatus
+    assert toml_timeout == cfg.timeout  # MS3, R6: the TOML's timeout, unresolved
 
 
 def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
@@ -7317,3 +7324,241 @@ class TestAdherenceTelemetry:
         assert result["extraction_failures"] == {"caspar": {"missing_markers": 4}}, (
             "2 attempts x 2 models -- including the LAST one, the one that killed it"
         )
+
+
+# ---------------------------------------------------------------------------
+# MS3 Task 5: exponential backoff branch + TOML `timeout` precedence
+# ---------------------------------------------------------------------------
+
+
+def _retry_cfg(**overrides: Any) -> Any:
+    """A RotationRuntimeConfig for ``_retry_wait`` tests, overriding fields via kw.
+
+    Built via ``dataclasses.replace`` on a REAL one (``rotation_harness._cfg()`` fed
+    through ``RotationRuntimeConfig.from_config``) -- NEVER hand-constructed. The
+    contract forbids hand-building: it re-opens the config-drift door that
+    ``from_config`` exists to close (MS1 Checkpoint-2 finding, Caspar).
+    """
+    from dataclasses import replace
+
+    from rotation_harness import _cfg
+    from run_magi import RotationRuntimeConfig
+
+    return replace(RotationRuntimeConfig.from_config(_cfg()), **overrides)
+
+
+def _http(status: int, retry_after: str | None = None) -> Any:
+    """An ``OllamaHTTPError`` with the given status/``Retry-After``, receipt=now (UTC)."""
+    from datetime import datetime, timezone
+
+    from ollama_backend import OllamaHTTPError
+
+    return OllamaHTTPError(
+        f"Ollama HTTP {status}: x",
+        status=status,
+        retry_after=retry_after,
+        receipt=datetime.now(timezone.utc),
+    )
+
+
+def test_http_transient_gets_exponential_backoff():
+    from run_magi import _FAIL_HTTP, _retry_wait
+
+    cfg = _retry_cfg(
+        retry_backoff_seconds=2.0, retry_backoff_max_seconds=60.0, retry_after_max_seconds=300.0
+    )
+    assert _retry_wait(_http(429), _FAIL_HTTP, 2, cfg) == 4.0  # base * 2**(2-1)
+
+
+def test_http_transient_honors_retry_after():
+    from run_magi import _FAIL_HTTP, _retry_wait
+
+    cfg = _retry_cfg(
+        retry_backoff_seconds=2.0, retry_backoff_max_seconds=60.0, retry_after_max_seconds=300.0
+    )
+    assert _retry_wait(_http(503, retry_after="10"), _FAIL_HTTP, 1, cfg) == 10.0
+
+
+def test_timeout_gets_flat_backoff_not_exponential():
+    from run_magi import _FAIL_TIMEOUT, _retry_wait
+
+    cfg = _retry_cfg(
+        retry_backoff_seconds=2.0, retry_backoff_max_seconds=60.0, retry_after_max_seconds=300.0
+    )
+    assert _retry_wait(TimeoutError("slow"), _FAIL_TIMEOUT, 5, cfg) == 2.0  # flat, not exponential
+
+
+def test_non_http_transport_gets_flat_backoff():
+    from run_magi import _FAIL_CONNECTION, _retry_wait
+
+    cfg = _retry_cfg(
+        retry_backoff_seconds=2.0, retry_backoff_max_seconds=60.0, retry_after_max_seconds=300.0
+    )
+    exc = urllib.error.URLError("Connection reset by peer")
+    assert _retry_wait(exc, _FAIL_CONNECTION, 5, cfg) == 2.0
+
+
+def test_classify_taxonomy_canary_forces_conscious_routing():
+    """Default-to-flat means a NEW _classify category is always routed (to flat) at
+    runtime, so "test fails until routed" is impossible. This canary instead pins
+    the KNOWN _FAIL_* set: if _classify gains a category, this equality fails at
+    DEV time, forcing a deliberate exponential-vs-flat decision in _retry_wait
+    (gate CP2 plan loop 5, Caspar).
+    """
+    import run_magi
+
+    known = {
+        run_magi._FAIL_HTTP,
+        run_magi._FAIL_TIMEOUT,
+        run_magi._FAIL_CONNECTION,
+        run_magi._FAIL_SCHEMA,
+        run_magi._FAIL_UNEXPECTED,
+    }
+    actual = {v for k, v in vars(run_magi).items() if k.startswith("_FAIL_") and isinstance(v, str)}
+    assert actual == known, f"new _classify category {actual - known}: route it in _retry_wait"
+
+
+def test_retry_wait_routes_each_current_category_correctly():
+    """The categories that REACH _retry_wait route to the CORRECT strategy (not a
+    weak >= 0 check). Transient HTTP -> exponential; timeout/connection/
+    non-transient-HTTP -> flat.
+    """
+    from run_magi import _FAIL_CONNECTION, _FAIL_HTTP, _FAIL_TIMEOUT, _retry_wait
+
+    cfg = _retry_cfg(
+        retry_backoff_seconds=2.0, retry_backoff_max_seconds=60.0, retry_after_max_seconds=300.0
+    )
+    assert _retry_wait(_http(503), _FAIL_HTTP, 2, cfg) == 4.0  # transient -> exponential
+    assert _retry_wait(_http(400), _FAIL_HTTP, 2, cfg) == 2.0  # non-transient -> flat
+    assert _retry_wait(TimeoutError(), _FAIL_TIMEOUT, 9, cfg) == 2.0  # -> flat
+    assert _retry_wait(ConnectionError(), _FAIL_CONNECTION, 9, cfg) == 2.0  # -> flat
+
+
+def test_schema_is_the_third_strategy_and_bypasses_retry_wait():
+    """The THIRD strategy is NONE. ``_classify`` tags schema as ``_FAIL_SCHEMA``; the
+    loop's ``isinstance(exc, (ValidationError, JSONDecodeError))`` branch routes it
+    to ``_build_retry_prompt`` (feedback) with NO backoff, BEFORE ``_retry_wait`` is
+    ever called (see ``test_schema_retry_carries_feedback_but_transport_retry_does_not``
+    for the integration coverage of that routing).
+    """
+    from run_magi import _FAIL_SCHEMA, _classify
+
+    assert _classify(ValidationError("x")) == _FAIL_SCHEMA
+    assert _classify(json.JSONDecodeError("x", "doc", 0)) == _FAIL_SCHEMA
+
+
+def test_bdd4_retry_after_wins_over_formula_ceiling_through_retry_wait():
+    """BDD-4 at the INTEGRATION level (not just next_backoff in isolation). 503 +
+    Retry-After: 120, formula ceiling 60, retry_after cap 300 -> 120 (the server
+    wins over the 60s formula ceiling; still under the 300s cap).
+    """
+    from run_magi import _FAIL_HTTP, _retry_wait
+
+    cfg = _retry_cfg(
+        retry_backoff_seconds=2.0, retry_backoff_max_seconds=60.0, retry_after_max_seconds=300.0
+    )
+    assert _retry_wait(_http(503, retry_after="120"), _FAIL_HTTP, 1, cfg) == 120.0
+
+
+def test_bdd7_additive_transient_is_exponential_not_flat_at_defaults():
+    """BDD-7: with defaults, MS1 is unchanged EXCEPT a transient now backs off
+    EXPONENTIALLY, not flat. attempt 3 -> base*2^2 = 8 (not the flat 2.0).
+    """
+    from run_magi import _FAIL_HTTP, _retry_wait
+
+    cfg = _retry_cfg(
+        retry_backoff_seconds=2.0, retry_backoff_max_seconds=60.0, retry_after_max_seconds=300.0
+    )
+    assert _retry_wait(_http(429), _FAIL_HTTP, 3, cfg) == 8.0  # exponential, not flat 2.0
+
+
+def test_retry_wait_logs_when_server_retry_after_reaches_cap(capsys):
+    """The at/over-cap log (spec R7) must exist, and it must NOT be a false positive
+    -- it fires on >= cap, phrased as "at/over cap", and stays silent well under it.
+    """
+    from run_magi import _FAIL_HTTP, _retry_wait
+
+    cfg = _retry_cfg(
+        retry_backoff_seconds=2.0, retry_backoff_max_seconds=60.0, retry_after_max_seconds=300.0
+    )
+    assert _retry_wait(_http(429, retry_after="999999"), _FAIL_HTTP, 1, cfg) == 300.0
+    err = capsys.readouterr().err
+    assert "cap" in err and "300" in err
+    capsys.readouterr()  # drain, so the next assertion inspects ONLY the next call
+    assert _retry_wait(_http(429, retry_after="10"), _FAIL_HTTP, 1, cfg) == 10.0
+    assert ">= cap" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+def test_every_transient_status_gets_exponential_through_retry_wait(status):
+    """Pin the WHOLE _TRANSIENT_HTTP_STATUS set, not just 429/503 (gate CP2 loop 6,
+    Caspar)."""
+    from run_magi import _FAIL_HTTP, _TRANSIENT_HTTP_STATUS, _retry_wait
+
+    cfg = _retry_cfg(
+        retry_backoff_seconds=2.0, retry_backoff_max_seconds=60.0, retry_after_max_seconds=300.0
+    )
+    assert status in _TRANSIENT_HTTP_STATUS
+    assert _retry_wait(_http(status), _FAIL_HTTP, 2, cfg) == 4.0  # exponential
+
+
+def test_timeout_precedence_flag_over_toml_over_default():
+    from run_magi import _resolve_timeout
+
+    assert _resolve_timeout(300, 600.0) == 300.0
+    assert _resolve_timeout(None, 600.0) == 600.0
+    assert _resolve_timeout(None, None) == 900.0
+
+
+def test_timeout_flag_defaults_to_none_so_toml_is_consulted():
+    """argparse must NOT hardcode 900, or the TOML timeout is dead (the flag would
+    never be None). Parse WITHOUT --timeout (gate CP2 plan loop 3, Balthasar)."""
+    from run_magi import parse_args
+
+    args = parse_args(["design", "in.md", "--ollama"])
+    assert args.timeout is None
+
+
+def test_timeout_flag_zero_or_negative_is_rejected_at_parse():
+    """The FLAG must be floored too, not just the TOML (gate CP2 plan loop 5,
+    Caspar)."""
+    from run_magi import parse_args
+
+    for bad in ("0", "-1"):
+        with pytest.raises(SystemExit):  # argparse errors exit
+            parse_args(["design", "in.md", "--ollama", "--timeout", bad])
+
+
+@pytest.mark.asyncio
+async def test_retry_loop_awaits_growing_backoff_across_same_model_attempts(tmp_path, monkeypatch):
+    """Integration smoke test (gate CP2 loop 6, Balthasar): the REAL rotation loop
+    actually AWAITS ``next_backoff``'s growing wait across attempts on the SAME
+    model (2.0 then 4.0) -- not just the first-attempt value already pinned by
+    ``test_backoff_waits_between_transport_attempts_only``. Two transient 429s on
+    caspar, the third attempt succeeds.
+    """
+    import run_magi
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(run_magi.asyncio, "sleep", fake_sleep)
+
+    calls = {"caspar": 0}
+
+    async def mock_launch(
+        agent_name, agents_dir, prompt, output_dir, timeout, spec=None, backend=None
+    ):
+        if agent_name != "caspar":
+            return _valid(agent_name)
+        calls["caspar"] += 1
+        if calls["caspar"] <= 2:
+            raise _http(429)
+        return _valid(agent_name)
+
+    result = await _run(tmp_path, mock_launch, rotation=_rotation(max_attempts=3))
+
+    assert sleeps == [2.0, 4.0], f"expected exponential growth 2.0 -> 4.0, got {sleeps}"
+    assert result.get("degraded") is not True

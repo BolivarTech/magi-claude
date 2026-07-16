@@ -485,3 +485,115 @@ def test_ollama_init_template_scaffolds_strict_lineage_at_its_default(tmp_path):
     cfg = resolve_config(repo_path=str(path), global_path=None, env={})
     assert cfg.strict_lineage is False
     assert "strict_lineage" in path.read_text(encoding="utf-8")
+
+
+# ----------------------------------------------------------------------------
+# Task 3 (MS3): retry_backoff_max_seconds / retry_after_max_seconds / timeout
+# (R3, R6, BDD-12). Ceilings use minimum=0.0; timeout floors at >= 1; the
+# EXISTING base retry_backoff_seconds stays minimum=0.0 (R12 -- 0 disables it).
+# ----------------------------------------------------------------------------
+
+
+def _toml_with_scalar(key, value):
+    """A valid trio TOML (NEW_TOML) with one extra top-level scalar prepended.
+
+    Scalars must precede [models] -- TOML binds bare keys to the current table
+    (see FALLBACK_TOML comment above), so prepending keeps them top-level.
+    """
+    return f"{key} = {value}\n" + NEW_TOML
+
+
+def test_new_ms3_tunables_default_when_absent(tmp_path):
+    cfg = resolve_config(repo_path=_write_toml(tmp_path, NEW_TOML), global_path=None, env={})
+    assert cfg.retry_backoff_max_seconds == 60.0
+    assert cfg.retry_after_max_seconds == 300.0
+    assert cfg.timeout == 900.0
+
+
+def test_timeout_zero_or_negative_is_rejected(tmp_path):
+    with pytest.raises(OllamaConfigError):
+        resolve_config(
+            repo_path=_write_toml(tmp_path, _toml_with_scalar("timeout", 0)),
+            global_path=None,
+            env={},
+        )
+    with pytest.raises(OllamaConfigError):
+        resolve_config(
+            repo_path=_write_toml(tmp_path, _toml_with_scalar("timeout", -1)),
+            global_path=None,
+            env={},
+        )
+
+
+def test_timeout_is_read_from_file(tmp_path):
+    cfg = resolve_config(
+        repo_path=_write_toml(tmp_path, _toml_with_scalar("timeout", 600)),
+        global_path=None,
+        env={},
+    )
+    assert cfg.timeout == 600.0
+
+
+def test_retry_backoff_seconds_zero_is_accepted_r12_disable(tmp_path):
+    # R12: retry_backoff_seconds = 0 disables the backoff -- must stay a VALID
+    # value, not be floored to 1 like timeout.
+    cfg = resolve_config(
+        repo_path=_write_toml(tmp_path, _toml_with_scalar("retry_backoff_seconds", 0)),
+        global_path=None,
+        env={},
+    )
+    assert cfg.retry_backoff_seconds == 0.0
+
+
+def test_ceilings_zero_is_accepted(tmp_path):
+    toml = "retry_backoff_max_seconds = 0\nretry_after_max_seconds = 0\n" + NEW_TOML
+    cfg = resolve_config(repo_path=_write_toml(tmp_path, toml), global_path=None, env={})
+    assert cfg.retry_backoff_max_seconds == 0.0
+    assert cfg.retry_after_max_seconds == 0.0
+
+
+def test_negative_ceiling_is_rejected(tmp_path):
+    with pytest.raises(OllamaConfigError):
+        resolve_config(
+            repo_path=_write_toml(tmp_path, _toml_with_scalar("retry_backoff_max_seconds", -1)),
+            global_path=None,
+            env={},
+        )
+    with pytest.raises(OllamaConfigError):
+        resolve_config(
+            repo_path=_write_toml(tmp_path, _toml_with_scalar("retry_after_max_seconds", -1)),
+            global_path=None,
+            env={},
+        )
+
+
+def test_ms3_tunables_read_from_env_kill_switch_style(tmp_path):
+    cfg = resolve_config(
+        repo_path=_write_toml(tmp_path, NEW_TOML),
+        global_path=None,
+        env={
+            "MAGI_OLLAMA_RETRY_BACKOFF_MAX_SECONDS": "30",
+            "MAGI_OLLAMA_RETRY_AFTER_MAX_SECONDS": "120",
+            "MAGI_OLLAMA_TIMEOUT": "300",
+        },
+    )
+    assert cfg.retry_backoff_max_seconds == 30.0
+    assert cfg.retry_after_max_seconds == 120.0
+    assert cfg.timeout == 300.0
+
+
+def test_ollama_init_template_scaffolds_ms3_retry_and_timeout_tunables(tmp_path):
+    """The scaffold must emit the three new MS3 tunables (visible + editable),
+    same convention as strict_lineage/strict_context_guard above."""
+    from ollama_init import render_template
+
+    path = tmp_path / "magi-ollama.toml"
+    path.write_text(render_template(), encoding="utf-8")
+    cfg = resolve_config(repo_path=str(path), global_path=None, env={})
+    assert cfg.retry_backoff_max_seconds == 60.0
+    assert cfg.retry_after_max_seconds == 300.0
+    assert cfg.timeout == 900.0
+    text = path.read_text(encoding="utf-8")
+    assert "retry_backoff_max_seconds" in text
+    assert "retry_after_max_seconds" in text
+    assert "timeout" in text

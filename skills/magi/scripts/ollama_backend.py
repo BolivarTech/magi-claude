@@ -11,7 +11,8 @@ import json
 import socket
 import urllib.error
 import urllib.request
-from typing import Any, cast  # mypy strict: used by dict[str, Any] annotations below
+from datetime import datetime, timezone
+from typing import Any, Callable, NoReturn, cast  # mypy strict: used by annotations below
 
 from backend import AgentBackend
 from ollama_config import OllamaConfig
@@ -28,6 +29,66 @@ _REDACTED = "***"
 #: message like "no HTTP status" is NOT misread as transport.
 TRANSPORT_HTTP_PATTERN = r"HTTP \d|at chat-time"
 TRANSPORT_CONNECTION_MARKERS = ("Cannot reach Ollama",)
+
+
+class OllamaHTTPError(RuntimeError):
+    """A transport HTTP failure, carrying the fields the retry loop's backoff needs.
+
+    Subclasses ``RuntimeError`` so ``run_magi._classify`` still routes it via the
+    ``HTTP \\d`` message marker (the message keeps the ``Ollama HTTP <code>``
+    shape); the added fields let the retry loop (MS3) pick exponential-vs-flat
+    backoff and honor ``Retry-After`` without re-parsing the message.
+
+    Attributes:
+        status: HTTP status code from the response.
+        retry_after: Raw ``Retry-After`` header value, or None when absent.
+        receipt: UTC-aware timestamp captured atomically with reading the
+            response, so a later backoff decision measures delay from the
+            moment the server actually answered.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None,
+        retry_after: str | None,
+        receipt: datetime,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
+        self.receipt = receipt
+
+
+def _raise_http_error(exc: urllib.error.HTTPError, redact: Callable[[str], str]) -> NoReturn:
+    """Turn a non-404 ``HTTPError`` into an :class:`OllamaHTTPError` and raise it.
+
+    Args:
+        exc: The HTTPError raised by ``urllib.request.urlopen``.
+        redact: Callable that strips secrets (the API key) from the message
+            before it is raised, so a rendered error never leaks ``api_key``.
+
+    Raises:
+        OllamaHTTPError: Always -- this function never returns normally.
+    """
+    # Captured atomically with reading the response: this IS "the point of
+    # receipt" the backoff's Retry-After math measures delay from (R2).
+    receipt = datetime.now(timezone.utc)
+    # An empty headers mapping is falsy, so this also correctly yields None
+    # when the server sent no headers at all.
+    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+    # exc.fp is single-consumption (Caspar): read the body ONCE up front.
+    detail = exc.read().decode("utf-8", "replace") if exc.fp else ""
+    # `from None`: matches the original branch's suppression of Python's implicit
+    # exception-chaining note -- the caller sees only the redacted OllamaHTTPError,
+    # not "During handling of the above exception...".
+    raise OllamaHTTPError(
+        redact(f"Ollama HTTP {exc.code}: {exc.reason} {detail}".strip()),
+        status=exc.code,
+        retry_after=retry_after,
+        receipt=receipt,
+    ) from None
 
 
 class OllamaBackend(AgentBackend):
@@ -74,18 +135,20 @@ class OllamaBackend(AgentBackend):
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return cast(bytes, resp.read())
         except urllib.error.HTTPError as exc:
-            # exc.fp is single-consumption (Caspar): read the body ONCE up front.
-            detail = exc.read().decode("utf-8", "replace") if exc.fp else ""
             if exc.code == 404:
+                # exc.fp is single-consumption (Caspar): read the body ONCE up front.
+                detail = exc.read().decode("utf-8", "replace") if exc.fp else ""
                 raise RuntimeError(
                     self._redact(
                         f"Ollama 404 at chat-time: model unavailable ({exc.reason}). "
                         f"Preflight passed — possible ollama rm / auth expiry / TOCTOU. {detail}".strip()
                     )
                 ) from None
-            raise RuntimeError(
-                self._redact(f"Ollama HTTP {exc.code}: {exc.reason} {detail}".strip())
-            ) from None
+            # MS3: every OTHER HTTP failure (transitory or not) carries status /
+            # Retry-After / receipt via OllamaHTTPError, so the retry loop can pick
+            # exponential-vs-flat backoff and honor Retry-After (R2, R5). 404 stays a
+            # plain RuntimeError above: it is neither reintentable nor transitory.
+            _raise_http_error(exc, self._redact)
         except (socket.timeout, TimeoutError) as exc:
             raise TimeoutError(self._redact(f"Ollama request timed out: {exc}")) from None
         except urllib.error.URLError as exc:

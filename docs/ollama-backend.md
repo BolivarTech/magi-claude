@@ -239,7 +239,10 @@ These are top-level keys (they apply to all three mages) and must appear **befor
 | `input_margin_pct` | 40 | Safety cushion (percent) when estimating whether the input fits a model's context window, for the models MAGI can only estimate rather than measure exactly. |
 | `strict_context_guard` | **true** | Default `true` (v5.2.0): **abort** if a model's context window **cannot be measured**, instead of proceeding on an estimate. Set `false` to opt out and run with an estimated guard. |
 | `strict_lineage` | false | If `true`, **abort** when a model's real architecture family (from `/api/show`) contradicts its declared `lineage`; default `false` makes a contradiction a non-fatal warning. See "Lineage identity" below. |
-| `retry_backoff_seconds` | 2.0 | Seconds to wait between **connection/transport** retries (e.g. after a 503). `0` = no wait. Schema-error retries never wait. |
+| `retry_backoff_seconds` | 2.0 | **Base** of the exponential backoff between transport retries (v5.3.0). `0` = retry immediately (disables the wait, bounded by `max_attempts_per_model`). Schema-error retries never wait. |
+| `retry_backoff_max_seconds` | 60.0 | **Ceiling for OUR computed backoff** — `min(base × 2^n, this)` (v5.3.0). |
+| `retry_after_max_seconds` | 300.0 | **Ceiling for a server `Retry-After` header** (defense against a hostile/buggy server; not a cap on your model). A `Retry-After` up to this wins over our formula (v5.3.0). |
+| `timeout` | 900.0 | Per-agent request timeout in seconds (v5.3.0). `--timeout` on the CLI overrides it; both floor at `1`. |
 | `preflight_timeout_seconds` | 30 | Timeout for the small preflight metadata calls (`/models`, `/api/show`). |
 | `probe_timeout_seconds` | 120 | Timeout for the context probe, which processes the **whole prompt** once — larger than the metadata timeout on purpose. |
 
@@ -249,6 +252,50 @@ These are top-level keys (they apply to all three mages) and must appear **befor
 turns rotation off while leaving the new preflight, the context probe, and the schema
 validation **active** — a shadow-rollout mode to validate the v5 config parsing and the
 measurement paths in production before enabling live rotation.
+
+### Worst-case run time, backoff, and tuning
+
+**Worst-case wall-clock (per mage).** The retry/rotation budget bounds the slowest a mage
+can be:
+
+```text
+worst_case ≈ (1 + max_rotations) × max_attempts_per_model × timeout + Σ backoffs
+```
+
+The three mages run in **parallel**, so the whole run's wall-clock is essentially one
+mage's, NOT ×3. `Σ backoffs` is a **loose upper bound**, not the expected value:
+
+```text
+Σ backoffs ≤ (1 + max_rotations) × max_attempts_per_model
+             × max(retry_backoff_max_seconds, retry_after_max_seconds)
+```
+
+The `max(...)` is needed because a server `Retry-After` (capped at `retry_after_max_seconds`,
+default 300s) can exceed the formula ceiling (`retry_backoff_max_seconds`, default 60s). At the
+defaults (`max_rotations = 2`, `max_attempts_per_model = 2`, `timeout = 900`, ceilings 60/300)
+the backoff term is ≈ 12s (negligible), so `worst_case ≈ 6 × 900s = 90 min` per mage. That is a
+**loose theoretical bound**, not typical behaviour — normal runs are far shorter.
+
+**Exponential backoff (v5.3.0).** For a transient transport failure (`408/429/500/502/503/504`)
+the wait grows `min(retry_backoff_seconds × 2^(attempt-1), retry_backoff_max_seconds)` (2s -> 4s
+-> 8s ..., capped). A server `Retry-After` header, when present, **wins** over the formula and is
+honored up to `retry_after_max_seconds`. A **timeout** or a non-HTTP-status transport error uses
+the **flat** `retry_backoff_seconds` — waiting exponentially does not clear a network partition.
+`retry_backoff_seconds = 0` disables the wait (retry immediately, bounded by `max_attempts_per_model`).
+
+**The two ceilings** are distinct and easy to confuse — concretely: if the server asks for 10 min
+we respect it up to `retry_after_max_seconds` = 5 min; our own computed backoff never exceeds
+`retry_backoff_max_seconds` = 1 min.
+
+**Tuning.** Lower `timeout` / `max_rotations` / `max_attempts_per_model` to fit your SLA — it is
+**your** responsibility to size these to your model's latency; MAGI imposes no artificial run cap.
+
+**Caveats (documented honestly).** (a) **No jitter** (KISS at 3 agents): the mages may retry in
+sync against one backend; acceptable at this scale, and with `Retry-After` they sync with or
+without jitter. (b) **Flat backoff for timeouts** is deliberate, but if the endpoint is *overloaded*
+(not partitioned) the immediate retries can add load — raise `retry_backoff_seconds` there. (c) A
+backoff `asyncio.sleep` is a standard cancellation point (like MS1's flat sleep) — a SIGINT/cancel
+mid-wait propagates cleanly.
 
 ### Context guard, the probe, and its cost
 
