@@ -3,13 +3,18 @@
 # Date: 2026-07-16
 """Tests for the pure backoff helpers (MS3)."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from hypothesis import given, strategies as st
 
 from backoff import (
-    DEFAULT_RETRY_BACKOFF_MAX_SECONDS,
+    DEFAULT_RETRY_AFTER_MAX_SECONDS,
     next_backoff,
+    parse_retry_after,
 )
+
+_RECEIPT = datetime(2025, 10, 21, 7, 28, 0, tzinfo=timezone.utc)
 
 
 def test_next_backoff_first_attempt_returns_base():
@@ -45,13 +50,6 @@ def test_next_backoff_retry_after_greater_than_ceiling_is_respected():
 )
 def test_next_backoff_never_exceeds_ceiling_without_retry_after(attempt, base, ceiling):
     assert next_backoff(attempt, base, ceiling, None) <= ceiling
-
-
-from datetime import datetime, timedelta, timezone
-
-from backoff import DEFAULT_RETRY_AFTER_MAX_SECONDS, parse_retry_after
-
-_RECEIPT = datetime(2025, 10, 21, 7, 28, 0, tzinfo=timezone.utc)
 
 
 def test_parse_retry_after_delta_seconds():
