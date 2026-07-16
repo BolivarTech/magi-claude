@@ -20,6 +20,7 @@ from functools import partial
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
+from backoff import DEFAULT_RETRY_AFTER_MAX_SECONDS, DEFAULT_RETRY_BACKOFF_MAX_SECONDS
 from validate import MAX_ATTEMPTS_CAP, MIN_ATTEMPTS, ValidationError
 
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
@@ -62,6 +63,11 @@ DEFAULT_INPUT_MARGIN_PCT = 40  # pre-filter only; the exact probe decides (R24)
 DEFAULT_RETRY_BACKOFF_SECONDS = 2.0
 DEFAULT_PREFLIGHT_TIMEOUT_SECONDS = 30  # metadata calls
 DEFAULT_PROBE_TIMEOUT_SECONDS = 120  # probe processes the whole prompt
+#: MS3: per-agent request timeout default (MS1 kept 900 as a CLI-only flag; MS3
+#: makes it a TOML scalar too). Config concern, not backoff math -- defined here,
+#: not in backoff.py (cohesion, gate CP2 loop 1).
+DEFAULT_TIMEOUT_SECONDS = 900.0
+_MIN_TIMEOUT_SECONDS = 1
 #: MS4: fail-closed by default -- an unmeasurable context window now ABORTS the run
 #: instead of silently proceeding on an estimate. ``strict_context_guard = false`` is
 #: the one remaining path to the old best-effort behaviour (R2a); it must stay
@@ -105,9 +111,12 @@ _KNOWN_TOP_KEYS = {
     "input_margin_pct",
     "strict_context_guard",
     "retry_backoff_seconds",
+    "retry_backoff_max_seconds",
+    "retry_after_max_seconds",
     "preflight_timeout_seconds",
     "probe_timeout_seconds",
     "strict_lineage",
+    "timeout",
 }
 
 
@@ -131,11 +140,18 @@ class OllamaConfig:
         input_margin_pct: Rotation-candidate pre-filter margin percent (R24).
         strict_context_guard: Treat unknown context windows as fail-closed (R18).
         retry_backoff_seconds: Backoff between transport retries; 0 disables (R12).
+        retry_backoff_max_seconds: Ceiling for the exponential backoff FORMULA
+            (MS3 R3); 0 is a valid (degenerate) ceiling.
+        retry_after_max_seconds: Ceiling for a server-sent ``Retry-After`` (MS3
+            R2); defends against a hostile/buggy server, not the model itself.
         preflight_timeout_seconds: Timeout for preflight metadata calls (R18).
         probe_timeout_seconds: Timeout for the context probe call (R24).
         strict_lineage: Treat a probed-architecture/declared-lineage contradiction
             as fail-closed (Grieta 2). Default False: a contradiction only warns,
             since the architecture map is a best-effort, non-exhaustive hint.
+        timeout: Per-agent request timeout in seconds (MS3 R6); overridden by the
+            ``--timeout`` CLI flag when given. Floors at 1 (unlike the two
+            backoff ceilings above, 0 is not a valid timeout).
     """
 
     base_url: str
@@ -149,9 +165,12 @@ class OllamaConfig:
     input_margin_pct: int = DEFAULT_INPUT_MARGIN_PCT
     strict_context_guard: bool = DEFAULT_STRICT_CONTEXT_GUARD
     retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS
+    retry_backoff_max_seconds: float = DEFAULT_RETRY_BACKOFF_MAX_SECONDS
+    retry_after_max_seconds: float = DEFAULT_RETRY_AFTER_MAX_SECONDS
     preflight_timeout_seconds: int = DEFAULT_PREFLIGHT_TIMEOUT_SECONDS
     probe_timeout_seconds: int = DEFAULT_PROBE_TIMEOUT_SECONDS
     strict_lineage: bool = DEFAULT_STRICT_LINEAGE
+    timeout: float = DEFAULT_TIMEOUT_SECONDS
 
 
 def _load_toml(path: str) -> dict[str, Any]:
@@ -481,8 +500,32 @@ _SCALAR_SPECS: tuple[tuple[str, str, Callable[..., Any], Any], ...] = (
     (
         "retry_backoff_seconds",
         "MAGI_OLLAMA_RETRY_BACKOFF_SECONDS",
+        # R12: 0 disables the backoff entirely -- this base stays minimum=0.0,
+        # UNLIKE timeout below, which floors at 1 (flooring this to 1 would be a
+        # regression: it would silently re-enable a backoff the user turned off).
         partial(_require_float, minimum=0.0),
         DEFAULT_RETRY_BACKOFF_SECONDS,
+    ),
+    (
+        "retry_backoff_max_seconds",
+        "MAGI_OLLAMA_RETRY_BACKOFF_MAX_SECONDS",
+        # Ceiling for OUR formula only; 0 is a valid (degenerate) ceiling.
+        partial(_require_float, minimum=0.0),
+        DEFAULT_RETRY_BACKOFF_MAX_SECONDS,
+    ),
+    (
+        "retry_after_max_seconds",
+        "MAGI_OLLAMA_RETRY_AFTER_MAX_SECONDS",
+        # Ceiling for a server Retry-After; 0 is a valid (degenerate) ceiling.
+        partial(_require_float, minimum=0.0),
+        DEFAULT_RETRY_AFTER_MAX_SECONDS,
+    ),
+    (
+        "timeout",
+        "MAGI_OLLAMA_TIMEOUT",
+        # Unlike the backoff scalars above, 0 is NOT a valid timeout -- floor at 1.
+        partial(_require_float, minimum=_MIN_TIMEOUT_SECONDS),
+        DEFAULT_TIMEOUT_SECONDS,
     ),
     (
         "preflight_timeout_seconds",

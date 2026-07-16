@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 
+from backoff import DEFAULT_RETRY_AFTER_MAX_SECONDS, DEFAULT_RETRY_BACKOFF_MAX_SECONDS
 from ollama_config import (
     DEFAULT_BASE_URL,
     DEFAULT_FALLBACK,
@@ -22,6 +23,7 @@ from ollama_config import (
     DEFAULT_RETRY_BACKOFF_SECONDS,
     DEFAULT_STRICT_CONTEXT_GUARD,
     DEFAULT_STRICT_LINEAGE,
+    DEFAULT_TIMEOUT_SECONDS,
 )
 
 REPO_CONFIG_RELPATH = os.path.join(".claude", "magi-ollama.toml")
@@ -94,6 +96,16 @@ def render_template() -> str:
             "seconds to wait between transport retries (0 = no wait)",
         ),
         (
+            "retry_backoff_max_seconds",
+            DEFAULT_RETRY_BACKOFF_MAX_SECONDS,
+            "ceiling for OUR backoff formula: min(base * 2^n, this)",
+        ),
+        (
+            "retry_after_max_seconds",
+            DEFAULT_RETRY_AFTER_MAX_SECONDS,
+            "ceiling for a SERVER Retry-After header (defense, not a model cap)",
+        ),
+        (
             "preflight_timeout_seconds",
             DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
             "timeout for preflight metadata calls, seconds",
@@ -102,6 +114,11 @@ def render_template() -> str:
             "probe_timeout_seconds",
             DEFAULT_PROBE_TIMEOUT_SECONDS,
             "timeout for the context-probe call, seconds",
+        ),
+        (
+            "timeout",
+            DEFAULT_TIMEOUT_SECONDS,
+            "per-agent request timeout, seconds (overridden by --timeout)",
         ),
         (
             "strict_lineage",
