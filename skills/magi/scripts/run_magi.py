@@ -29,6 +29,7 @@ import subprocess
 import sys
 import urllib.error
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -67,13 +68,20 @@ from synthesize import (  # noqa: E402
     load_agent_output,
 )
 from backend import AgentBackend  # noqa: E402
+from backoff import next_backoff, parse_retry_after  # noqa: E402
 from claude_backend import ClaudeBackend  # noqa: E402
 from ollama_backend import (  # noqa: E402
     TRANSPORT_CONNECTION_MARKERS,
     TRANSPORT_HTTP_PATTERN,
     OllamaBackend,
 )
-from ollama_config import ModelSpec, OllamaConfig, OllamaConfigError, resolve_config  # noqa: E402
+from ollama_config import (  # noqa: E402
+    DEFAULT_TIMEOUT_SECONDS,
+    ModelSpec,
+    OllamaConfig,
+    OllamaConfigError,
+    resolve_config,
+)
 from ollama_init import write_template  # noqa: E402
 from ollama_preflight import (  # noqa: E402
     CONTEXT_GUARD_ENFORCED,
@@ -181,6 +189,65 @@ def _max_attempts(raw: str) -> int:
     return value
 
 
+def _positive_timeout(raw: str) -> int:
+    """Validate ``--timeout``: a positive integer of seconds (``>= 1``).
+
+    The FLAG must be floored too (gate CP2 plan loop 5, Caspar): the TOML path is
+    floored by config validation (``ollama_config._MIN_TIMEOUT_SECONDS``), but a bare
+    ``type=int`` would let ``--timeout 0`` through to a 0-second timeout (immediate
+    failure on every request). Validated at the input boundary, matching the
+    ``_max_attempts`` convention above.
+
+    Args:
+        raw: The value exactly as it arrives from the command line.
+
+    Returns:
+        The validated integer.
+
+    Raises:
+        argparse.ArgumentTypeError: If it is not an integer, or is ``< 1``.
+            **Fails closed**: it never degrades to a silent default.
+    """
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--timeout must be an integer (got {raw!r})") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"--timeout must be >= 1 (got {value})")
+    return value
+
+
+def _resolve_timeout(flag: int | None, toml: float | None) -> float:
+    """Resolve the per-agent timeout: flag ``--timeout`` > TOML ``timeout`` > default.
+
+    Pure and total -- no I/O, never raises. The precedence matches every other
+    per-key config resolution in the project (env > repo > global > built-in default
+    collapses, here, to just flag > TOML > default since ``--timeout`` has no env
+    tier of its own).
+
+    Args:
+        flag: The parsed ``--timeout`` value, or ``None`` if the user did not pass it.
+        toml: The Ollama TOML's ``timeout`` (``OllamaConfig.timeout``), or ``None`` on
+            the Claude path (which has no TOML).
+
+    Returns:
+        The resolved timeout in seconds.
+
+    Example:
+        >>> _resolve_timeout(300, 600.0)
+        300.0
+        >>> _resolve_timeout(None, 600.0)
+        600.0
+        >>> _resolve_timeout(None, None)
+        900.0
+    """
+    if flag is not None:
+        return float(flag)
+    if toml is not None:
+        return toml
+    return DEFAULT_TIMEOUT_SECONDS
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments.
 
@@ -200,9 +267,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("input", nargs="?", help="Path to file or inline text to analyze")
     parser.add_argument(
         "--timeout",
-        type=int,
-        default=900,
-        help="Per-agent timeout in seconds (default: 900)",
+        type=_positive_timeout,
+        # None = "the user did not pass it" -> lets the TOML `timeout` win over the
+        # 900s default (MS3, R6); collapsing this to a hardcoded 900 would make
+        # `flag is not None` always true and the TOML value dead on arrival.
+        default=None,
+        help="Per-agent timeout in seconds, >= 1 (flag > TOML timeout > 900)",
     )
     parser.add_argument("--output-dir", help="Directory for agent outputs")
     parser.add_argument(
@@ -597,6 +667,72 @@ def _classify(exc: BaseException) -> str:
     return _FAIL_UNEXPECTED
 
 
+#: HTTP statuses where WAITING can clear the condition -> exponential backoff (MS3, R5).
+#: A permanent 500 just exhausts max_attempts and rotates; it never loops here.
+_TRANSIENT_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _retry_wait(
+    exc: Exception, classified: str, attempt: int, config: "RotationRuntimeConfig"
+) -> float:
+    """Seconds to sleep before the next retry, exhaustive over ``_classify``.
+
+    HTTP transient status -> exponential (honoring Retry-After); EVERYTHING else
+    retryable (timeout, connection reset, DNS, a non-transient HTTP status) ->
+    flat ``retry_backoff_seconds``. A schema failure never reaches here (the
+    loop's ``isinstance`` branch routes it to the feedback path with NO backoff,
+    BEFORE this is called). Falling to flat for any unrecognized category keeps
+    the branch total even if ``_classify`` grows a new category later.
+
+    Args:
+        exc: The failed attempt's exception (for status/retry_after/receipt).
+        classified: The ALREADY-computed ``_classify(exc)`` result -- the loop
+            computes it once and passes it, so ``_classify`` is never called
+            twice per exception (gate CP2 loop 1, Melchior).
+        attempt: 1-based attempt number within the model's budget.
+        config: The rotation runtime config (base, ceilings).
+
+    Returns:
+        Seconds to sleep (``>= 0``).
+    """
+    status = getattr(exc, "status", None)
+    if classified == _FAIL_HTTP and status in _TRANSIENT_HTTP_STATUS:
+        receipt = getattr(exc, "receipt", None) or datetime.now(timezone.utc)
+        # The cap (retry_after_max_seconds) is an ANTI-HANG defense against a hostile/
+        # buggy server (e.g. `Retry-After: 999999`), NOT a limit on the user's model.
+        # parse_retry_after applies it (§0.1 mandated inline comment).
+        retry_after = parse_retry_after(
+            getattr(exc, "retry_after", None), receipt, config.retry_after_max_seconds
+        )
+        wait = next_backoff(
+            attempt,
+            config.retry_backoff_seconds,
+            config.retry_backoff_max_seconds,
+            retry_after,
+        )
+        source = "Retry-After" if retry_after is not None else "formula"
+        # parse caps at min(seconds, cap), so the capped value can only be <= cap and
+        # equals cap iff the server asked for >= cap. The log says "at/over cap" (NOT
+        # "truncated"): a server asking exactly cap is not truncated, so an "exceeded"
+        # claim would be a false positive (spec R7; gate CP2 plan loop 2, Caspar).
+        if retry_after is not None and retry_after >= config.retry_after_max_seconds:
+            print(
+                f"[backoff] server Retry-After >= cap; using "
+                f"cap={config.retry_after_max_seconds:.0f}s",
+                file=sys.stderr,
+            )
+    else:
+        wait = config.retry_backoff_seconds  # flat: timeout + non-HTTP transport
+        source = "flat-timeout"
+    # Fields are non-secret (source literal, wait/status/attempt numeric); matches the
+    # project's stderr-print logging pattern (no `logging` module in run_magi.py).
+    print(
+        f"[backoff] {source} wait={wait:.1f}s status={status} attempt={attempt}",
+        file=sys.stderr,
+    )
+    return wait
+
+
 #: The retry causes that map to a KNOWN, distinct corrective instruction. Every
 #: :class:`verdict_markers.VerdictExtractionError` subclass gets its own entry, plus
 #: the two causes ``verdict_markers`` does not raise: a JSON-decode failure INSIDE an
@@ -670,6 +806,8 @@ class RotationRuntimeConfig:
     input_margin_pct: int
     probe_timeout_seconds: int
     api_key: str | None  # for redact_secrets at the rotation boundaries
+    retry_backoff_max_seconds: float  # MS3: ceiling for the exponential FORMULA
+    retry_after_max_seconds: float  # MS3: ceiling for a server-sent Retry-After
 
     @classmethod
     def from_config(cls, config: OllamaConfig) -> "RotationRuntimeConfig":
@@ -696,6 +834,8 @@ class RotationRuntimeConfig:
             input_margin_pct=config.input_margin_pct,
             probe_timeout_seconds=config.probe_timeout_seconds,
             api_key=config.api_key,
+            retry_backoff_max_seconds=config.retry_backoff_max_seconds,
+            retry_after_max_seconds=config.retry_after_max_seconds,
         )
 
 
@@ -846,7 +986,8 @@ async def _attempt_model(
         except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
             raise  # shutdown: never retried, never swallowed
         except Exception as exc:  # noqa: BLE001 -- classified and re-raised
-            if _classify(exc) == _FAIL_UNEXPECTED:
+            classified = _classify(exc)  # MS3: computed ONCE, reused below and by _retry_wait
+            if classified == _FAIL_UNEXPECTED:
                 # A TypeError/AttributeError from OUR code is not an endpoint failure.
                 # Retrying it would burn attempts, rotate the mage, and BURY the bug
                 # behind a degraded run (Balthasar, Checkpoint 2). Fail loud.
@@ -869,7 +1010,11 @@ async def _attempt_model(
                 break
             else:
                 attempt_prompt = prompt  # nothing to correct
-                await asyncio.sleep(ctx.config.retry_backoff_seconds)
+                # attempt+1 is 1-based; `attempt` is local to THIS model's loop
+                # (range(max_attempts_per_model)), so the backoff counter RESETS per
+                # model on rotation -- a fallback starts at attempt=1, giving that
+                # model's rate-limit a fresh window (§0.1 mandated inline comment).
+                await asyncio.sleep(_retry_wait(exc, classified, attempt + 1, ctx.config))
             on_retry()
     if last is None:
         # NOT an assert: ``python -O`` strips asserts, and this would then fall
@@ -1231,8 +1376,8 @@ def _maybe_enrich(
 async def select_backend(
     args: argparse.Namespace,
     prompt: str,
-) -> tuple[AgentBackend, dict[str, ModelSpec], RotationContext | None]:
-    """Return (backend, per-agent models, rotation context) for the chosen mode.
+) -> tuple[AgentBackend, dict[str, ModelSpec], RotationContext | None, float | None]:
+    """Return (backend, per-agent models, rotation context, TOML timeout) for the mode.
 
     Ollama path: resolve config once, run the preflight (which MEASURES the payload
     and enforces the lineage/capability/window guards), and assemble the whole
@@ -1252,10 +1397,17 @@ async def select_backend(
 
     Returns:
         Tuple of (backend instance, per-agent :class:`ModelSpec` map, rotation
-        context or ``None`` for the Claude path).
+        context or ``None`` for the Claude path, and the resolved TOML ``timeout``
+        (MS3, R6) or ``None`` on the Claude path -- the caller resolves the final
+        per-agent timeout via :func:`_resolve_timeout`, flag > TOML > default).
     """
     if not args.ollama:
-        return ClaudeBackend(), {n: ModelSpec(args.model, "anthropic") for n in AGENTS}, None
+        return (
+            ClaudeBackend(),
+            {n: ModelSpec(args.model, "anthropic") for n in AGENTS},
+            None,
+            None,
+        )
 
     config = resolve_config()  # EXACTLY once (invariant #6)
     result = await preflight(config, prompt)  # measures, validates, caches
@@ -1278,7 +1430,7 @@ async def select_backend(
         # frozen PreflightResult.digest_by_model must never be mutated by rotation).
         digest_by_model=dict(result.digest_by_model),
     )
-    return OllamaBackend(config), dict(config.models), rotation
+    return OllamaBackend(config), dict(config.models), rotation, config.timeout
 
 
 def _default_agents_dir() -> str:
@@ -2116,10 +2268,16 @@ def main() -> None:
         # exact ordering of the v4 sync call it replaces. The rotation's asyncio.Event
         # is only constructed (never awaited) in this loop, so it binds lazily to the
         # run_orchestrator loop on its first wait().
-        backend, agent_models, rotation = asyncio.run(select_backend(args, prompt))
+        backend, agent_models, rotation, toml_timeout = asyncio.run(select_backend(args, prompt))
     except (OllamaConfigError, OllamaPreflightError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    # MS3 (R6): flag --timeout > TOML timeout > 900s default, for BOTH backends. On
+    # the Claude path ``toml_timeout`` is always None, so this is exactly the v4
+    # behaviour (flag or 900). AUDITED: no other read of ``args.timeout`` survives
+    # below -- every per-agent timeout use goes through this single resolution.
+    resolved_timeout = int(_resolve_timeout(args.timeout, toml_timeout))
 
     is_temp_dir = args.output_dir is None
     if is_temp_dir:
@@ -2135,7 +2293,7 @@ def main() -> None:
         output_dir = create_output_dir(None, run_root)
         # Mark this run live with a per-run staleness bound derived from
         # --timeout (closes F9) so a concurrent session's cleanup skips it.
-        write_lock(output_dir, staleness_bound_for_timeout(args.timeout))
+        write_lock(output_dir, staleness_bound_for_timeout(resolved_timeout))
     else:
         output_dir = create_output_dir(args.output_dir)
 
@@ -2151,7 +2309,7 @@ def main() -> None:
         print(f"|  Model: {model_label}")
     else:
         print(f"|  Model: {args.model} ({MODEL_IDS[args.model]})")
-    print(f"|  Timeout: {args.timeout}s")
+    print(f"|  Timeout: {resolved_timeout}s")
     print(f"|  Output: {output_dir}")
     print("+==================================================+")
     print(flush=True)
@@ -2167,7 +2325,7 @@ def main() -> None:
                 agents_dir,
                 prompt,
                 output_dir,
-                args.timeout,
+                resolved_timeout,
                 agent_models=agent_models,
                 backend=backend,
                 rotation=rotation,
