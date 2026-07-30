@@ -821,6 +821,40 @@ class TestModelsModule:
         assert set(MODEL_IDS.keys()) == {"opus", "sonnet", "haiku"}
         assert all(isinstance(v, str) and v for v in MODEL_IDS.values())
 
+    def test_every_short_name_resolves_to_its_pinned_id(self):
+        """All three resolved IDs are pinned, not just the one the backend test covers.
+
+        `test_claude_backend` asserts the resolved ID for ``opus`` only, so a
+        typo in the ``sonnet`` or ``haiku`` value would ship invisible to the
+        suite: nothing else in the repository reads a model ID, and the CLI
+        rejects a bad one only at runtime, on a paid call.
+        """
+        from models import MODEL_IDS
+
+        assert dict(MODEL_IDS) == {
+            "opus": "claude-opus-5",
+            "sonnet": "claude-sonnet-5",
+            "haiku": "claude-haiku-4-5",
+        }
+
+    def test_no_model_id_carries_a_date_suffix(self):
+        """The 5.4.0 aliases-only invariant, executed rather than asserted in prose.
+
+        ``haiku`` was pinned to ``claude-haiku-4-5-20251001`` until 5.4.0. A
+        dated snapshot ages out silently, so the registry docstring now claims
+        every ID is a bare alias — a claim worth nothing unless something runs
+        it.
+        """
+        import re
+
+        from models import MODEL_IDS
+
+        dated = {k: v for k, v in MODEL_IDS.items() if re.search(r"-\d{8}$", v)}
+        assert not dated, (
+            f"model IDs carrying a date suffix: {dated}. The registry promises "
+            f"aliases only; use the bare alias (e.g. 'claude-haiku-4-5')."
+        )
+
     def test_valid_models_derived_from_model_ids(self):
         """VALID_MODELS must stay in lockstep with MODEL_IDS.keys()."""
         from models import MODEL_IDS, VALID_MODELS
