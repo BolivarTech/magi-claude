@@ -844,15 +844,22 @@ class TestModelsModule:
         dated snapshot ages out silently, so the registry docstring now claims
         every ID is a bare alias — a claim worth nothing unless something runs
         it.
+
+        Yes, the pinned-dict test above already implies this for *today's*
+        values. This one outlives them: it is what a future contributor editing
+        the registry trips over, and it states the rule rather than the data.
+        The pattern is deliberately **unanchored** — a date is a date wherever
+        it sits (``claude-opus-4-5@20251101`` is the Vertex form), so anchoring
+        it to the end would advertise a wider invariant than it enforces.
         """
         import re
 
         from models import MODEL_IDS
 
-        dated = {k: v for k, v in MODEL_IDS.items() if re.search(r"-\d{8}$", v)}
+        dated = {k: v for k, v in MODEL_IDS.items() if re.search(r"\d{8}", v)}
         assert not dated, (
-            f"model IDs carrying a date suffix: {dated}. The registry promises "
-            f"aliases only; use the bare alias (e.g. 'claude-haiku-4-5')."
+            f"model IDs carrying a date: {dated}. The registry promises aliases "
+            f"only; use the bare alias (e.g. 'claude-haiku-4-5')."
         )
 
     def test_valid_models_derived_from_model_ids(self):
@@ -4305,11 +4312,17 @@ class TestFindingGuardWiring:
         )
 
 
-class TestInputSizeWiring:
-    """Input-size telemetry + detect-and-warn wiring in run_magi.main()."""
+class TestSavedReportWiring:
+    """Blocks that run_magi.main() writes into the saved magi-report.json.
+
+    Input-size telemetry, model attribution, and the detect-and-warn wiring
+    around them. They share one harness because every one of these assertions
+    needs the same thing: a full pass through ``main()`` with everything else
+    stubbed, then the report read back off disk.
+    """
 
     def _patch_main(self, tmp_path, monkeypatch, *, input_body="BODY", extra_argv=None):
-        """Stub everything around main() except the input-size wiring under test.
+        """Stub everything around main() except the report wiring under test.
 
         Returns ``created`` dict (keyed ``"dir"``) so callers can inspect the
         saved magi-report.json, and a StringIO capturing stderr.
