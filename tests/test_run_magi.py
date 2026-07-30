@@ -4455,8 +4455,9 @@ class TestSavedReportWiring:
         reports are kept as audit artifacts, and the corpus of past gates is
         read back to compare judge behaviour over time.
 
-        Both halves are recorded on purpose: ``requested`` is the operator's
-        intent, ``resolved`` is what the CLI was actually handed.
+        Each half is recorded on purpose: ``short_name`` plus ``source`` say what
+        was chosen and by whom, ``resolved`` is what the CLI was handed, and
+        ``served`` is what answered.
 
         Lives in this class deliberately: it owns the ``_patch_main`` harness
         that exercises a full run and reads the saved report back off disk,
@@ -4464,7 +4465,7 @@ class TestSavedReportWiring:
         """
         import json
 
-        created, _ = self._patch_main(tmp_path, monkeypatch)
+        created, buf = self._patch_main(tmp_path, monkeypatch)
 
         report_path = os.path.join(created["dir"], "magi-report.json")
         with open(report_path, encoding="utf-8") as fh:
@@ -4472,6 +4473,16 @@ class TestSavedReportWiring:
 
         assert "model" in saved, "magi-report.json must carry a model block"
         block = saved["model"]
+
+        assert block["unattributed"], (
+            "this harness writes no raw envelopes, so every agent is unattributed "
+            "and the block must SAY so rather than leaving served empty in silence"
+        )
+        assert "could not attribute" in buf.getvalue(), (
+            "a Claude-path run that attributes nothing must warn on stderr, the same "
+            "way a $0.00 aggregated cost already does -- silence is what makes a "
+            "field that quietly stopped working look like a field with nothing to say"
+        )
 
         assert block["backend"] == "claude"
         assert block["short_name"] == "opus"
@@ -4493,9 +4504,13 @@ class TestSavedReportWiring:
         from run_magi import _model_block
 
         claude = _model_block(
-            argparse.Namespace(ollama=False, model="opus", model_source="flag"), {"caspar": ["x"]}
+            argparse.Namespace(ollama=False, model="opus", model_source="flag"),
+            {"caspar": ["x"]},
+            ["melchior", "balthasar"],
         )
-        ollama = _model_block(argparse.Namespace(ollama=True, model=None, model_source=None), {})
+        ollama = _model_block(
+            argparse.Namespace(ollama=True, model=None, model_source=None), {}, []
+        )
 
         assert claude.keys() == ollama.keys(), f"shapes differ: {claude.keys()} vs {ollama.keys()}"
         assert ollama == {
@@ -4503,10 +4518,18 @@ class TestSavedReportWiring:
             "short_name": None,
             "source": None,
             "resolved": None,
-            "served": {},
-        }, "on --ollama every Claude-shaped field is explicitly null, never absent"
+            "served": None,
+            "unattributed": None,
+        }, (
+            "on --ollama every Claude-shaped field is explicitly null. served is "
+            "null rather than {} so it cannot be read as 'attribution was attempted "
+            "and found nothing' -- on that path there is nothing to attribute here at "
+            "all, because per-mage models (and any rotation) live in the rotation "
+            "telemetry instead"
+        )
         assert claude["resolved"] == "claude-opus-5"
         assert claude["served"] == {"caspar": ["x"]}
+        assert claude["unattributed"] == ["balthasar", "melchior"], "sorted, for a stable artifact"
 
     def test_input_size_block_in_saved_report(self, tmp_path, monkeypatch):
         """Telemetry: magi-report.json on disk carries an input_size block with
