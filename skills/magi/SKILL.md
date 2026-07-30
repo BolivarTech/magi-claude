@@ -56,7 +56,7 @@ If the user provided files, include their contents (or relevant excerpts) in the
 ### Step 3: Launch the three agents
 
 **Model selection:** The default model for all agents is the **opus** short name.
-The Anthropic model ID it resolves to (e.g. `claude-opus-4-7`) is owned by
+The Anthropic model ID it resolves to (e.g. `claude-opus-5`) is owned by
 `skills/magi/scripts/models.py`, so future model bumps are a one-line edit in that
 registry — never hardcode the resolved ID here. If the user explicitly requests
 a different model in their prompt (e.g., "usa sonnet", "with haiku",

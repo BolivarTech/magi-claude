@@ -434,9 +434,13 @@ The orchestrator supports three Claude models via the `--model` flag:
 
 | Short Name | Full Model ID | Use Case |
 |------------|--------------|----------|
-| `opus` | `claude-opus-4-6` | Default. Deepest analysis, highest quality. |
-| `sonnet` | `claude-sonnet-4-6` | Faster, good balance of quality and speed. |
-| `haiku` | `claude-haiku-4-5-20251001` | Fastest, suitable for quick reviews. |
+| `opus` | `claude-opus-5` | Default. Deepest analysis, highest quality. |
+| `sonnet` | `claude-sonnet-5` | Faster, good balance of quality and speed. |
+| `haiku` | `claude-haiku-4-5` | Fastest, suitable for quick reviews. |
+
+`skills/magi/scripts/models.py` is the single source of truth for this mapping —
+this table is a convenience copy and can lag it. When they disagree, the registry
+wins.
 
 ```bash
 # Default (opus)
