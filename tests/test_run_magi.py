@@ -4458,11 +4458,44 @@ class TestInputSizeWiring:
             saved = json.load(fh)
 
         assert "model" in saved, "magi-report.json must carry a model block"
-        assert saved["model"] == {
-            "backend": "claude",
-            "requested": "opus",
-            "resolved": "claude-opus-5",
-        }
+        block = saved["model"]
+
+        assert block["backend"] == "claude"
+        assert block["short_name"] == "opus"
+        assert block["source"] == "mode-default", "no --model was passed in this run"
+        assert block["resolved"] == "claude-opus-5"
+        assert isinstance(block["served"], dict), (
+            "served maps agent -> the model IDs its envelope reports; empty when unknown"
+        )
+
+    def test_model_block_has_one_shape_on_both_backends(self):
+        """The block is indexable without branching on backend.
+
+        Two shapes under one key push a conditional into every consumer -- the
+        report renderer, the corpus collector, and any future analysis over
+        archived gates. Nulls say "not applicable" in the same shape.
+        """
+        import argparse
+
+        from run_magi import _model_block
+
+        claude = _model_block(
+            argparse.Namespace(ollama=False, model="opus", model_source="flag"), {"caspar": ["x"]}
+        )
+        ollama = _model_block(
+            argparse.Namespace(ollama=True, model=None, model_source=None), {}
+        )
+
+        assert claude.keys() == ollama.keys(), f"shapes differ: {claude.keys()} vs {ollama.keys()}"
+        assert ollama == {
+            "backend": "ollama",
+            "short_name": None,
+            "source": None,
+            "resolved": None,
+            "served": {},
+        }, "on --ollama every Claude-shaped field is explicitly null, never absent"
+        assert claude["resolved"] == "claude-opus-5"
+        assert claude["served"] == {"caspar": ["x"]}
 
     def test_input_size_block_in_saved_report(self, tmp_path, monkeypatch):
         """Telemetry: magi-report.json on disk carries an input_size block with
