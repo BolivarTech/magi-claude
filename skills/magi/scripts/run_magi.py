@@ -421,8 +421,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # ``args.mode is not None`` guards the dry run, which HAS no mode: the model default is
     # keyed by mode, and a lookup of ``None`` is a ``KeyError`` -- i.e. ``--check-prompts``
     # would die inside argument parsing, before the guard it exists to run.
+    #
+    # ``model_source`` is set BEFORE the fill, because afterwards the operator's
+    # choice and the mode's default are the same value and the difference is
+    # unrecoverable. Downstream telemetry records what was chosen AND who chose
+    # it; without this, "requested: opus" cannot be told apart from "nobody
+    # asked, this mode defaults to opus". ``None`` means no Claude model was
+    # chosen at all (--ollama, or the mode-less dry run).
+    args.model_source = "flag" if args.model is not None else None
     if not args.ollama and args.model is None and args.mode is not None:
         args.model = MODE_DEFAULT_MODELS[args.mode]
+        args.model_source = "mode-default"
     return args
 
 
