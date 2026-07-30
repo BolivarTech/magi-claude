@@ -4482,9 +4482,7 @@ class TestInputSizeWiring:
         claude = _model_block(
             argparse.Namespace(ollama=False, model="opus", model_source="flag"), {"caspar": ["x"]}
         )
-        ollama = _model_block(
-            argparse.Namespace(ollama=True, model=None, model_source=None), {}
-        )
+        ollama = _model_block(argparse.Namespace(ollama=True, model=None, model_source=None), {})
 
         assert claude.keys() == ollama.keys(), f"shapes differ: {claude.keys()} vs {ollama.keys()}"
         assert ollama == {

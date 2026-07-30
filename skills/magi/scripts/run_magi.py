@@ -102,6 +102,7 @@ from temp_dirs import (  # noqa: E402
 from review_context import enrich_code_review_context, resolve_diff  # noqa: E402
 from cost import aggregate_cost  # noqa: E402
 from input_size import WARN_INPUT_TOKENS, check_input_size, estimate_tokens  # noqa: E402
+from served_model import read_served_models  # noqa: E402
 from finding_validation import parse_diff_ranges, validate_findings  # noqa: E402
 from prompt_guard import AgentPromptGuard, PromptContractError  # noqa: E402
 from retry_feedback import (  # noqa: E402
@@ -433,6 +434,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.model = MODE_DEFAULT_MODELS[args.mode]
         args.model_source = "mode-default"
     return args
+
+
+def _model_block(args: argparse.Namespace, served: dict[str, list[str]]) -> dict[str, object]:
+    """Build the report's model-attribution block.
+
+    One shape for both backends. Two shapes under a single key would push a
+    conditional into every consumer -- the renderer, the corpus collector, and
+    any later analysis over archived gates -- so the fields that do not apply
+    are explicitly ``null`` rather than absent.
+
+    Args:
+        args: Parsed arguments; reads ``ollama``, ``model`` and ``model_source``.
+        served: Agent → served model IDs, from :func:`read_served_models`.
+            Empty on the Ollama path, whose envelopes carry no ``modelUsage``;
+            that path's per-mage models reach the report through the rotation
+            telemetry instead.
+
+    Returns:
+        ``{backend, short_name, source, resolved, served}``. ``short_name`` is
+        the post-default short name and ``source`` says who chose it, so the
+        block never presents a mode default as an operator request.
+    """
+    if args.ollama:
+        return {
+            "backend": "ollama",
+            "short_name": None,
+            "source": None,
+            "resolved": None,
+            "served": served,
+        }
+    return {
+        "backend": "claude",
+        "short_name": args.model,
+        "source": args.model_source,
+        "resolved": resolve_model(args.model),
+        "served": served,
+    }
 
 
 async def launch_agent(
@@ -2450,26 +2488,15 @@ def main() -> None:
         "warn_threshold_tokens": args.warn_input_tokens,
     }
 
-    # Attribution (5.4.0): record WHICH model produced this verdict, same
-    # set-before-json.dump discipline as the two blocks above. Every Claude
-    # model ID is now a floating alias, and an alias is not a fixed point --
-    # the same string can be served by a revised model later. These reports
-    # are audit artifacts read back long after the run, so the short name
-    # alone ("opus") no longer identifies what judged the input.
+    # Attribution (5.4.0): record which model produced this verdict, same
+    # set-before-json.dump discipline as the two blocks above.
     #
-    # On --ollama there is deliberately NO model field: models are per-mage
-    # (and a mage may have ROTATED mid-run), so any single value here would be
-    # a fabrication. That path's per-mage models already reach the report
-    # through the rotation telemetry; ``backend`` is what makes the absence
-    # legible rather than looking like a missing key.
-    if args.ollama:
-        report["model"] = {"backend": "ollama"}
-    else:
-        report["model"] = {
-            "backend": "claude",
-            "requested": args.model,
-            "resolved": resolve_model(args.model),
-        }
+    # ``resolved`` is only what the CLI was HANDED, and every Claude model ID is
+    # now a floating alias -- so on its own it cannot tell two servings of
+    # ``claude-opus-5`` apart, which is the very drift this block exists to make
+    # visible. ``served`` closes that: it is read back out of each agent's raw
+    # envelope, i.e. what actually answered.
+    report["model"] = _model_block(args, read_served_models(output_dir, list(AGENTS)))
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
