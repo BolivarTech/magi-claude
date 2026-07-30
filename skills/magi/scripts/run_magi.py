@@ -293,9 +293,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=VALID_MODELS,
         default=None,
         help=(
-            "LLM model for all agents. When omitted, the default depends "
-            "on the mode: opus for code-review and design, sonnet for "
-            "analysis. Pass --model explicitly to override."
+            "LLM model for all agents. When omitted, the per-mode default "
+            "from models.MODE_DEFAULT_MODELS applies (currently opus for all "
+            "three modes). Pass --model explicitly to override."
         ),
     )
     parser.add_argument(
