@@ -6,9 +6,13 @@
 
 Single source of truth for the Claude model short names accepted on the
 MAGI command line and the Anthropic model IDs they resolve to. Bumping a
-model (e.g. from ``claude-opus-4-6`` to a future ``claude-opus-5``) is a
-one-line edit here; the orchestrator in :mod:`run_magi` imports the
-mapping without needing to change.
+model (e.g. from ``claude-opus-4-7`` to ``claude-opus-5``) is a one-line
+edit here; the orchestrator in :mod:`run_magi` imports the mapping
+without needing to change.
+
+Every ID is an **alias without a date suffix** — the supported, stable
+form. ``haiku`` was pinned to the dated ``claude-haiku-4-5-20251001``
+until 5.4.0; a dated snapshot buys nothing here and silently ages out.
 """
 
 from __future__ import annotations
@@ -17,9 +21,9 @@ from types import MappingProxyType
 from typing import Mapping
 
 _MODEL_IDS_MUTABLE: dict[str, str] = {
-    "opus": "claude-opus-4-7",
-    "sonnet": "claude-sonnet-4-6",
-    "haiku": "claude-haiku-4-5-20251001",
+    "opus": "claude-opus-5",
+    "sonnet": "claude-sonnet-5",
+    "haiku": "claude-haiku-4-5",
 }
 
 #: Read-only view of the short-name → Anthropic model-ID mapping.
