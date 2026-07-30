@@ -2441,6 +2441,27 @@ def main() -> None:
         "warn_threshold_tokens": args.warn_input_tokens,
     }
 
+    # Attribution (5.4.0): record WHICH model produced this verdict, same
+    # set-before-json.dump discipline as the two blocks above. Every Claude
+    # model ID is now a floating alias, and an alias is not a fixed point --
+    # the same string can be served by a revised model later. These reports
+    # are audit artifacts read back long after the run, so the short name
+    # alone ("opus") no longer identifies what judged the input.
+    #
+    # On --ollama there is deliberately NO model field: models are per-mage
+    # (and a mage may have ROTATED mid-run), so any single value here would be
+    # a fabrication. That path's per-mage models already reach the report
+    # through the rotation telemetry; ``backend`` is what makes the absence
+    # legible rather than looking like a missing key.
+    if args.ollama:
+        report["model"] = {"backend": "ollama"}
+    else:
+        report["model"] = {
+            "backend": "claude",
+            "requested": args.model,
+            "resolved": resolve_model(args.model),
+        }
+
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
