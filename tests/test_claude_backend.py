@@ -31,7 +31,7 @@ def test_run_invokes_claude_with_resolved_model(monkeypatch, tmp_path):
 
     assert b'"result"' in raw
     assert captured["args"][0] == "claude"
-    assert "claude-opus-4-7" in captured["args"]  # resolve_model("opus")
+    assert "claude-opus-5" in captured["args"]  # resolve_model("opus")
     assert str(sys_prompt) in captured["args"]
 
 

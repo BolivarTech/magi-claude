@@ -102,6 +102,7 @@ from temp_dirs import (  # noqa: E402
 from review_context import enrich_code_review_context, resolve_diff  # noqa: E402
 from cost import aggregate_cost  # noqa: E402
 from input_size import WARN_INPUT_TOKENS, check_input_size, estimate_tokens  # noqa: E402
+from served_model import read_served_models  # noqa: E402
 from finding_validation import parse_diff_ranges, validate_findings  # noqa: E402
 from prompt_guard import AgentPromptGuard, PromptContractError  # noqa: E402
 from retry_feedback import (  # noqa: E402
@@ -293,9 +294,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=VALID_MODELS,
         default=None,
         help=(
-            "LLM model for all agents. When omitted, the default depends "
-            "on the mode: opus for code-review and design, sonnet for "
-            "analysis. Pass --model explicitly to override."
+            "LLM model for all agents. When omitted, the per-mode default "
+            "from models.MODE_DEFAULT_MODELS applies (currently opus for all "
+            "three modes). Pass --model explicitly to override."
         ),
     )
     parser.add_argument(
@@ -380,7 +381,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Scaffold ./.claude/magi-ollama.toml from defaults and exit.",
     )
-    parser.set_defaults(show_status=True, enrich=True)
+    # ``model_source`` is declared here with its siblings, not only assigned in
+    # the body below: a hand-built Namespace (tests, embedders) would otherwise
+    # reach the report step without it and crash AFTER the verdict exists.
+    parser.set_defaults(show_status=True, enrich=True, model_source=None)
     args = parser.parse_args(argv)
     # ``--keep-runs 0`` is ambiguous: a naive reading is "keep nothing"
     # (wipe), but the legacy contract for ``cleanup_old_runs(keep)`` treats
@@ -421,9 +425,69 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # ``args.mode is not None`` guards the dry run, which HAS no mode: the model default is
     # keyed by mode, and a lookup of ``None`` is a ``KeyError`` -- i.e. ``--check-prompts``
     # would die inside argument parsing, before the guard it exists to run.
+    #
+    # ``model_source`` is set BEFORE the fill, because afterwards the operator's
+    # choice and the mode's default are the same value and the difference is
+    # unrecoverable. Downstream telemetry records what was chosen AND who chose
+    # it; without this, "requested: opus" cannot be told apart from "nobody
+    # asked, this mode defaults to opus". ``None`` means no Claude model was
+    # chosen at all (--ollama, or the mode-less dry run).
+    args.model_source = "flag" if args.model is not None else None
     if not args.ollama and args.model is None and args.mode is not None:
         args.model = MODE_DEFAULT_MODELS[args.mode]
+        args.model_source = "mode-default"
     return args
+
+
+def _model_block(
+    args: argparse.Namespace, served: dict[str, list[str]], unattributed: list[str]
+) -> dict[str, object]:
+    """Build the report's model-attribution block.
+
+    One shape for both backends. Two shapes under a single key would push a
+    conditional into every consumer -- the renderer, the corpus collector, and
+    any later analysis over archived gates -- so the fields that do not apply
+    are explicitly ``null`` rather than absent.
+
+    ``served`` is ``null`` (not ``{}``) on the Ollama path, because an empty
+    mapping would read as "attribution ran and found nothing" when the truth is
+    that there is nothing to attribute here at all: models there are per-mage
+    and a mage may have rotated, and both reach the report through the rotation
+    telemetry. Distinguishing *not applicable* from *not known* is the whole
+    point of the pair.
+
+    Args:
+        args: Parsed arguments; reads ``ollama``, ``model`` and ``model_source``.
+        served: Agent → confirmed served model IDs, from
+            :func:`read_served_models`.
+        unattributed: Agents with no confirmed identity. Sorted here rather than
+            trusted from the caller: the block IS the archived artifact, and a
+            stable field order should not depend on every call site remembering
+            it. Empty means every agent was attributed.
+
+    Returns:
+        ``{backend, short_name, source, resolved, served, unattributed}``.
+        ``short_name`` is the post-default short name and ``source`` says who
+        chose it, so the block never presents a mode default as an operator
+        request.
+    """
+    if args.ollama:
+        return {
+            "backend": "ollama",
+            "short_name": None,
+            "source": None,
+            "resolved": None,
+            "served": None,
+            "unattributed": None,
+        }
+    return {
+        "backend": "claude",
+        "short_name": args.model,
+        "source": getattr(args, "model_source", None),
+        "resolved": resolve_model(args.model),
+        "served": served,
+        "unattributed": sorted(unattributed),
+    }
 
 
 async def launch_agent(
@@ -2440,6 +2504,28 @@ def main() -> None:
         "oversize": oversize,
         "warn_threshold_tokens": args.warn_input_tokens,
     }
+
+    # Attribution (5.4.0): record which model produced this verdict, same
+    # set-before-json.dump discipline as the two blocks above.
+    #
+    # ``resolved`` is only what the CLI was HANDED, and every Claude model ID is
+    # now a floating alias -- so on its own it cannot tell two servings of
+    # ``claude-opus-5`` apart, which is the very drift this block exists to make
+    # visible. ``served`` closes that: it is read back out of each agent's raw
+    # envelope, i.e. what actually answered.
+    served = read_served_models(output_dir, list(AGENTS))
+    unattributed = sorted(set(AGENTS) - set(served))
+    report["model"] = _model_block(args, served, unattributed)
+    # Symmetric with the $0.00 cost warning above, and for the same reason: a
+    # telemetry field that quietly stopped working is indistinguishable from one
+    # with nothing to report. Attributing NONE of three agents on the Claude
+    # path means the envelope contract moved -- say so once, on stderr.
+    if not args.ollama and report["agents"] and not served:
+        print(
+            "[!] WARNING: could not attribute any agent to a served model; the "
+            "CLI may have renamed modelUsage/canonicalModel — check raw envelopes.",
+            file=sys.stderr,
+        )
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:

@@ -821,6 +821,47 @@ class TestModelsModule:
         assert set(MODEL_IDS.keys()) == {"opus", "sonnet", "haiku"}
         assert all(isinstance(v, str) and v for v in MODEL_IDS.values())
 
+    def test_every_short_name_resolves_to_its_pinned_id(self):
+        """All three resolved IDs are pinned, not just the one the backend test covers.
+
+        `test_claude_backend` asserts the resolved ID for ``opus`` only, so a
+        typo in the ``sonnet`` or ``haiku`` value would ship invisible to the
+        suite: nothing else in the repository reads a model ID, and the CLI
+        rejects a bad one only at runtime, on a paid call.
+        """
+        from models import MODEL_IDS
+
+        assert dict(MODEL_IDS) == {
+            "opus": "claude-opus-5",
+            "sonnet": "claude-sonnet-5",
+            "haiku": "claude-haiku-4-5",
+        }
+
+    def test_no_model_id_carries_a_date_suffix(self):
+        """The 5.4.0 aliases-only invariant, executed rather than asserted in prose.
+
+        ``haiku`` was pinned to ``claude-haiku-4-5-20251001`` until 5.4.0. A
+        dated snapshot ages out silently, so the registry docstring now claims
+        every ID is a bare alias — a claim worth nothing unless something runs
+        it.
+
+        Yes, the pinned-dict test above already implies this for *today's*
+        values. This one outlives them: it is what a future contributor editing
+        the registry trips over, and it states the rule rather than the data.
+        The pattern is deliberately **unanchored** — a date is a date wherever
+        it sits (``claude-opus-4-5@20251101`` is the Vertex form), so anchoring
+        it to the end would advertise a wider invariant than it enforces.
+        """
+        import re
+
+        from models import MODEL_IDS
+
+        dated = {k: v for k, v in MODEL_IDS.items() if re.search(r"\d{8}", v)}
+        assert not dated, (
+            f"model IDs carrying a date: {dated}. The registry promises aliases "
+            f"only; use the bare alias (e.g. 'claude-haiku-4-5')."
+        )
+
     def test_valid_models_derived_from_model_ids(self):
         """VALID_MODELS must stay in lockstep with MODEL_IDS.keys()."""
         from models import MODEL_IDS, VALID_MODELS
@@ -4271,11 +4312,17 @@ class TestFindingGuardWiring:
         )
 
 
-class TestInputSizeWiring:
-    """Input-size telemetry + detect-and-warn wiring in run_magi.main()."""
+class TestSavedReportWiring:
+    """Blocks that run_magi.main() writes into the saved magi-report.json.
+
+    Input-size telemetry, model attribution, and the detect-and-warn wiring
+    around them. They share one harness because every one of these assertions
+    needs the same thing: a full pass through ``main()`` with everything else
+    stubbed, then the report read back off disk.
+    """
 
     def _patch_main(self, tmp_path, monkeypatch, *, input_body="BODY", extra_argv=None):
-        """Stub everything around main() except the input-size wiring under test.
+        """Stub everything around main() except the report wiring under test.
 
         Returns ``created`` dict (keyed ``"dir"``) so callers can inspect the
         saved magi-report.json, and a StringIO capturing stderr.
@@ -4397,6 +4444,93 @@ class TestInputSizeWiring:
         assert "REPORT" in capsys.readouterr().out
         assert not (tmp_path / "verdict.txt").exists()
 
+    def test_model_block_in_saved_report_attributes_the_verdict(self, tmp_path, monkeypatch):
+        """Attribution: magi-report.json records WHICH model produced the verdict.
+
+        5.4.0 moved every model ID to a floating alias. An alias is not a fixed
+        point: ``claude-opus-5`` served today and ``claude-opus-5`` served after
+        a provider-side revision are the same string and not the same model. A
+        report that names only the short name (or nothing) stops being
+        attributable the moment the alias moves -- which matters because these
+        reports are kept as audit artifacts, and the corpus of past gates is
+        read back to compare judge behaviour over time.
+
+        Each half is recorded on purpose: ``short_name`` plus ``source`` say what
+        was chosen and by whom, ``resolved`` is what the CLI was handed, and
+        ``served`` is what answered.
+
+        Lives in this class deliberately: it owns the ``_patch_main`` harness
+        that exercises a full run and reads the saved report back off disk,
+        which is what every saved-report-wiring assertion needs.
+        """
+        import json
+
+        created, buf = self._patch_main(tmp_path, monkeypatch)
+
+        report_path = os.path.join(created["dir"], "magi-report.json")
+        with open(report_path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+
+        assert "model" in saved, "magi-report.json must carry a model block"
+        block = saved["model"]
+
+        assert block["unattributed"], (
+            "this harness writes no raw envelopes, so every agent is unattributed "
+            "and the block must SAY so rather than leaving served empty in silence"
+        )
+        assert "could not attribute" in buf.getvalue(), (
+            "a Claude-path run that attributes nothing must warn on stderr, the same "
+            "way a $0.00 aggregated cost already does -- silence is what makes a "
+            "field that quietly stopped working look like a field with nothing to say"
+        )
+
+        assert block["backend"] == "claude"
+        assert block["short_name"] == "opus"
+        assert block["source"] == "mode-default", "no --model was passed in this run"
+        assert block["resolved"] == "claude-opus-5"
+        assert isinstance(block["served"], dict), (
+            "served maps agent -> the model IDs its envelope reports; empty when unknown"
+        )
+
+    def test_model_block_has_one_shape_on_both_backends(self):
+        """The block is indexable without branching on backend.
+
+        Two shapes under one key push a conditional into every consumer -- the
+        report renderer, the corpus collector, and any future analysis over
+        archived gates. Nulls say "not applicable" in the same shape.
+        """
+        import argparse
+
+        from run_magi import _model_block
+
+        claude = _model_block(
+            argparse.Namespace(ollama=False, model="opus", model_source="flag"),
+            {"caspar": ["x"]},
+            ["melchior", "balthasar"],
+        )
+        ollama = _model_block(
+            argparse.Namespace(ollama=True, model=None, model_source=None), {}, []
+        )
+
+        assert claude.keys() == ollama.keys(), f"shapes differ: {claude.keys()} vs {ollama.keys()}"
+        assert ollama == {
+            "backend": "ollama",
+            "short_name": None,
+            "source": None,
+            "resolved": None,
+            "served": None,
+            "unattributed": None,
+        }, (
+            "on --ollama every Claude-shaped field is explicitly null. served is "
+            "null rather than {} so it cannot be read as 'attribution was attempted "
+            "and found nothing' -- on that path there is nothing to attribute here at "
+            "all, because per-mage models (and any rotation) live in the rotation "
+            "telemetry instead"
+        )
+        assert claude["resolved"] == "claude-opus-5"
+        assert claude["served"] == {"caspar": ["x"]}
+        assert claude["unattributed"] == ["balthasar", "melchior"], "sorted, for a stable artifact"
+
     def test_input_size_block_in_saved_report(self, tmp_path, monkeypatch):
         """Telemetry: magi-report.json on disk carries an input_size block with
         chars and est_tokens fields."""
@@ -4461,7 +4595,15 @@ class TestInputSizeWiring:
 
     def test_no_warning_when_threshold_not_exceeded(self, tmp_path, monkeypatch):
         """Detect-and-warn: when estimated tokens do NOT exceed --warn-input-tokens,
-        no [!] WARNING is emitted to stderr."""
+        no oversize [!] WARNING is emitted to stderr.
+
+        Scoped to the oversize warning specifically. It once asserted that
+        stderr carried no ``[!] WARNING`` at all, which was equivalent while
+        that was the only warning main() could emit -- it no longer is (a run
+        that attributes no agent to a served model warns too, and this harness
+        writes no envelopes). Asserting on the whole channel would make this
+        test fail for reasons that have nothing to do with input size.
+        """
         body = "x" * 400  # 400 chars -> 100 est tokens, not > 200 threshold
         _, buf = self._patch_main(
             tmp_path,
@@ -4470,8 +4612,8 @@ class TestInputSizeWiring:
             extra_argv=["--warn-input-tokens", "200"],
         )
         err = buf.getvalue()
-        assert "[!] WARNING" not in err, (
-            f"[!] WARNING must NOT appear when threshold is not exceeded; got:\n{err!r}"
+        assert "exceeds" not in err and "tokens" not in err, (
+            f"no oversize warning may appear when the threshold is not exceeded; got:\n{err!r}"
         )
 
     def test_input_size_chars_measures_raw_input_not_enriched(self, tmp_path, monkeypatch):
@@ -4878,6 +5020,25 @@ def test_ollama_skips_claude_model_default():
     args = parse_args(["code-review", "x", "--ollama"])
     assert args.ollama is True
     assert args.model is None  # NOT filled with MODE_DEFAULT_MODELS
+    assert args.model_source is None  # no Claude model was chosen at all
+
+
+def test_model_source_distinguishes_operator_intent_from_mode_default():
+    """``args.model`` alone cannot say WHO chose the model.
+
+    ``parse_args`` fills an omitted ``--model`` from ``MODE_DEFAULT_MODELS``,
+    so by the time anything downstream reads ``args.model`` the operator's
+    choice and the mode's default are the same value. A saved report that
+    claims to record what was *requested* while reading the post-mutation
+    value is recording the default and calling it intent.
+    """
+    from run_magi import parse_args
+
+    assert parse_args(["code-review", "x"]).model_source == "mode-default"
+    assert parse_args(["code-review", "x", "--model", "sonnet"]).model_source == "flag"
+    assert parse_args(["code-review", "x", "--model", "opus"]).model_source == "flag", (
+        "passing the mode's default EXPLICITLY is still an operator choice"
+    )
 
 
 def test_ollama_with_explicit_model_errors():
