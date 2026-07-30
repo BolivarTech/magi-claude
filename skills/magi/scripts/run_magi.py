@@ -381,7 +381,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Scaffold ./.claude/magi-ollama.toml from defaults and exit.",
     )
-    parser.set_defaults(show_status=True, enrich=True)
+    # ``model_source`` is declared here with its siblings, not only assigned in
+    # the body below: a hand-built Namespace (tests, embedders) would otherwise
+    # reach the report step without it and crash AFTER the verdict exists.
+    parser.set_defaults(show_status=True, enrich=True, model_source=None)
     args = parser.parse_args(argv)
     # ``--keep-runs 0`` is ambiguous: a naive reading is "keep nothing"
     # (wipe), but the legacy contract for ``cleanup_old_runs(keep)`` treats
@@ -436,7 +439,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _model_block(args: argparse.Namespace, served: dict[str, list[str]]) -> dict[str, object]:
+def _model_block(
+    args: argparse.Namespace, served: dict[str, list[str]], unattributed: list[str]
+) -> dict[str, object]:
     """Build the report's model-attribution block.
 
     One shape for both backends. Two shapes under a single key would push a
@@ -444,17 +449,27 @@ def _model_block(args: argparse.Namespace, served: dict[str, list[str]]) -> dict
     any later analysis over archived gates -- so the fields that do not apply
     are explicitly ``null`` rather than absent.
 
+    ``served`` is ``null`` (not ``{}``) on the Ollama path, because an empty
+    mapping would read as "attribution ran and found nothing" when the truth is
+    that there is nothing to attribute here at all: models there are per-mage
+    and a mage may have rotated, and both reach the report through the rotation
+    telemetry. Distinguishing *not applicable* from *not known* is the whole
+    point of the pair.
+
     Args:
         args: Parsed arguments; reads ``ollama``, ``model`` and ``model_source``.
-        served: Agent → served model IDs, from :func:`read_served_models`.
-            Empty on the Ollama path, whose envelopes carry no ``modelUsage``;
-            that path's per-mage models reach the report through the rotation
-            telemetry instead.
+        served: Agent → confirmed served model IDs, from
+            :func:`read_served_models`.
+        unattributed: Agents with no confirmed identity. Sorted here rather than
+            trusted from the caller: the block IS the archived artifact, and a
+            stable field order should not depend on every call site remembering
+            it. Empty means every agent was attributed.
 
     Returns:
-        ``{backend, short_name, source, resolved, served}``. ``short_name`` is
-        the post-default short name and ``source`` says who chose it, so the
-        block never presents a mode default as an operator request.
+        ``{backend, short_name, source, resolved, served, unattributed}``.
+        ``short_name`` is the post-default short name and ``source`` says who
+        chose it, so the block never presents a mode default as an operator
+        request.
     """
     if args.ollama:
         return {
@@ -462,14 +477,16 @@ def _model_block(args: argparse.Namespace, served: dict[str, list[str]]) -> dict
             "short_name": None,
             "source": None,
             "resolved": None,
-            "served": served,
+            "served": None,
+            "unattributed": None,
         }
     return {
         "backend": "claude",
         "short_name": args.model,
-        "source": args.model_source,
+        "source": getattr(args, "model_source", None),
         "resolved": resolve_model(args.model),
         "served": served,
+        "unattributed": sorted(unattributed),
     }
 
 
@@ -2496,7 +2513,19 @@ def main() -> None:
     # ``claude-opus-5`` apart, which is the very drift this block exists to make
     # visible. ``served`` closes that: it is read back out of each agent's raw
     # envelope, i.e. what actually answered.
-    report["model"] = _model_block(args, read_served_models(output_dir, list(AGENTS)))
+    served = read_served_models(output_dir, list(AGENTS))
+    unattributed = sorted(set(AGENTS) - set(served))
+    report["model"] = _model_block(args, served, unattributed)
+    # Symmetric with the $0.00 cost warning above, and for the same reason: a
+    # telemetry field that quietly stopped working is indistinguishable from one
+    # with nothing to report. Attributing NONE of three agents on the Claude
+    # path means the envelope contract moved -- say so once, on stderr.
+    if not args.ollama and report["agents"] and not served:
+        print(
+            "[!] WARNING: could not attribute any agent to a served model; the "
+            "CLI may have renamed modelUsage/canonicalModel — check raw envelopes.",
+            file=sys.stderr,
+        )
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:

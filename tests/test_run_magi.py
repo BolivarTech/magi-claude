@@ -4595,7 +4595,15 @@ class TestSavedReportWiring:
 
     def test_no_warning_when_threshold_not_exceeded(self, tmp_path, monkeypatch):
         """Detect-and-warn: when estimated tokens do NOT exceed --warn-input-tokens,
-        no [!] WARNING is emitted to stderr."""
+        no oversize [!] WARNING is emitted to stderr.
+
+        Scoped to the oversize warning specifically. It once asserted that
+        stderr carried no ``[!] WARNING`` at all, which was equivalent while
+        that was the only warning main() could emit -- it no longer is (a run
+        that attributes no agent to a served model warns too, and this harness
+        writes no envelopes). Asserting on the whole channel would make this
+        test fail for reasons that have nothing to do with input size.
+        """
         body = "x" * 400  # 400 chars -> 100 est tokens, not > 200 threshold
         _, buf = self._patch_main(
             tmp_path,
@@ -4604,8 +4612,8 @@ class TestSavedReportWiring:
             extra_argv=["--warn-input-tokens", "200"],
         )
         err = buf.getvalue()
-        assert "[!] WARNING" not in err, (
-            f"[!] WARNING must NOT appear when threshold is not exceeded; got:\n{err!r}"
+        assert "exceeds" not in err and "tokens" not in err, (
+            f"no oversize warning may appear when the threshold is not exceeded; got:\n{err!r}"
         )
 
     def test_input_size_chars_measures_raw_input_not_enriched(self, tmp_path, monkeypatch):
