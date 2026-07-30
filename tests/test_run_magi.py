@@ -4945,6 +4945,25 @@ def test_ollama_skips_claude_model_default():
     args = parse_args(["code-review", "x", "--ollama"])
     assert args.ollama is True
     assert args.model is None  # NOT filled with MODE_DEFAULT_MODELS
+    assert args.model_source is None  # no Claude model was chosen at all
+
+
+def test_model_source_distinguishes_operator_intent_from_mode_default():
+    """``args.model`` alone cannot say WHO chose the model.
+
+    ``parse_args`` fills an omitted ``--model`` from ``MODE_DEFAULT_MODELS``,
+    so by the time anything downstream reads ``args.model`` the operator's
+    choice and the mode's default are the same value. A saved report that
+    claims to record what was *requested* while reading the post-mutation
+    value is recording the default and calling it intent.
+    """
+    from run_magi import parse_args
+
+    assert parse_args(["code-review", "x"]).model_source == "mode-default"
+    assert parse_args(["code-review", "x", "--model", "sonnet"]).model_source == "flag"
+    assert parse_args(["code-review", "x", "--model", "opus"]).model_source == "flag", (
+        "passing the mode's default EXPLICITLY is still an operator choice"
+    )
 
 
 def test_ollama_with_explicit_model_errors():
