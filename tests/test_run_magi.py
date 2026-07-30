@@ -4431,6 +4431,39 @@ class TestInputSizeWiring:
         assert "REPORT" in capsys.readouterr().out
         assert not (tmp_path / "verdict.txt").exists()
 
+    def test_model_block_in_saved_report_attributes_the_verdict(self, tmp_path, monkeypatch):
+        """Attribution: magi-report.json records WHICH model produced the verdict.
+
+        5.4.0 moved every model ID to a floating alias. An alias is not a fixed
+        point: ``claude-opus-5`` served today and ``claude-opus-5`` served after
+        a provider-side revision are the same string and not the same model. A
+        report that names only the short name (or nothing) stops being
+        attributable the moment the alias moves -- which matters because these
+        reports are kept as audit artifacts, and the corpus of past gates is
+        read back to compare judge behaviour over time.
+
+        Both halves are recorded on purpose: ``requested`` is the operator's
+        intent, ``resolved`` is what the CLI was actually handed.
+
+        Lives in this class deliberately: it owns the ``_patch_main`` harness
+        that exercises a full run and reads the saved report back off disk,
+        which is what every saved-report-wiring assertion needs.
+        """
+        import json
+
+        created, _ = self._patch_main(tmp_path, monkeypatch)
+
+        report_path = os.path.join(created["dir"], "magi-report.json")
+        with open(report_path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+
+        assert "model" in saved, "magi-report.json must carry a model block"
+        assert saved["model"] == {
+            "backend": "claude",
+            "requested": "opus",
+            "resolved": "claude-opus-5",
+        }
+
     def test_input_size_block_in_saved_report(self, tmp_path, monkeypatch):
         """Telemetry: magi-report.json on disk carries an input_size block with
         chars and est_tokens fields."""
