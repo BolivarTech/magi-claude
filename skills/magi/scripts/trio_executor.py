@@ -54,8 +54,24 @@ def _write_text(output_dir: str, filename: str, content: str) -> None:
     """Write one per-mage artifact, warning instead of failing on I/O error.
 
     An artifact is diagnostic, not the verdict: a full disk must not cost a
-    mage. Mirrors how ``launch_agent`` and ``write_stderr_log`` already treat
-    their writes.
+    mage.
+
+    This is a DELIBERATE behaviour change, not a verbatim move, and saying so
+    matters because MS1 claims zero regression elsewhere. In v5,
+    ``launch_agent`` wrote ``{agent}.prompt.txt`` UNGUARDED: an ``OSError``
+    propagated and killed the mage. ``write_stderr_log``'s call sites were
+    already fail-soft; the prompt file's were not. The plan chose to align them
+    -- a transient lock on one diagnostic file should not cost a verdict -- and
+    the choice is pinned by ``test_artifact_writes_are_fail_soft``.
+
+    ``{agent}.raw.json`` and ``{agent}.json`` stay fail-hard on purpose: the
+    parser and the validator read them back, so a failed write there genuinely
+    costs the verdict.
+
+    (An earlier version of this docstring claimed to "mirror how ``launch_agent``
+    already treats its writes". That was FALSE for the prompt file, and it is
+    the exact shape of defect this project hunts: a docstring asserting a
+    guarantee the code does not have. Found by the MS1 gate's Loop 1.)
 
     Args:
         output_dir: Directory the artifact goes in.
