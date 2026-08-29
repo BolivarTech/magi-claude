@@ -12,12 +12,15 @@ module never breaks collection before the Green step lands those symbols.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
 
 from fallback_policy import LineageRegistry, ModelCapability, RotationPolicy
 from ollama_config import ModelSpec
+from validate import ValidationError
 
 TRIO = {
     "melchior": ModelSpec("qwen3.5:397b-cloud", "alibaba"),
@@ -154,11 +157,121 @@ def _rotation(
     )
 
 
+def _trio_from_launch(mock_launch: Any) -> Any:
+    """Adapt a per-mage `launch_agent` fake into a `ClaudeTrio` stand-in.
+
+    MS1 moved the Claude path's call site: `run_orchestrator` no longer calls
+    `launch_agent`, it calls `ClaudeTrio.run_trio`. Every test that mocked
+    `launch_agent` and then ran the orchestrator stopped intercepting anything --
+    the mock was still installed, just no longer on the path.
+
+    Rather than rewrite each fake against the trio-level signature, this adapter
+    keeps them EXACTLY as they are and turns one call into three. What each test
+    asserts is unchanged; only the seam moved.
+
+    The tests that call `launch_agent` DIRECTLY are untouched: they test
+    `launch_agent`, which is live code until MS5.
+
+    Args:
+        mock_launch: The per-mage fake, ``async (agent_name, ...) -> verdict``.
+
+    Returns:
+        A factory suitable for ``patch("run_magi.ClaudeTrio", ...)``.
+    """
+
+    class _Adapted:
+        _on_extraction_failure = None
+
+        async def run_trio(
+            self,
+            prompt,
+            agents_dir,
+            output_dir,
+            timeout,
+            models,
+            max_attempts,
+            on_state=None,
+        ):
+            verdicts = {}
+            for name in models:
+                attempt_prompt = prompt
+                for attempt in range(max_attempts):
+                    if on_state is not None:
+                        on_state(name, "running")
+                    try:
+                        verdicts[name] = await mock_launch(
+                            name,
+                            agents_dir,
+                            attempt_prompt,
+                            output_dir,
+                            timeout,
+                            models[name],
+                        )
+                    except (ValidationError, json.JSONDecodeError) as err:
+                        if self._on_extraction_failure is not None:
+                            self._on_extraction_failure(name, err)
+                        # The RETRY lives inside the executor now, so the adapter
+                        # has to reproduce it: these fakes fail once and succeed
+                        # on the second call, and they are testing the retry, not
+                        # the transport.
+                        if attempt + 1 >= max_attempts:
+                            verdicts[name] = err
+                            if on_state is not None:
+                                on_state(name, "failed")
+                            break
+                        if on_state is not None:
+                            on_state(name, "retrying")
+                        # Built from the ORIGINAL prompt, exactly as the executor
+                        # does: the tests assert the error text reaches the model.
+                        from run_magi import _build_retry_prompt
+
+                        attempt_prompt = _build_retry_prompt(prompt, err)
+                        continue
+                    except BaseException as exc:  # noqa: BLE001
+                        # One entry per mage, the exact exception object: the
+                        # orchestrator branches on its subtype, exactly as it
+                        # does with the real executor. Terminal -- a timeout or a
+                        # non-zero exit is not retried.
+                        verdicts[name] = exc
+                        if on_state is not None:
+                            on_state(
+                                name,
+                                "timeout"
+                                if isinstance(exc, (TimeoutError, asyncio.TimeoutError))
+                                else "failed",
+                            )
+                        break
+                    else:
+                        if on_state is not None:
+                            on_state(name, "success")
+                        break
+            return verdicts
+
+    def _factory(*args, **kwargs):
+        # The adapter is a test double for the EXECUTOR, so it has to be faithful
+        # to the executor's constructor too: `run_orchestrator` injects the R18
+        # recorder there, and a stub that drops it makes `extraction_failures`
+        # silently empty on the Claude path.
+        adapted = _Adapted()
+        adapted._on_extraction_failure = kwargs.get("on_extraction_failure")
+        return adapted
+
+    return _factory
+
+
 async def _run(tmp_path: Any, mock_launch: Any, rotation: Any = None, **kw: Any) -> dict[str, Any]:
     """Drive run_orchestrator with a patched launch_agent (existing pattern)."""
     from run_magi import run_orchestrator
 
-    with patch("run_magi.launch_agent", side_effect=mock_launch):
+    # MS1 moved the Claude path's call site to `ClaudeTrio`; the rotation path
+    # still goes through `launch_agent`. Patch the seam that the run under test
+    # actually uses, or the mock sits off the path and every mage "dies".
+    seam = (
+        patch("run_magi.launch_agent", side_effect=mock_launch)
+        if rotation is not None
+        else patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch))
+    )
+    with seam:
         return await run_orchestrator(
             agents_dir=str(tmp_path),
             prompt="test",

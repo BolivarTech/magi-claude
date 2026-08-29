@@ -3,10 +3,12 @@
 import asyncio
 import inspect
 import json
+import os
 
 import pytest
 
 from synthesize import ValidationError
+import run_magi
 from trio_executor import ClaudeTrio, TrioExecutor
 
 
@@ -822,3 +824,70 @@ def test_the_identity_guard_rejects_a_different_mage():
     with pytest.raises(AgentIdentityError) as exc:
         _require_claimed_identity(dict(_VALID, agent="melchior"), "caspar")
     assert "melchior" in str(exc.value) and "caspar" in str(exc.value)
+
+
+def test_the_claude_path_goes_through_ClaudeTrio(monkeypatch, tmp_path):
+    """The wiring, end to end: `rotation is None` must reach `ClaudeTrio.run_trio`.
+
+    Without this, MS1 could ship a `ClaudeTrio` that 25 unit tests exercise and
+    that production never calls -- green everywhere and dead in the one place
+    that matters.
+
+    The signature is the MEASURED one (`run_orchestrator` at run_magi.py:1598),
+    read before writing this rather than assumed.
+    """
+    calls = {}
+
+    class _StubTrio:
+        async def run_trio(
+            self, prompt, agents_dir, output_dir, timeout, models, max_attempts, on_state=None
+        ):
+            calls["models"] = dict(models)
+            calls["on_state"] = on_state
+            # A retry, so the bridge into `retried` is exercised too.
+            if on_state is not None:
+                on_state("caspar", "retrying")
+            return {
+                name: {
+                    "agent": name,
+                    "verdict": "approve",
+                    "confidence": 0.9,
+                    "summary": "s",
+                    "reasoning": "r",
+                    "findings": [],
+                    "recommendation": "rec",
+                }
+                for name in run_magi.AGENTS
+            }
+
+    monkeypatch.setattr(run_magi, "ClaudeTrio", lambda *a, **k: _StubTrio())
+
+    # The REAL agent prompts, not stubs: `run_orchestrator` runs `prompt_guard`
+    # before the trio, and that guard checks the markers and the worked-example
+    # text. A placeholder would exercise the guard's REJECTION path while
+    # claiming to test the wiring.
+    agents_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "skills",
+        "magi",
+        "agents",
+    )
+
+    report = asyncio.run(
+        run_magi.run_orchestrator(
+            agents_dir,
+            "PAYLOAD",
+            str(tmp_path),
+            900,
+            show_status=False,
+        )
+    )
+
+    # 1. the executor was actually used, with one model per mage
+    assert set(calls["models"]) == set(run_magi.AGENTS)
+    # 2. the state bridge was handed over -- not None, or `retried_agents` dies
+    assert calls["on_state"] is not None
+    # 3. and the bridge fed the telemetry the report reads (run_magi.py:1683-1684)
+    assert "caspar" in report["retried_agents"]
+    # 4. the pipeline below the verdicts did not fork: a real report came out
+    assert report["consensus"]

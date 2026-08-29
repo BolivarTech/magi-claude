@@ -18,7 +18,15 @@ import pytest
 
 from fallback_policy import AgentRotationState
 from ollama_config import ModelSpec
-from rotation_harness import FALLBACK, REQUIRED, TRIO, _rotation, _run, _valid
+from rotation_harness import (
+    FALLBACK,
+    REQUIRED,
+    TRIO,
+    _rotation,
+    _run,
+    _trio_from_launch,
+    _valid,
+)
 from validate import ValidationError
 from prompt_guard import PromptContractError
 from verdict_markers import (
@@ -313,7 +321,7 @@ class TestRunOrchestrator:
         ):
             return agent_results[agent_name]
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -352,7 +360,7 @@ class TestRunOrchestrator:
                 "recommendation": "Merge",
             }
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -383,7 +391,7 @@ class TestRunOrchestrator:
                 "recommendation": "Merge",
             }
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -403,7 +411,7 @@ class TestRunOrchestrator:
         ):
             raise TimeoutError(f"Agent {agent_name} timed out")
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             with pytest.raises(RuntimeError, match="fewer than 2"):
                 await run_orchestrator(
                     agents_dir=str(tmp_path),
@@ -433,7 +441,7 @@ class TestRunOrchestrator:
                 "recommendation": "Merge",
             }
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -441,7 +449,11 @@ class TestRunOrchestrator:
                 timeout=300,
                 model="sonnet",
             )
-            assert all(isinstance(s, ModelSpec) and s.model == "sonnet" for s in captured)
+            # MS1/D1 changed this contract deliberately: `run_trio` receives the
+            # model SHORT NAME, already extracted from the ModelSpec by the
+            # caller -- the executor has no business knowing about specs. What
+            # the test verifies is unchanged: the right model reaches each mage.
+            assert all(s == "sonnet" for s in captured)
             assert len(captured) == 3
 
     @pytest.mark.asyncio
@@ -463,7 +475,7 @@ class TestRunOrchestrator:
                 "recommendation": "Merge",
             }
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             with pytest.raises(RuntimeError, match="fewer than 2"):
                 await run_orchestrator(
                     agents_dir=str(tmp_path),
@@ -953,7 +965,7 @@ class TestTrackedLaunchStatusUpdates:
         async def mock_launch(agent_name, *args, **kwargs):
             return _ok_result(agent_name)
 
-        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+        monkeypatch.setattr(run_magi, "ClaudeTrio", _trio_from_launch(mock_launch))
 
         await run_magi.run_orchestrator(
             agents_dir=str(tmp_path),
@@ -986,7 +998,7 @@ class TestTrackedLaunchStatusUpdates:
                 raise TimeoutError("builtin timeout")
             return _ok_result(agent_name)
 
-        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+        monkeypatch.setattr(run_magi, "ClaudeTrio", _trio_from_launch(mock_launch))
 
         await run_magi.run_orchestrator(
             agents_dir=str(tmp_path),
@@ -1015,7 +1027,7 @@ class TestTrackedLaunchStatusUpdates:
                 raise asyncio.TimeoutError("asyncio timeout")
             return _ok_result(agent_name)
 
-        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+        monkeypatch.setattr(run_magi, "ClaudeTrio", _trio_from_launch(mock_launch))
 
         await run_magi.run_orchestrator(
             agents_dir=str(tmp_path),
@@ -1043,7 +1055,7 @@ class TestTrackedLaunchStatusUpdates:
                 raise RuntimeError("boom")
             return _ok_result(agent_name)
 
-        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+        monkeypatch.setattr(run_magi, "ClaudeTrio", _trio_from_launch(mock_launch))
 
         await run_magi.run_orchestrator(
             agents_dir=str(tmp_path),
@@ -1069,7 +1081,7 @@ class TestTrackedLaunchStatusUpdates:
         async def mock_launch(agent_name, *args, **kwargs):
             return _ok_result(agent_name)
 
-        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+        monkeypatch.setattr(run_magi, "ClaudeTrio", _trio_from_launch(mock_launch))
 
         await run_magi.run_orchestrator(
             agents_dir=str(tmp_path),
@@ -1098,7 +1110,7 @@ class TestTrackedLaunchStatusUpdates:
                 raise asyncio.CancelledError()
             return _ok_result(agent_name)
 
-        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+        monkeypatch.setattr(run_magi, "ClaudeTrio", _trio_from_launch(mock_launch))
 
         result = await run_magi.run_orchestrator(
             agents_dir=str(tmp_path),
@@ -1147,7 +1159,7 @@ class TestTrackedLaunchStatusUpdates:
         async def mock_launch(agent_name, *args, **kwargs):
             return _ok_result(agent_name)
 
-        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+        monkeypatch.setattr(run_magi, "ClaudeTrio", _trio_from_launch(mock_launch))
 
         result = await run_magi.run_orchestrator(
             agents_dir=str(tmp_path),
@@ -1196,7 +1208,7 @@ class TestTrackedLaunchStatusUpdates:
                 raise ValueError("original failure")
             return _ok_result(agent_name)
 
-        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+        monkeypatch.setattr(run_magi, "ClaudeTrio", _trio_from_launch(mock_launch))
 
         # The orchestrator must still return (degraded) — the BrokenDisplay
         # update call must not propagate and mask caspar's ValueError.
@@ -1968,7 +1980,7 @@ class TestBufferedStderrWhile:
             print(f"diag from {agent_name}", file=sys.stderr)
             return _ok_result(agent_name)
 
-        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+        monkeypatch.setattr(run_magi, "ClaudeTrio", _trio_from_launch(mock_launch))
 
         await run_magi.run_orchestrator(
             agents_dir=str(tmp_path),
@@ -2108,7 +2120,7 @@ class TestSingleShotRetry:
                 raise ValidationError("missing keys: ['recommendation']")
             return TestSingleShotRetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2139,7 +2151,7 @@ class TestSingleShotRetry:
                 raise ValidationError("missing keys: ['recommendation']")
             return TestSingleShotRetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2172,7 +2184,7 @@ class TestSingleShotRetry:
                 raise ValidationError(f"missing keys for {agent_name}")
             return TestSingleShotRetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             with pytest.raises(RuntimeError, match="fewer than 2"):
                 await run_orchestrator(
                     agents_dir=str(tmp_path),
@@ -2196,7 +2208,7 @@ class TestSingleShotRetry:
                 raise TimeoutError(f"agent {agent_name} timed out")
             return TestSingleShotRetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2224,7 +2236,7 @@ class TestSingleShotRetry:
                 raise RuntimeError(f"agent {agent_name} exited non-zero")
             return TestSingleShotRetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2262,7 +2274,7 @@ class TestSingleShotRetry:
                 raise ValidationError("schema fail, retry please")
             return TestSingleShotRetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2303,7 +2315,7 @@ class TestSingleShotRetry:
                 raise ValidationError(error_msg)
             return TestSingleShotRetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="ORIGINAL-USER-PROMPT-TOKEN",
@@ -2349,7 +2361,7 @@ class TestSingleShotRetry:
             display_events.append((name, state))
 
         with (
-            patch("run_magi.launch_agent", side_effect=mock_launch),
+            patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)),
             patch("run_magi._safe_display_update", side_effect=capture_update),
         ):
             await run_orchestrator(
@@ -2440,7 +2452,7 @@ class TestJsonDecodeRetry:
                 raise _json.JSONDecodeError("Expecting value", "truncated output...", 142)
             return TestJsonDecodeRetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2480,7 +2492,7 @@ class TestJsonDecodeRetry:
                 raise _json.JSONDecodeError("Unterminated string", "broken", 50)
             return TestJsonDecodeRetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2521,7 +2533,7 @@ class TestJsonDecodeRetry:
                 raise ValueError("Unexpected Claude CLI output type: int")
             return TestJsonDecodeRetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2591,7 +2603,7 @@ class TestRetryTelemetry:
                 raise ValidationError("missing keys: ['recommendation']")
             return TestRetryTelemetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2619,7 +2631,7 @@ class TestRetryTelemetry:
                 raise ValidationError("missing keys: ['recommendation']")
             return TestRetryTelemetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2650,7 +2662,7 @@ class TestRetryTelemetry:
         ):
             return TestRetryTelemetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2681,7 +2693,7 @@ class TestRetryTelemetry:
                 raise ValidationError("missing keys for caspar")
             return TestRetryTelemetry._valid(agent_name)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="test",
@@ -2767,7 +2779,7 @@ class TestCp1252Resilience:
 
         monkeypatch.setattr(sys, "stderr", cp1252_stderr)
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             # Must not raise UnicodeEncodeError. Pre-fix: it does.
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
@@ -5103,11 +5115,43 @@ def test_select_backend_ollama_uses_trio(monkeypatch):
 
 
 def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
-    """run_orchestrator threads per-agent models to launch_agent via backend."""
+    """run_orchestrator threads per-agent models through to the EXECUTOR.
+
+    MS1 moved the Claude path off `backend`: `run_orchestrator` hands the models
+    to `ClaudeTrio.run_trio` and, as the plan puts it, "`backend` still arrives
+    and is still what the rotation branch uses; the Claude branch simply no
+    longer consults it". So the seam moved -- but the guarantee under test did
+    not: each mage must receive ITS OWN model, not a shared default.
+    """
     import asyncio
     from run_magi import run_orchestrator
 
     seen: dict[str, str] = {}
+
+    class _CapturingTrio:
+        async def run_trio(
+            self,
+            prompt,
+            agents_dir,
+            output_dir,
+            timeout,
+            models,
+            max_attempts,
+            on_state=None,
+        ):
+            seen.update(models)
+            return {
+                name: {
+                    "agent": name,
+                    "verdict": "approve",
+                    "confidence": 0.5,
+                    "summary": "s",
+                    "reasoning": "r",
+                    "findings": [],
+                    "recommendation": "ok",
+                }
+                for name in models
+            }
 
     class FakeBackend:
         async def run(
@@ -5132,6 +5176,9 @@ def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
     # The agents_dir is seeded by the ``seeded_agents_dir`` fixture with the REAL prompts.
     # This test used to write ``"S"`` as the system prompt: a one-character file passing
     # itself off as the contract, which the guard (now in the orchestrator) rejects -- rightly.
+    # The Claude path no longer consults `backend`; it calls the executor.
+    monkeypatch.setattr("run_magi.ClaudeTrio", lambda *a, **k: _CapturingTrio())
+
     asyncio.run(
         run_orchestrator(
             str(tmp_path),
@@ -5520,6 +5567,8 @@ class TestAttemptsPerModel:
 
         from run_magi import run_orchestrator
 
+        # ROTATION path: it still goes through `launch_agent`, so the seam
+        # stays where it was. Only the Claude path moved in MS1.
         with patch("run_magi.launch_agent", side_effect=mock_launch):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
@@ -5548,7 +5597,7 @@ class TestAttemptsPerModel:
 
         from run_magi import run_orchestrator
 
-        with patch("run_magi.launch_agent", side_effect=mock_launch):
+        with patch("run_magi.ClaudeTrio", _trio_from_launch(mock_launch)):
             result = await run_orchestrator(
                 agents_dir=str(tmp_path),
                 prompt="t",

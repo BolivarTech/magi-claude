@@ -70,6 +70,7 @@ from synthesize import (  # noqa: E402
 from backend import AgentBackend  # noqa: E402
 from backoff import next_backoff, parse_retry_after  # noqa: E402
 from claude_backend import ClaudeBackend  # noqa: E402
+from trio_executor import ClaudeTrio  # noqa: E402
 from ollama_backend import (  # noqa: E402
     TRANSPORT_CONNECTION_MARKERS,
     TRANSPORT_HTTP_PATTERN,
@@ -1864,13 +1865,49 @@ async def run_orchestrator(
                     )
                 return result
 
-    async def tracked_launch(name: str) -> dict[str, Any]:
-        """Dispatch to the v4 path (``rotation is None``) or the rotation path."""
-        if rotation is None:
-            return await _legacy_tracked_launch(name)
-        return await _rotating_tracked_launch(name, rotation)
+    # The Claude path's executor is chosen HERE, not in ``select_backend``: that
+    # one returns a ``ClaudeBackend`` and ``test_run_magi.py:5065`` asserts it --
+    # a file BDD-31 protects. ``backend`` still arrives and is still what the
+    # rotation branch uses; the Claude branch simply no longer consults it.
+    #
+    # This is the design rather than a detour: ``select_backend`` resolves
+    # CONFIG -- models, rotation, timeout -- not TRANSPORT. Having it also build
+    # the backend was a coupling MS5 would have had to undo anyway.
+    claude_trio = ClaudeTrio(
+        on_extraction_failure=lambda name, err: _record_extraction_failure(
+            extraction_failures, name, err
+        ),
+    )
 
-    tasks = {name: tracked_launch(name) for name in AGENTS}
+    def _on_state(name: str, state: str) -> None:
+        """Bridge the executor's state callback to the display AND the telemetry.
+
+        ``retried`` is the ONLY channel ``retried_agents`` has under the new
+        contract: the v5 ``retried.add(name)`` lived inside
+        ``_legacy_tracked_launch``, which moved into ``ClaudeTrio``. The callback
+        already fires exactly when a retry happens, so no extra parameter is
+        needed -- but the recording has to be HERE, in code. Lines 1683-1684
+        derive two cohorts from this set, and ``test_run_magi.py`` checks them in
+        a file BDD-31 forbids editing.
+
+        Args:
+            name: The mage the state belongs to.
+            state: One of ``running``, ``retrying``, ``success``, ``timeout``,
+                ``failed``.
+
+        Returns:
+            None.
+
+        Side effects:
+            Records into ``retried``; updates the live display.
+        """
+        # Record FIRST, draw second. If the display raises and the order were
+        # reversed, the mage would drop out of ``retried_agents`` silently --
+        # telemetry reporting fewer retries than happened, which is worse than
+        # reporting none. The display is decoration; the set is data.
+        if state == "retrying":
+            retried.add(name)
+        _safe_display_update(display, name, state, log_gate)
 
     if display is not None:
         try:
@@ -1878,7 +1915,7 @@ async def run_orchestrator(
         except Exception as exc:
             # A display-start failure (event-loop issue, terminal problem) must
             # never block the actual analysis. Drop the display and fall
-            # through — tracked_launch closures will see ``display is None``.
+            # through — the executor's callback will see ``display is None``.
             print(
                 f"[!] WARNING: status display failed to start ({exc}) "
                 f"\u2014 continuing without live status",
@@ -1888,7 +1925,23 @@ async def run_orchestrator(
 
     with _buffered_stderr_while(active=display is not None):
         try:
-            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            if rotation is None:
+                # Claude path: the executor owns the gather AND the per-mage retry.
+                verdicts = await claude_trio.run_trio(
+                    prompt,
+                    agents_dir,
+                    output_dir,
+                    timeout,
+                    {name: spec.model for name, spec in agent_models.items()},
+                    max_attempts,
+                    on_state=_on_state,
+                )
+                # One entry per mage: the verdict or ITS exception, the exact
+                # object. The loop below branches on subtype, so no wrapper.
+                results = [verdicts[name] for name in AGENTS]
+            else:
+                tasks = {name: _rotating_tracked_launch(name, rotation) for name in AGENTS}
+                results = await asyncio.gather(*tasks.values(), return_exceptions=True)
         finally:
             if display is not None:
                 await display.stop()
@@ -1908,7 +1961,9 @@ async def run_orchestrator(
         if rotation is not None and isinstance(result, asyncio.CancelledError):
             raise result
 
-    for name, result in zip(tasks.keys(), results):
+    # ``zip(AGENTS, ...)`` and not ``tasks.keys()``: ``tasks`` only exists on the
+    # rotation branch now, and ``results`` is built in AGENTS order on BOTH.
+    for name, result in zip(AGENTS, results):
         if isinstance(result, BaseException):
             # CancelledError is BaseException in 3.8+ but we treat a cancelled
             # child task as a normal agent failure — the orchestrator itself is

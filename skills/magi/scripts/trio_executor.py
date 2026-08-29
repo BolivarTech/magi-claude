@@ -216,6 +216,9 @@ class ClaudeTrio(TrioExecutor):
         build_retry_prompt: (
             Callable[[str, ValidationError | json.JSONDecodeError], str] | None
         ) = None,
+        on_extraction_failure: (
+            Callable[[str, ValidationError | json.JSONDecodeError], None] | None
+        ) = None,
     ) -> None:
         """Store the retry-prompt builder.
 
@@ -225,8 +228,16 @@ class ClaudeTrio(TrioExecutor):
                 imported because it lives in ``run_magi``, which imports this
                 module -- importing it back would create a cycle. Defaults to
                 the real builder, resolved lazily on first use.
+            on_extraction_failure: Called once per FAILED ATTEMPT with
+                ``(agent_name, error)``. This is the R18 adherence telemetry
+                (``extraction_failures``), and it counts ATTEMPTS, not outcomes:
+                a mage whose retry recovered still omitted the markers once, and
+                that is precisely the drift the counter exists to surface.
+                Injected for the same reason as the builder -- the recorder
+                lives in ``run_magi``, which imports this module.
         """
         self._build_retry_prompt = build_retry_prompt
+        self._on_extraction_failure = on_extraction_failure
 
     def _retry_prompt(self, prompt: str, error: ValidationError | json.JSONDecodeError) -> str:
         """Return the ORIGINAL prompt with cause-specific feedback appended.
@@ -400,6 +411,12 @@ class ClaudeTrio(TrioExecutor):
                     _require_claimed_identity(result, agent_name)
                     break
                 except (ValidationError, json.JSONDecodeError) as err:
+                    # R18: record the CAUSE before deciding whether to retry, so
+                    # the last failed attempt is counted too. Moved from
+                    # ``_legacy_tracked_launch``, which recorded it at both the
+                    # retry and the give-up site.
+                    if self._on_extraction_failure is not None:
+                        self._on_extraction_failure(agent_name, err)
                     if attempt + 1 >= max_attempts:
                         raise
                     self._emit(on_state, agent_name, "retrying")
