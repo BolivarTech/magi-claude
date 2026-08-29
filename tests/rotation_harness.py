@@ -157,6 +157,27 @@ def _rotation(
     )
 
 
+def _emit(on_state, agent_name, state):
+    """Report a state the way the executor does: best effort, never fatal.
+
+    Mirrors `ClaudeTrio._emit`. The callback is arbitrary caller-supplied code
+    and the ABC promises a raising one cannot cost a verdict, so the double has
+    to hold the same promise -- otherwise a test that installs a broken display
+    would pass here and fail against the real executor.
+
+    Args:
+        on_state: The optional callback, ``(agent_name, state) -> None``.
+        agent_name: The mage whose state changed.
+        state: The new state.
+    """
+    if on_state is None:
+        return
+    try:
+        on_state(agent_name, state)
+    except Exception:  # noqa: BLE001 - a broken display must not cost a verdict
+        pass
+
+
 def _trio_from_launch(mock_launch: Any) -> Any:
     """Adapt a per-mage `launch_agent` fake into a `ClaudeTrio` stand-in.
 
@@ -192,12 +213,22 @@ def _trio_from_launch(mock_launch: Any) -> Any:
             max_attempts,
             on_state=None,
         ):
+            if max_attempts < 1:
+                # The executor validates ONCE, up front, before a single mage is
+                # launched. A double that skipped this would let a test pass a
+                # nonsensical value and see three silent no-ops instead of the
+                # rejection the real thing raises.
+                raise ValueError("max_attempts must be >= 1")
             verdicts = {}
             for name in models:
                 attempt_prompt = prompt
+                # ONCE per mage, OUTSIDE the attempt loop -- the executor emits
+                # "running" before it starts attempting, not before each attempt.
+                # Emitting it per attempt would let a display regression that
+                # re-announces a retrying mage as fresh slip through every test
+                # that goes through this double.
+                _emit(on_state, name, "running")
                 for attempt in range(max_attempts):
-                    if on_state is not None:
-                        on_state(name, "running")
                     try:
                         verdicts[name] = await mock_launch(
                             name,
@@ -216,11 +247,9 @@ def _trio_from_launch(mock_launch: Any) -> Any:
                         # the transport.
                         if attempt + 1 >= max_attempts:
                             verdicts[name] = err
-                            if on_state is not None:
-                                on_state(name, "failed")
+                            _emit(on_state, name, "failed")
                             break
-                        if on_state is not None:
-                            on_state(name, "retrying")
+                        _emit(on_state, name, "retrying")
                         # Built from the ORIGINAL prompt, exactly as the executor
                         # does: the tests assert the error text reaches the model.
                         from run_magi import _build_retry_prompt
@@ -233,17 +262,16 @@ def _trio_from_launch(mock_launch: Any) -> Any:
                         # does with the real executor. Terminal -- a timeout or a
                         # non-zero exit is not retried.
                         verdicts[name] = exc
-                        if on_state is not None:
-                            on_state(
-                                name,
-                                "timeout"
-                                if isinstance(exc, (TimeoutError, asyncio.TimeoutError))
-                                else "failed",
-                            )
+                        _emit(
+                            on_state,
+                            name,
+                            "timeout"
+                            if isinstance(exc, (TimeoutError, asyncio.TimeoutError))
+                            else "failed",
+                        )
                         break
                     else:
-                        if on_state is not None:
-                            on_state(name, "success")
+                        _emit(on_state, name, "success")
                         break
             return verdicts
 

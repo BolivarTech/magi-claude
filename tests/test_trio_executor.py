@@ -464,7 +464,7 @@ def test_run_trio_writes_the_four_artifacts_per_mage(monkeypatch, tmp_path):
     assert (out_dir / "melchior.prompt.txt").read_text(encoding="utf-8") == "PAYLOAD"
 
 
-def test_artifact_writes_are_fail_soft(monkeypatch, tmp_path):
+def test_artifact_writes_are_fail_soft(monkeypatch, tmp_path, capsys):
     """A full disk must not cost a verdict — measured, not asserted in a docstring."""
 
     async def fake_exec(*args, **kwargs):
@@ -493,6 +493,13 @@ def test_artifact_writes_are_fail_soft(monkeypatch, tmp_path):
     )
 
     assert all(isinstance(v, dict) for v in out.values())  # the verdicts stand
+    # And the operator is TOLD. A fail-soft write that stays silent is
+    # indistinguishable from one that succeeded, which is how a run ends up
+    # with no prompt artifact and nobody knowing why.
+    err = capsys.readouterr().err
+    for agent in ("melchior", "balthasar", "caspar"):
+        assert f"WARNING: Failed to persist {agent}.prompt.txt" in err
+        assert "No space left on device" in err
 
 
 def test_run_trio_runs_the_three_mages_concurrently(monkeypatch, tmp_path):
@@ -930,3 +937,82 @@ def test_a_status_callback_that_raises_does_not_cost_a_verdict(monkeypatch, tmp_
     # The verdicts are the product; the status tree is decoration.
     assert set(out) == {"melchior", "balthasar", "caspar"}
     assert all(isinstance(v, dict) for v in out.values())
+
+
+def test_the_test_double_reports_the_same_states_as_the_real_executor():
+    """The adapter is load-bearing for 32 tests -- so its fidelity gets a test.
+
+    `_trio_from_launch` lets the pre-MS1 per-mage fakes keep working against the
+    trio-level call site. That makes it a stand-in for `ClaudeTrio` in every
+    orchestrator test, and a stand-in that drifts is worse than no stand-in: the
+    tests keep passing while the thing they stand for changes underneath.
+
+    The review of MS1 found exactly that -- the double announced "running" once
+    per ATTEMPT while the executor announces it once per MAGE, so a display
+    regression that re-announces a retrying mage as fresh would have passed
+    here. This test compares the two state sequences directly over a retry,
+    which is the only path where the two behaviours differ.
+    """
+    import trio_executor
+    from rotation_harness import _trio_from_launch
+
+    calls = {"n": 0}
+
+    async def fake_launch(agent_name, agents_dir, prompt, output_dir, timeout, model=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValidationError("missing markers")
+        return dict(_VALID, agent=agent_name)
+
+    seen: list[tuple[str, str]] = []
+    asyncio.run(
+        _trio_from_launch(fake_launch)().run_trio(
+            "P",
+            "agents",
+            "out",
+            900,
+            {"melchior": "opus"},
+            2,
+            on_state=lambda n, s: seen.append((n, s)),
+        )
+    )
+
+    assert seen == [
+        ("melchior", "running"),
+        ("melchior", "retrying"),
+        ("melchior", "success"),
+    ], "the double must not re-announce a retrying mage as freshly running"
+    assert trio_executor is not None
+
+
+def test_the_test_double_rejects_a_nonsense_attempt_count():
+    """The executor validates up front; a double that did not would mask it."""
+    from rotation_harness import _trio_from_launch
+
+    async def never_called(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("no mage should be launched")
+
+    with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+        asyncio.run(
+            _trio_from_launch(never_called)().run_trio(
+                "P", "agents", "out", 900, {"melchior": "opus"}, 0
+            )
+        )
+
+
+def test_the_test_double_survives_a_status_callback_that_raises():
+    """Same promise as `_emit`: a broken display must not cost a verdict."""
+    from rotation_harness import _trio_from_launch
+
+    async def fake_launch(agent_name, *args, **kwargs):
+        return dict(_VALID, agent=agent_name)
+
+    def explode(agent, state):
+        raise RuntimeError("the display is broken")
+
+    out = asyncio.run(
+        _trio_from_launch(fake_launch)().run_trio(
+            "P", "agents", "out", 900, {"melchior": "opus"}, 2, on_state=explode
+        )
+    )
+    assert isinstance(out["melchior"], dict)
