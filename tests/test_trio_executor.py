@@ -891,3 +891,42 @@ def test_the_claude_path_goes_through_ClaudeTrio(monkeypatch, tmp_path):
     assert "caspar" in report["retried_agents"]
     # 4. the pipeline below the verdicts did not fork: a real report came out
     assert report["consensus"]
+
+
+def test_a_status_callback_that_raises_does_not_cost_a_verdict(monkeypatch, tmp_path):
+    """The ABC says `on_state` "must not raise"; `_emit` is what enforces it.
+
+    The MS1 gate asked whether that try/except is dead code, since
+    `_safe_display_update` already swallows everything. It is not: that helper
+    guards the DISPLAY call, `_emit` guards the CALLBACK -- and `on_state` is
+    public contract, so any caller may pass any callable. Nothing exercised it
+    until now, which made the guarantee a claim rather than a fact.
+
+    The failing input is a callback that raises on every transition.
+    """
+
+    async def fake_exec(*args, **kwargs):
+        agent = next(m for m in ("melchior", "balthasar", "caspar") if f"{m}.md" in " ".join(args))
+        return _FakeProc(_envelope(agent))
+
+    def _explode(agent, state):
+        raise RuntimeError("the display is broken")
+
+    monkeypatch.setattr("trio_executor.asyncio.create_subprocess_exec", fake_exec)
+    _write_prompts(tmp_path)
+
+    out = asyncio.run(
+        ClaudeTrio().run_trio(
+            "P",
+            str(tmp_path),
+            str(tmp_path),
+            900,
+            {"melchior": "opus", "balthasar": "opus", "caspar": "opus"},
+            2,
+            on_state=_explode,
+        )
+    )
+
+    # The verdicts are the product; the status tree is decoration.
+    assert set(out) == {"melchior", "balthasar", "caspar"}
+    assert all(isinstance(v, dict) for v in out.values())

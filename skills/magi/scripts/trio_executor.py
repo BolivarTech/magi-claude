@@ -333,7 +333,16 @@ class ClaudeTrio(TrioExecutor):
 
         A live-display glitch must never cost a verdict, so the callback's
         exceptions are caught here and reported on stderr instead of
-        propagating. This mirrors ``run_magi._safe_display_update``.
+        propagating.
+
+        This is NOT redundant with ``run_magi._safe_display_update``, which
+        already swallows ``BaseException``: that one guards the DISPLAY call,
+        this one guards the CALLBACK. ``on_state`` is part of the ABC's public
+        contract -- any implementer may pass any callable -- and the contract
+        says it "must not raise". Production's callback happens to be safe (a
+        ``set.add`` plus the display helper), so on the Claude path today this
+        catch never fires; it enforces the contract for every other caller, and
+        the executor must not learn what its callback does internally.
         """
         if on_state is None:
             return
