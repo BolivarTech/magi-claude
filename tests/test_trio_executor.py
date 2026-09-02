@@ -177,6 +177,11 @@ class _HangingProc:
     pid = 4242  # windows_kill_tree names the pid in its warning
 
     def __init__(self):
+        # Reset on construction, not in each test: `killed` is module state
+        # shared by every timeout test, and a flag that only some of them
+        # remember to clear is an ordering dependency waiting for the suite to
+        # grow. Installing the proc is the one thing they all do.
+        killed["caspar"] = False
         self.stderr = _FakeStderrStream()
 
     async def communicate(self, input=None):
@@ -192,7 +197,6 @@ class _HangingProc:
 
 def test_run_trio_returns_the_timeout_error_and_persists_stderr(monkeypatch, tmp_path):
     """The timeout path kills, reaps and persists — it must not be left untested."""
-    killed["caspar"] = False
 
     async def fake_exec(*args, **kwargs):
         joined = " ".join(args)
@@ -1103,7 +1107,6 @@ def test_a_failed_stderr_log_write_on_the_timeout_path_still_tells_the_operator(
     monkeypatch.setattr("trio_executor.asyncio.create_subprocess_exec", fake_exec)
     monkeypatch.setattr("trio_executor._write_stderr_log", failing_write)
     _write_prompts(tmp_path)
-    killed["caspar"] = False
 
     out = asyncio.run(
         ClaudeTrio().run_trio(
