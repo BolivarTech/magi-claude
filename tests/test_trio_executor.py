@@ -1016,3 +1016,62 @@ def test_the_test_double_survives_a_status_callback_that_raises():
         )
     )
     assert isinstance(out["melchior"], dict)
+
+
+def test_the_test_double_propagates_a_shutdown_signal_like_the_real_executor():
+    """`KeyboardInterrupt` and `SystemExit` abort the run; they are not verdicts.
+
+    MEASURED against the real executor, not reasoned about: despite
+    ``return_exceptions=True``, asyncio's Task gives those two special treatment
+    and they escape `run_trio`, while a plain `BaseException` subclass is
+    returned (see the test above). The double stored them as a mage's outcome
+    and moved on to the next mage, so a run that should have torn down kept
+    going -- in the stand-in used by 32 orchestrator tests.
+    """
+    from rotation_harness import _trio_from_launch
+
+    for signal in (KeyboardInterrupt, SystemExit):
+
+        async def fake_launch(agent_name, *args, _signal=signal, **kwargs):
+            if agent_name == "caspar":
+                raise _signal()
+            return dict(_VALID, agent=agent_name)
+
+        with pytest.raises(signal):
+            asyncio.run(
+                _trio_from_launch(fake_launch)().run_trio(
+                    "P",
+                    "agents",
+                    "out",
+                    900,
+                    {"melchior": "opus", "caspar": "opus"},
+                    2,
+                )
+            )
+
+
+def test_the_test_double_warns_on_a_failing_status_callback_like_the_executor(capsys):
+    """Surviving the failure is half the contract; TELLING the operator is the rest.
+
+    `ClaudeTrio._emit` prints a warning naming the mage, the state and the
+    cause. The double swallowed the exception in silence, so a regression that
+    removed the executor's warning would have passed every orchestrator test
+    that runs through the double.
+    """
+    from rotation_harness import _trio_from_launch
+
+    async def fake_launch(agent_name, *args, **kwargs):
+        return dict(_VALID, agent=agent_name)
+
+    def explode(agent, state):
+        raise RuntimeError("the display is broken")
+
+    asyncio.run(
+        _trio_from_launch(fake_launch)().run_trio(
+            "P", "agents", "out", 900, {"melchior": "opus"}, 2, on_state=explode
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "WARNING: status callback failed for melchior (running)" in err
+    assert "the display is broken" in err

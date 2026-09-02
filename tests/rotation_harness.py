@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
@@ -174,8 +175,14 @@ def _emit(on_state, agent_name, state):
         return
     try:
         on_state(agent_name, state)
-    except Exception:  # noqa: BLE001 - a broken display must not cost a verdict
-        pass
+    except Exception as exc:  # noqa: BLE001 - a broken display must not cost a verdict
+        # The warning, not just the survival: the executor tells the operator,
+        # and a double that stayed silent would let a regression that removed
+        # that warning pass every orchestrator test running through here.
+        print(
+            f"WARNING: status callback failed for {agent_name} ({state}): {exc}",
+            file=sys.stderr,
+        )
 
 
 def _trio_from_launch(mock_launch: Any) -> Any:
@@ -261,7 +268,6 @@ def _trio_from_launch(mock_launch: Any) -> Any:
                         # orchestrator branches on its subtype, exactly as it
                         # does with the real executor. Terminal -- a timeout or a
                         # non-zero exit is not retried.
-                        verdicts[name] = exc
                         _emit(
                             on_state,
                             name,
@@ -269,6 +275,14 @@ def _trio_from_launch(mock_launch: Any) -> Any:
                             if isinstance(exc, (TimeoutError, asyncio.TimeoutError))
                             else "failed",
                         )
+                        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                            # MEASURED against the real executor: asyncio's Task
+                            # gives these two special treatment, so they escape
+                            # `run_trio` even under `return_exceptions=True` and
+                            # tear the run down. Every other BaseException is
+                            # returned as that mage's outcome.
+                            raise
+                        verdicts[name] = exc
                         break
                     else:
                         _emit(on_state, name, "success")
