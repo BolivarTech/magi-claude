@@ -527,11 +527,13 @@ def test_run_trio_runs_the_three_mages_concurrently(monkeypatch, tmp_path):
         try:
             await asyncio.wait_for(release.wait(), timeout=5)
         finally:
-            # try/finally, NO un decremento después del await: si el wait_for
-            # expira, la excepción propaga hasta `_run_with_retry`, que la captura
-            # POR MAGE -- y sin el finally el contador nunca baja, con lo que una
-            # implementación SECUENCIAL acumula hasta 3 y PASA este test.
-            # Reproducido: sin finally, secuencial da peak=3; con finally, peak=1.
+            # try/finally, NOT a decrement after the await: if the `wait_for`
+            # expires, the exception propagates up to `_run_with_retry`, which
+            # catches it PER MAGE -- and without the finally the counter never
+            # comes back down, so a SEQUENTIAL implementation accumulates to 3
+            # and PASSES this test.
+            # Reproduced: without the finally, sequential gives peak=3; with it,
+            # peak=1.
             in_flight["now"] -= 1
         return _FakeProc(_envelope(agent))
 
