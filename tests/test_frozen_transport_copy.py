@@ -8,6 +8,35 @@ two copies of the `claude -p` transport diverge. This is the only witness.
 import pytest
 
 
+#: Raised when the running interpreter has no recorded digest. Deliberately a
+#: FAILURE and not a skip: these digests are the only witness for drift in the
+#: frozen copies, and a witness that can be absent without saying so is not one.
+_UNRECORDED = (
+    "no frozen-copy digest recorded for Python {major}.{minor}. Measure the "
+    "frozen functions on this interpreter and add the digests, or run the suite "
+    "on a recorded one -- do not delete the guard: it is the only witness for "
+    "drift in code nothing else exercises."
+)
+
+
+def _recorded(expected, key):
+    """Return the digest(s) recorded for interpreter *key*, or fail loudly.
+
+    Args:
+        expected: Mapping of ``sys.version_info[:2]`` to the recorded digest or
+            mapping of digests for that interpreter.
+        key: The running interpreter's ``(major, minor)``.
+
+    Returns:
+        Whatever was recorded for *key*.
+
+    Raises:
+        AssertionError: No digest is recorded for *key*.
+    """
+    assert key in expected, _UNRECORDED.format(major=key[0], minor=key[1])
+    return expected[key]
+
+
 def test_the_frozen_transport_copy_has_not_drifted():
     """ClaudeBackend is dead code until MS5; a change to it must be deliberate.
 
@@ -29,17 +58,19 @@ def test_the_frozen_transport_copy_has_not_drifted():
     normalised = ast.dump(tree, annotate_fields=False, include_attributes=False)
     digest = hashlib.sha256(normalised.encode("utf-8")).hexdigest()
 
-    # The digest is keyed by interpreter minor version: `ast.dump` output can
-    # change across Python releases, and a red guard after an upgrade would be
-    # noise, not drift. An unknown version SKIPS rather than fails -- a guard that
-    # cries wolf on a toolchain bump is a guard someone deletes.
-    # MEDIDO el 2026-08-29 sobre ClaudeBackend.run en CPython 3.14.
-    expected = {(3, 14): "ca7c7fbff2767f35a83eebedd14f0790008574253e41b875b1f102bcb0172ecc"}
-    key = sys.version_info[:2]
-    if key not in expected:
-        pytest.skip(f"no frozen-copy digest recorded for Python {key[0]}.{key[1]}")
-
-    assert digest == expected[key], (
+    # The digest is keyed by interpreter minor version because `ast.dump` output
+    # DOES change across releases -- measured, not assumed: 3.12 differs from
+    # 3.13, which matches 3.14. Every version the project supports
+    # (`requires-python >= 3.12`) is recorded, and an unrecorded one FAILS: no
+    # interpreter is pinned, so a skip could silence the sole witness in CI
+    # itself.
+    # MEASURED on 2026-09-02 over ClaudeBackend.run on CPython 3.12, 3.13, 3.14.
+    expected = {
+        (3, 12): "3c36a5be60c24829a97e766e01a1fddf6938b3a2ad4f3fe5f901d6825de06969",
+        (3, 13): "ca7c7fbff2767f35a83eebedd14f0790008574253e41b875b1f102bcb0172ecc",
+        (3, 14): "ca7c7fbff2767f35a83eebedd14f0790008574253e41b875b1f102bcb0172ecc",
+    }
+    assert digest == _recorded(expected, sys.version_info[:2]), (
         "ClaudeBackend.run changed. It is frozen dead code until MS5. If the edit "
         "is deliberate, mirror it in ClaudeTrio._run_one and update this digest; "
         "if it is not, revert it."
@@ -110,8 +141,8 @@ def test_the_frozen_retry_loop_and_its_guards_have_not_drifted():
     Both are dead on the Claude path and live on the rotation path, so a fix
     applied to one copy and not the other would pass every other test.
 
-    Same normalisation and the same version-keyed skip as the transport guard: a
-    guard that cries wolf on a toolchain bump is a guard someone deletes.
+    Same normalisation and the same version-keyed table as the transport guard,
+    including its refusal to skip on an unrecorded interpreter.
     """
     import inspect
     import io
@@ -125,18 +156,28 @@ def test_the_frozen_retry_loop_and_its_guards_have_not_drifted():
         encoding="utf-8",
     ).read()
 
-    # MEDIDO el 2026-08-29 en CPython 3.14.
+    # MEASURED on 2026-09-02 on CPython 3.12, 3.13 and 3.14.
     expected = {
+        (3, 12): {
+            "_legacy_tracked_launch": (
+                "c02bae69cdfa8919d53516e39ce5e529dba4195e56313426f3cc4c0bfaef131d"
+            ),
+            "launch_agent": ("2f7a118ebaf5d72b7e34605a7318af2269262bfc2ac9e7242fd70eb4a3b864df"),
+        },
+        (3, 13): {
+            "_legacy_tracked_launch": (
+                "56c100b3e3c0b13e9a66f8f3ff8cf47b1400428e1a68e4a0acb22fae2856915d"
+            ),
+            "launch_agent": ("af0e2e3c48d825a968c0ffa9efd9bf47c071a6b6d41b2e1eca6d75ee186a4b78"),
+        },
         (3, 14): {
             "_legacy_tracked_launch": (
                 "56c100b3e3c0b13e9a66f8f3ff8cf47b1400428e1a68e4a0acb22fae2856915d"
             ),
             "launch_agent": ("af0e2e3c48d825a968c0ffa9efd9bf47c071a6b6d41b2e1eca6d75ee186a4b78"),
-        }
+        },
     }
-    key = sys.version_info[:2]
-    if key not in expected:
-        pytest.skip(f"no frozen-copy digests recorded for Python {key[0]}.{key[1]}")
+    recorded = _recorded(expected, sys.version_info[:2])
 
     actual = {
         "_legacy_tracked_launch": _closure_digest(module_source, "_legacy_tracked_launch"),
@@ -144,8 +185,26 @@ def test_the_frozen_retry_loop_and_its_guards_have_not_drifted():
     }
 
     for name, digest in actual.items():
-        assert digest == expected[key][name], (
+        assert digest == recorded[name], (
             f"{name} changed. It is frozen dead code on the Claude path until MS5. "
             f"If the edit is deliberate, mirror it in its ClaudeTrio twin and update "
             f"this digest; if it is not, revert it."
         )
+
+
+def test_an_unrecorded_interpreter_fails_the_guard_instead_of_skipping_it():
+    """A guard that can go silent is not a guard.
+
+    These digests are the ONLY witness for drift in three frozen functions, so
+    an interpreter with no recorded digest must be loud. `pytest.skip` was the
+    original answer -- on the reasoning that a red guard after a toolchain bump
+    is noise -- but the project supports Python 3.12 and up, pins no interpreter
+    in `.python-version`, and CI resolves whatever satisfies that floor. Skipping
+    therefore meant the sole witness could be absent from the pipeline itself,
+    with nothing saying so.
+
+    Failing is the correct trade: someone must MEASURE the new interpreter and
+    record it, which is the same work the skip was deferring indefinitely.
+    """
+    with pytest.raises(AssertionError, match="no frozen-copy digest recorded"):
+        _recorded({(3, 14): "x"}, (9, 99))
