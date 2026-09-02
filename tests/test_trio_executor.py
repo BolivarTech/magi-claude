@@ -499,6 +499,10 @@ def test_artifact_writes_are_fail_soft(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     for agent in ("melchior", "balthasar", "caspar"):
         assert f"WARNING: Failed to persist {agent}.prompt.txt" in err
+        # The OTHER fail-soft writer, which the test patched to fail too and
+        # then said nothing about: pinning one of two warnings leaves the
+        # unpinned one free to disappear.
+        assert f"WARNING: Failed to persist {agent}.stderr.log" in err
         assert "No space left on device" in err
 
 
@@ -1075,3 +1079,42 @@ def test_the_test_double_warns_on_a_failing_status_callback_like_the_executor(ca
     err = capsys.readouterr().err
     assert "WARNING: status callback failed for melchior (running)" in err
     assert "the display is broken" in err
+
+
+def test_a_failed_stderr_log_write_on_the_timeout_path_still_tells_the_operator(
+    monkeypatch, tmp_path, capsys
+):
+    """The third fail-soft writer -- the one on the timeout path -- had no witness.
+
+    A timeout persists the buffered stderr before raising, and that write is
+    fail-soft for the same reason the others are: a full disk must not turn a
+    timeout into a different error. Its warning was the one site of the three
+    that nothing asserted, so it could have gone silent unnoticed.
+    """
+
+    async def fake_exec(*args, **kwargs):
+        return _HangingProc()
+
+    def failing_write(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("trio_executor.asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("trio_executor._write_stderr_log", failing_write)
+    _write_prompts(tmp_path)
+    killed["caspar"] = False
+
+    out = asyncio.run(
+        ClaudeTrio().run_trio(
+            "P",
+            str(tmp_path),
+            str(tmp_path),
+            0,
+            {"melchior": "opus"},
+            1,
+        )
+    )
+
+    assert isinstance(out["melchior"], TimeoutError)
+    err = capsys.readouterr().err
+    assert "WARNING: Failed to persist melchior.stderr.log on timeout" in err
+    assert "No space left on device" in err
