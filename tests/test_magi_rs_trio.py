@@ -1,0 +1,472 @@
+# Author: Julian Bolivar
+# Version: 1.0.0
+# Date: 2026-09-18
+"""Tests for MagiRsTrio, the second TrioExecutor (MS3 Task 3).
+
+Every child process is faked: nothing here launches a binary, reaches the
+network, or touches the plugin's real ``bin/``.
+"""
+
+import json
+import os
+from types import SimpleNamespace
+
+import pytest
+
+from magi_rs_bootstrap import DigestMismatchError
+from magi_rs_preflight import ProjectNotInitialisedError
+from magi_rs_trio import (
+    MagiRsContractError,
+    MagiRsProcessError,
+    MagiRsTrio,
+    build_argv,
+    resolve_timeout,
+)
+from synthesize import ValidationError
+
+_MS0_FIXTURE = os.path.join(
+    os.path.dirname(__file__), "fixtures", "magi-rs-consult", "three-agents.json"
+)
+
+
+# --------------------------------------------------------------------------
+# Helpers -- written before the tests so nothing is invented
+# --------------------------------------------------------------------------
+
+
+class _FakeProcess:
+    """Stands in for the magi-rs child. Never launches anything."""
+
+    def __init__(self, stdout=b"", stderr=b"", returncode=0):
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+        self.stdin_seen = None
+        self.killed = False
+
+    async def communicate(self, input=None):
+        self.stdin_seen = input
+        return self._stdout, self._stderr
+
+    async def wait(self):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+
+
+def _exec_returning(process):
+    async def _fake_exec(*argv, **kwargs):
+        return process
+
+    return _fake_exec
+
+
+def _ok_payload():
+    """A three-verdict consult envelope, derived from the MS0 fixture."""
+    with open(_MS0_FIXTURE, encoding="utf-8") as handle:
+        return handle.read().encode("utf-8")
+
+
+def _raising(exception):
+    """A zero-argument callable that raises, for stubbing a failing method."""
+
+    def _raise():
+        raise exception
+
+    return _raise
+
+
+def _payload_with_broken_verdict(agent):
+    """The MS0 envelope with one mage's verdict missing a required key."""
+    envelope = json.loads(open(_MS0_FIXTURE, encoding="utf-8").read())
+    for verdict in envelope["consult"]["agents"]:
+        if verdict["agent"] == agent:
+            del verdict["recommendation"]  # one of the seven
+    return json.dumps(envelope).encode("utf-8")
+
+
+def _stub_pin():
+    """A Pin whose contents no test in this file inspects.
+
+    The bootstrap is stubbed out in every test here, so nothing reads it -- but
+    the constructor requires it, and passing None would make a signature change
+    fail as an AttributeError deep inside instead of at the call site.
+    """
+    return SimpleNamespace(version="0.19.1", assets={}, repository="BolivarTech/magi")
+
+
+def _stub_bootstrap(monkeypatch):
+    monkeypatch.setattr(
+        "magi_rs_trio.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(
+            ensure=lambda: "/bin/magi-rs", verify=lambda: "/bin/magi-rs"
+        ),
+    )
+
+
+def _initialise(tmp_path):
+    (tmp_path / ".magi").mkdir(exist_ok=True)
+    (tmp_path / ".magi" / "magi.toml").write_text("provider='ollama'", encoding="utf-8")
+
+
+async def _invoke(tmp_path, prompt="a payload", on_state=None):
+    """Build a MagiRsTrio over tmp_path and run it. Shared by the runners."""
+    trio = MagiRsTrio(
+        workdir=str(tmp_path),
+        mode="code-review",
+        timeout=1800,
+        bin_dir=str(tmp_path / "bin"),
+        pin=_stub_pin(),
+    )
+    return await trio.run_trio(
+        prompt=prompt,
+        agents_dir="agents",
+        output_dir=str(tmp_path),
+        timeout=1800,
+        models={},
+        max_attempts=1,
+        on_state=on_state,
+    )
+
+
+async def _run(monkeypatch, tmp_path, prompt="a payload", on_state=None):
+    """Drive one MagiRsTrio.run_trio against a faked child process."""
+    _initialise(tmp_path)
+    _stub_bootstrap(monkeypatch)
+    return await _invoke(tmp_path, prompt=prompt, on_state=on_state)
+
+
+async def _run_without_bootstrap_stub(monkeypatch, tmp_path):
+    """Like `_run`, but leaves the caller's BinaryBootstrap stub in place."""
+    _initialise(tmp_path)
+    return await _invoke(tmp_path)
+
+
+async def _run_without_magi_dir(monkeypatch, tmp_path):
+    """Like `_run`, but with NO .magi/ -- the preflight must stop the launch."""
+    _stub_bootstrap(monkeypatch)
+    return await _invoke(tmp_path)
+
+
+def _argv(**overrides):
+    base = dict(
+        executable="/plugin/bin/magi-rs",
+        workdir="/repo",
+        mode="code-review",
+        timeout=1800,
+    )
+    base.update(overrides)
+    return build_argv(**base)
+
+
+# --------------------------------------------------------------------------
+# The argv
+# --------------------------------------------------------------------------
+
+
+def test_the_argv_uses_consult_and_not_query():
+    assert _argv()[1] == "consult"
+    assert "query" not in _argv()
+
+
+def test_the_argv_carries_the_working_directory_explicitly():
+    argv = _argv(workdir="/somewhere/else")
+    assert argv[argv.index("-w") + 1] == "/somewhere/else"
+
+
+def test_the_argv_requests_structured_verdicts():
+    # Without it the verdict arrives only as markdown and R14 is impossible.
+    assert "--structured-verdicts" in _argv()
+
+
+def test_the_argv_always_declares_the_mode_explicitly():
+    argv = _argv(mode="design")
+    assert argv[argv.index("--mode") + 1] == "design"
+
+
+def test_the_argv_always_declares_the_content_untrusted():
+    assert "--untrusted-content" in _argv()
+
+
+def test_the_argv_always_passes_no_memory():
+    # BDD-22. Present because it is what allows running WITHOUT a passphrase --
+    # not for memory isolation, which consult gives by construction.
+    assert "--no-memory" in _argv()
+
+
+def test_the_argv_never_carries_a_passphrase_flag():
+    assert "-p" not in _argv()
+    assert "--passphrase" not in _argv()
+
+
+def test_the_argv_carries_the_wall_timeout():
+    argv = _argv(timeout=900)
+    assert argv[argv.index("--timeout") + 1] == "900"
+
+
+def test_the_argv_requests_json_output():
+    # Without it there is nothing to parse, and the failure surfaces as "the
+    # output is not JSON" -- true, and three steps away from the cause.
+    argv = _argv()
+    assert argv[argv.index("--output-format") + 1] == "json"
+
+
+def test_the_argv_never_carries_max_tool_calls():
+    # BDD-32: this path uses no tool loop -- the material is in the payload --
+    # so a tool-call bound would be a decorative flag, which the spec forbids
+    # just as firmly as omitting a load-bearing one.
+    assert "--max-tool-calls" not in _argv()
+
+
+def test_an_unknown_mode_is_refused_before_the_process_starts():
+    with pytest.raises(MagiRsContractError):
+        _argv(mode="whatever")
+
+
+# --------------------------------------------------------------------------
+# The two error classes
+# --------------------------------------------------------------------------
+
+
+def test_a_deterministic_contract_failure_is_NOT_retryable():
+    # D6: the orchestrator retries on ValidationError. A forgotten
+    # --structured-verdicts fails identically every time, so retrying it burns
+    # three real trio runs and then reports a transient failure. The guard is
+    # STRUCTURAL: the class simply is not in the caught tuple.
+    assert not issubclass(MagiRsContractError, ValidationError)
+
+
+def test_a_process_failure_IS_retryable():
+    # The mirror. A child that timed out or was OOM-killed may succeed on a
+    # second attempt, which is exactly what the existing retry is for.
+    assert issubclass(MagiRsProcessError, ValidationError)
+
+
+# --------------------------------------------------------------------------
+# The timeout
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected", "warns"),
+    [(None, 1800, False), (1800, 1800, False), (900, 900, True), (60, 60, True)],
+)
+def test_the_timeout_resolves_to_the_measured_healthy_default_and_warns_below_it(
+    flag, expected, warns
+):
+    # MS0 measured 149 s per mage attempt at --timeout 1800. The plugin's
+    # historical 900 halves that, back toward the 72 s ceiling that made E-B
+    # abort with one seat of three -- so it is honoured, and it warns.
+    seconds, warning = resolve_timeout(flag)
+    assert seconds == expected
+    assert (warning is not None) == warns
+
+
+@pytest.mark.parametrize("bad", [0, -1, -1800])
+def test_a_non_positive_timeout_is_refused_deterministically(bad):
+    # The Raises block promised this and nothing executed it. Deterministic, so
+    # MagiRsContractError -- a retry with the same value fails the same way.
+    with pytest.raises(MagiRsContractError):
+        resolve_timeout(bad)
+
+
+# --------------------------------------------------------------------------
+# The launch
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_travels_on_stdin_and_never_in_the_argv(monkeypatch, tmp_path):
+    # The ~32K argv limit on Windows is still in force.
+    seen = {}
+    process = _FakeProcess(_ok_payload())
+
+    async def _fake_exec(*argv, **kwargs):
+        seen["argv"] = argv
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+    prompt = "x" * 100_000
+    await _run(monkeypatch, tmp_path, prompt=prompt)
+    assert prompt not in " ".join(seen["argv"])
+    assert process.stdin_seen == prompt.encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_the_child_environment_has_no_passphrase(monkeypatch, tmp_path):
+    seen = {}
+
+    async def _fake_exec(*argv, **kwargs):
+        seen["env"] = kwargs["env"]
+        return _FakeProcess(_ok_payload())
+
+    monkeypatch.setenv("MAGI_PASSPHRASE", "hunter2")
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+    await _run(monkeypatch, tmp_path)
+    assert "MAGI_PASSPHRASE" not in seen["env"]
+
+
+@pytest.mark.asyncio
+async def test_a_nonzero_exit_raises_relaying_the_code_and_stderr(monkeypatch, tmp_path):
+    # BDD-14a: no report is produced, and NOTHING is recovered from the
+    # partial output.
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"", stderr=b"boom", returncode=3)),
+    )
+    # PROCESS, not CONTRACT: the child ran and failed, which may be an OOM kill
+    # or a transient CLI fault, so the orchestrator's retry is right to fire.
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    assert "3" in str(exc.value) and "boom" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_a_process_failure_names_the_allowlist_and_what_it_withheld(monkeypatch, tmp_path):
+    # R7: the allowlist's failure mode is a certificate or host error that
+    # looks nothing like "a variable was missing", so the message names the
+    # allowlist as a suspect and lists the parent variables that did not travel
+    # -- names only, never values.
+    monkeypatch.setenv("CORP_PROXY_CA_HINT", "/etc/corp.pem")
+    monkeypatch.setenv("MAGI_PASSPHRASE", "hunter2")
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"", stderr=b"certificate verify failed", returncode=1)),
+    )
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    message = str(exc.value)
+    assert "allowlist" in message
+    assert "CORP_PROXY_CA_HINT" in message
+    assert "hunter2" not in message and "/etc/corp.pem" not in message
+
+
+@pytest.mark.asyncio
+async def test_output_that_is_not_json_says_so_and_never_scrapes_the_markdown(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"## Report\n\nnot json at all")),
+    )
+    with pytest.raises(MagiRsContractError) as exc:
+        await _run(monkeypatch, tmp_path)
+    assert "json" in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_json_without_the_agents_key_names_the_forgotten_flag(monkeypatch, tmp_path):
+    # BDD-14b: the two failures are DIFFERENT and the message must say which
+    # one happened. A missing `agents` means --structured-verdicts was omitted.
+    payload = json.dumps({"consult": {"report": "# markdown"}, "stop_reason": "done"})
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(payload.encode())),
+    )
+    with pytest.raises(MagiRsContractError) as exc:
+        await _run(monkeypatch, tmp_path)
+    assert "--structured-verdicts" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_run_trio_returns_one_validated_verdict_per_mage(monkeypatch, tmp_path):
+    # The happy path, absent from the first draft: every test asserted a
+    # REJECTION, and a suite like that is compatible with a run_trio that can
+    # never succeed. (The same shape of hole the MS2 gate found in verify().)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(_ok_payload()))
+    )
+    verdicts = await _run(monkeypatch, tmp_path)
+    assert set(verdicts) == {"melchior", "balthasar", "caspar"}
+    assert all(isinstance(v, dict) for v in verdicts.values())
+    assert all(set(v) >= {"agent", "verdict", "confidence"} for v in verdicts.values())
+
+
+@pytest.mark.asyncio
+async def test_run_trio_persists_the_raw_envelope_as_its_own_artifact(monkeypatch, tmp_path):
+    # R16: the raw magi-rs output is kept under a name of its own, so two
+    # producers never share one file name.
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(_ok_payload()))
+    )
+    await _run(monkeypatch, tmp_path)
+    assert (tmp_path / "magi-rs-raw.json").read_bytes() == _ok_payload()
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_breaking_the_seven_key_contract_is_rejected_per_mage(
+    monkeypatch, tmp_path
+):
+    # BDD-14c: rejected EXACTLY as today, with no new validation code and no
+    # relaxing of the contract -- and it does not take the other two down.
+    payload = _payload_with_broken_verdict("caspar")
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(payload)))
+    verdicts = await _run(monkeypatch, tmp_path)
+    assert isinstance(verdicts["caspar"], ValidationError)
+    assert isinstance(verdicts["melchior"], dict)
+
+
+@pytest.mark.asyncio
+async def test_a_binary_that_does_not_verify_stops_the_launch(monkeypatch, tmp_path):
+    # R4 wired, not merely asserted in prose: nothing is launched.
+    launched: list[object] = []
+    monkeypatch.setattr("asyncio.create_subprocess_exec", lambda *a, **k: launched.append(a))
+    monkeypatch.setattr(
+        "magi_rs_trio.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(
+            ensure=lambda: "/bin/magi-rs",
+            verify=_raising(DigestMismatchError("digest differs")),
+        ),
+    )
+    with pytest.raises(DigestMismatchError):
+        await _run_without_bootstrap_stub(monkeypatch, tmp_path)
+    assert launched == []
+
+
+@pytest.mark.asyncio
+async def test_an_uninitialised_project_stops_the_launch(monkeypatch, tmp_path):
+    # Fail before spending: the preflight costs nothing, the launch costs a run.
+    launched: list[object] = []
+    monkeypatch.setattr("asyncio.create_subprocess_exec", lambda *a, **k: launched.append(a))
+    with pytest.raises(ProjectNotInitialisedError):
+        await _run_without_magi_dir(monkeypatch, tmp_path)
+    assert launched == []
+
+
+@pytest.mark.asyncio
+async def test_run_trio_emits_ONE_status_node_not_three(monkeypatch, tmp_path):
+    """D5/BDD-27, executed instead of asserted.
+
+    The plugin launches ONE child that runs the whole trio, so it cannot know
+    when an individual mage starts or finishes. Three nodes would be a display
+    that INVENTS progress -- worse than none, because it looks informed.
+    """
+    seen = []
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(_ok_payload()))
+    )
+    await _run(monkeypatch, tmp_path, on_state=lambda node, state: seen.append((node, state)))
+
+    nodes = {node for node, _ in seen}
+    assert len(nodes) == 1, f"one child, one node -- got {nodes}"
+    assert not (nodes & {"melchior", "balthasar", "caspar"}), "per-mage nodes are invented progress"
+
+
+@pytest.mark.asyncio
+async def test_a_status_callback_that_raises_does_not_take_the_run_down(monkeypatch, tmp_path):
+    """The verdicts are the product; the tree is decoration.
+
+    Same fail-soft contract `_safe_display_update` already has on the Claude
+    path -- and the reason `_emit` swallows `Exception` rather than letting it
+    through.
+    """
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(_ok_payload()))
+    )
+
+    def _explode(node, state):
+        raise RuntimeError("the display is broken")
+
+    verdicts = await _run(monkeypatch, tmp_path, on_state=_explode)
+    assert set(verdicts) == {"melchior", "balthasar", "caspar"}
