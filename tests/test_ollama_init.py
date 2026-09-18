@@ -134,10 +134,18 @@ def test_template_rotation_tunables_reparse_to_the_defaults(tmp_path):
 
 from types import SimpleNamespace  # noqa: E402 - block layout mirrors the plan
 
-from conftest import _Ok  # noqa: E402
 from magi_rs_bootstrap import DigestMismatchError  # noqa: E402
 from magi_rs_env import EnvironmentPolicy  # noqa: E402
 from ollama_init import run_ollama_init  # noqa: E402
+
+
+class _Ok:
+    """A completed ``subprocess.run`` result for stubbing a child that exited 0."""
+
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
 
 
 @pytest.fixture(autouse=True)
