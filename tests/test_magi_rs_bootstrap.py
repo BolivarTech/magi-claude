@@ -738,3 +738,30 @@ def test_ensure_refuses_before_touching_anything_when_bin_is_not_a_directory(tmp
     with pytest.raises(UnsafeBinDirectoryError):
         BinaryBootstrap(_pin_with("0" * 64), str(not_a_dir)).ensure()
     assert downloads == []
+
+
+def test_ensure_clears_a_leftover_of_its_own_pid_before_downloading(tmp_path):
+    # Pids are reused across runs: a crashed earlier bootstrap can leave a
+    # temporary carrying THIS pid's token at the exact archive path the next
+    # run will use. download_to refuses to overwrite, so the install path must
+    # sweep its own leftovers first or the retry would fail forever.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable = b"#!/bin/sh\necho magi-rs 0.19.1\n"
+    archive_path = tmp_path / "asset.tar.gz"
+    _make_tar(archive_path, [(f"magi-rs-v0.19.1-x/{_installed_name()}", executable)])
+    payload = archive_path.read_bytes()
+    leftover = bin_dir / f".magi-rs-tmp-{os.getpid()}-magi-rs-vX-test.tar.gz"
+    leftover.write_bytes(b"half of a download that died")
+
+    with _Server(payload) as server:
+        pin = _pin_with(
+            hashlib.sha256(executable).hexdigest(),
+            archive_sha256=hashlib.sha256(payload).hexdigest(),
+            url=server.url,
+        )
+        with _version_reporting("magi-rs 0.19.1"):
+            installed = BinaryBootstrap(pin, str(bin_dir)).ensure()
+
+    assert sha256_of(installed) == hashlib.sha256(executable).hexdigest()
+    assert sorted(p.name for p in bin_dir.iterdir()) == [_installed_name()]
