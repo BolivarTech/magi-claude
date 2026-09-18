@@ -14,18 +14,23 @@ import io
 import os
 import tarfile
 import threading
+import time
 import zipfile
 from types import SimpleNamespace
 
 import pytest
 
 from magi_rs_bootstrap import (
+    _STALE_TEMPORARY_SECONDS,  # the cutoff the age tests backdate against
     DigestMismatchError,
     DownloadError,
     UnsafeArchiveError,
+    UnsafeBinDirectoryError,
     download_to,
     extract_executable,
+    require_real_directory,
     sha256_of,
+    sweep,
 )
 
 # --------------------------------------------------------------------------
@@ -305,3 +310,185 @@ def test_an_archive_without_the_executable_is_refused_naming_it(tmp_path):
     with pytest.raises(UnsafeArchiveError) as exc:
         extract_executable(str(archive), "tar.gz", str(destination), "magi-rs")
     assert "magi-rs" in str(exc.value)
+
+
+# --------------------------------------------------------------------------
+# Block 3: the bin/ precondition and the sweep -- the only destructive operation
+# --------------------------------------------------------------------------
+
+
+def test_a_missing_bin_directory_is_created(tmp_path):
+    target = tmp_path / "bin"
+    require_real_directory(str(target))
+    assert target.is_dir()
+
+
+def test_a_real_bin_directory_is_accepted(tmp_path):
+    target = tmp_path / "bin"
+    target.mkdir()
+    require_real_directory(str(target))  # does not raise
+
+
+def test_a_bin_that_is_a_regular_file_is_refused_naming_it(tmp_path):
+    # R3c: the condition is "not a real directory" -- ONE condition, not a
+    # list of forbidden kinds. A list gets enumerated short and the missing
+    # case falls through to the happy path.
+    target = tmp_path / "bin"
+    target.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(UnsafeBinDirectoryError) as exc:
+        require_real_directory(str(target))
+    assert str(target) in str(exc.value)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows")
+def test_a_bin_that_is_a_symlink_is_refused_naming_its_target(tmp_path):
+    victim = tmp_path / "cargo-bin"
+    victim.mkdir()
+    (victim / "magi-rs").write_bytes(b"the user's own install")
+    target = tmp_path / "bin"
+    target.symlink_to(victim, target_is_directory=True)
+    with pytest.raises(UnsafeBinDirectoryError) as exc:
+        require_real_directory(str(target))
+    assert str(victim) in str(exc.value)
+    # Nothing was touched through the link:
+    assert (victim / "magi-rs").read_bytes() == b"the user's own install"
+
+
+def test_the_sweep_leaves_the_kept_executable_and_removes_the_rest(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "magi-rs").write_bytes(b"pinned")
+    (bin_dir / "magi-rs.exe").write_bytes(b"previous version")
+    (bin_dir / f".magi-rs-tmp-{os.getpid()}-asset").write_bytes(b"our own leftover")
+    (bin_dir / f".magi-rs-old-{os.getpid()}-old").write_bytes(b"our own discard")
+    sweep(str(bin_dir), keep="magi-rs")
+    assert sorted(p.name for p in bin_dir.iterdir()) == ["magi-rs"]
+
+
+def test_the_sweep_SPARES_another_process_discard(tmp_path):
+    # A foreign discard is not inert rubbish. `_replace` renames the old binary
+    # aside and renames it BACK if the second rename fails; deleting it inside
+    # that window destroys the rollback and leaves bin/ with no executable.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "magi-rs").write_bytes(b"pinned")
+    foreign = bin_dir / ".magi-rs-old-999999-old"
+    foreign.write_bytes(b"another process may still roll back to this")
+    sweep(str(bin_dir), keep="magi-rs")
+    assert foreign.exists()
+
+
+def test_the_sweep_SPARES_another_process_fresh_temporary(tmp_path):
+    # BDD-3l. This is the round-1 CRITICAL, pinned: deleting a foreign
+    # temporary that is still in flight breaks the very concurrency guarantee
+    # the module claims. A test that only checked "bin/ ends up clean" would
+    # BLESS that bug -- and the first draft of the test above did exactly that.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "magi-rs").write_bytes(b"pinned")
+    foreign = bin_dir / ".magi-rs-tmp-999999-asset"
+    foreign.write_bytes(b"another bootstrap is downloading into this RIGHT NOW")
+    sweep(str(bin_dir), keep="magi-rs")
+    assert foreign.exists()
+
+
+def test_the_sweep_COLLECTS_another_process_abandoned_temporary(tmp_path):
+    # BDD-3m. The mirror: past the cutoff it cannot still be in flight, and
+    # leaving it forever would break "exactly one executable" the other way.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "magi-rs").write_bytes(b"pinned")
+    abandoned = bin_dir / ".magi-rs-tmp-999999-asset"
+    abandoned.write_bytes(b"a bootstrap that died last week")
+    old = time.time() - (_STALE_TEMPORARY_SECONDS + 60)
+    os.utime(abandoned, (old, old))
+    sweep(str(bin_dir), keep="magi-rs")
+    assert not abandoned.exists()
+
+
+def test_a_short_pid_does_not_claim_a_longer_pids_temporary(tmp_path, monkeypatch):
+    # BDD-3n. Without the delimiter, pid 42 matches ".magi-rs-tmp-421-..." by
+    # prefix and deletes pid 421's LIVE download. The bug is invisible until
+    # two pids happen to nest, which is exactly when nobody is looking.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "magi-rs").write_bytes(b"pinned")
+    victim = bin_dir / ".magi-rs-tmp-421-asset"
+    victim.write_bytes(b"pid 421 is using this")
+    monkeypatch.setattr(os, "getpid", lambda: 42)
+    sweep(str(bin_dir), keep="magi-rs")
+    assert victim.exists()
+
+
+def test_the_sweep_never_touches_a_file_it_does_not_recognise(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "magi-rs").write_bytes(b"pinned")
+    (bin_dir / "README.md").write_bytes(b"someone put this here")
+    (bin_dir / "ripgrep.exe").write_bytes(b"another tool")
+    sweep(str(bin_dir), keep="magi-rs")
+    assert (bin_dir / "README.md").exists()
+    assert (bin_dir / "ripgrep.exe").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows")
+def test_the_sweep_removes_a_link_and_never_its_target(tmp_path):
+    # R3b limit 3. Deleting the target would leave the sweep's blast radius
+    # OUTSIDE bin/ -- the exact damage limit 1 exists to prevent, entering by
+    # the back door.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    victim = outside / "magi-rs"
+    victim.write_bytes(b"the user's own install")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "magi-rs.exe").symlink_to(victim)
+    (bin_dir / "magi-rs").write_bytes(b"pinned")
+    sweep(str(bin_dir), keep="magi-rs")
+    assert not (bin_dir / "magi-rs.exe").exists()  # the LINK is gone
+    assert victim.read_bytes() == b"the user's own install"  # the TARGET is not
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions only exist on Windows")
+def test_a_bin_that_is_a_windows_junction_is_refused(tmp_path):
+    # R3c's Windows half, and it DOES run on the development platform: a
+    # junction needs no privilege, unlike a symlink. Without this,
+    # `_is_reparse_point` -- the guard that stops the bootstrap writing into
+    # the user's own binary directory -- had zero automated coverage anywhere.
+    import subprocess
+
+    victim = tmp_path / "cargo-bin"
+    victim.mkdir()
+    (victim / "magi-rs.exe").write_bytes(b"the user's own install")
+    target = tmp_path / "bin"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(target), str(victim)],
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(UnsafeBinDirectoryError) as exc:
+        require_real_directory(str(target))
+    assert str(victim) in str(exc.value)
+    assert (victim / "magi-rs.exe").read_bytes() == b"the user's own install"
+
+
+def test_a_delete_that_fails_is_reported_and_does_not_raise(tmp_path, monkeypatch):
+    # R3b limit 4: on Windows an executable in use cannot be deleted. If the
+    # pinned one is present and verified the gate is still correct, so the
+    # sweep warns and the run proceeds; it is idempotent and retries next boot.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "magi-rs").write_bytes(b"pinned")
+    (bin_dir / "magi-rs.exe").write_bytes(b"held open by another run")
+
+    real_unlink = os.unlink
+
+    def _refuse(path, *args, **kwargs):
+        if path.endswith("magi-rs.exe"):
+            raise PermissionError("file in use")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", _refuse)
+    failed = sweep(str(bin_dir), keep="magi-rs")
+    assert [os.path.basename(p) for p in failed] == ["magi-rs.exe"]
