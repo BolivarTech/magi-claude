@@ -83,7 +83,7 @@ from ollama_config import (  # noqa: E402
     OllamaConfigError,
     resolve_config,
 )
-from ollama_init import write_template  # noqa: E402
+from ollama_init import run_ollama_init  # noqa: E402
 from ollama_preflight import (  # noqa: E402
     CONTEXT_GUARD_ENFORCED,
     CONTEXT_GUARD_ESTIMATED,
@@ -2294,19 +2294,21 @@ def main() -> None:
     # happened on an earlier print.
     _enable_utf8_console_io()
 
-    # Short-circuit: --ollama-init scaffolds the repo TOML and exits before
-    # parse_args() so that mode/input positional arguments are not required.
-    # We screen sys.argv directly; the flag is unambiguous (no value follows it).
+    # Short-circuit: --ollama-init delegates to ``magi-rs init`` and exits
+    # before parse_args() so that mode/input positional arguments are not
+    # required. We screen sys.argv directly; the flag is unambiguous (no value
+    # follows it). The whole command is ONE call (R5): no config of the
+    # plugin's own is written, nothing under .claude/ is read.
     if "--ollama-init" in sys.argv[1:]:
         try:
-            path = write_template()
-        except FileExistsError as exc:
-            print(
-                f"Config already exists at {exc}; not overwriting.",
-                file=sys.stderr,
-            )
-            sys.exit(0)
-        print(f"Wrote Ollama config template to {path}")
+            output = run_ollama_init(os.getcwd())
+        except Exception as exc:  # noqa: BLE001 - every bootstrap error is fatal here
+            # The bootstrap's fail-closed errors are siblings of Exception on
+            # purpose; at the CLI boundary each of them is a [FATAL] with its
+            # own actionable message, never a traceback.
+            print(f"[FATAL] {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(output, end="" if output.endswith("\n") else "\n")
         sys.exit(0)
 
     args = parse_args()
