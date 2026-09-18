@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.0.1
+# Version: 1.0.2
 # Date: 2026-09-18
 """Obtain, verify and install the pinned ``magi-rs`` executable.
 
@@ -763,6 +763,9 @@ class BinaryBootstrap:
             self._require_digest(staged, asset.executable_sha256)
             self._replace(staged, final)
         except Exception:
+            # Broad on purpose and never silent: whatever failed, the staged
+            # file must not survive where a later run could take it for an
+            # install; the original exception propagates unchanged.
             _discard(staged)
             raise
         self._sweep_and_warn(_INSTALLED_NAME)
@@ -800,18 +803,25 @@ class BinaryBootstrap:
 
         Raises:
             VersionMismatchError: The reported version is not the pinned one,
-                or the probe exited non-zero.
+                the probe exited non-zero, or it did not answer within
+                ``_VERSION_PROBE_TIMEOUT_SECONDS``.
             OSError: The binary could not be launched.
 
         Side effects:
             Executes ``path`` once, with a timeout.
         """
-        probe = subprocess.run(
-            [path, _VERSION_FLAG],
-            capture_output=True,
-            text=True,
-            timeout=_VERSION_PROBE_TIMEOUT_SECONDS,
-        )
+        try:
+            probe = subprocess.run(
+                [path, _VERSION_FLAG],
+                capture_output=True,
+                text=True,
+                timeout=_VERSION_PROBE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise VersionMismatchError(
+                f"{path} {_VERSION_FLAG} did not answer within "
+                f"{_VERSION_PROBE_TIMEOUT_SECONDS}s; no usable version"
+            ) from exc
         reported = probe.stdout.strip()
         if probe.returncode != 0 or not reported:
             raise VersionMismatchError(
@@ -860,7 +870,7 @@ class BinaryBootstrap:
 
         Side effects:
             Renames within ``bin/``; may leave a discard file behind for the
-            sweep to collect.
+            sweep to collect and report.
         """
         try:
             os.replace(staged, final)
@@ -870,8 +880,11 @@ class BinaryBootstrap:
             # OSError: only "the destination is a running executable" (Windows)
             # is what the rename dance below addresses. A full disk or a
             # read-only directory must propagate, or bin/ ends up with NO
-            # executable after the old one was renamed aside.
-            pass
+            # executable after the old one was renamed aside. And with no
+            # previous binary there is nothing to rename aside, so the error
+            # is the original one, not a stray FileNotFoundError.
+            if not os.path.lexists(final):
+                raise
         discard = os.path.join(self._bin_dir, f"{_DISCARD_PREFIX}{os.getpid()}-{int(time.time())}")
         os.replace(final, discard)
         try:
@@ -881,11 +894,7 @@ class BinaryBootstrap:
             # that follows names the held file (BDD-3h).
             os.replace(discard, final)
             raise
-        try:
-            os.unlink(discard)
-        except OSError:
-            print(
-                f"[WARNING] the previous magi-rs is still in use and was left as {discard}; "
-                "the next bootstrap will remove it",
-                file=sys.stderr,
-            )
+        # Best effort: a discard still held by a running old binary cannot be
+        # deleted on Windows. The sweep that follows in ensure() retries it and
+        # is the single place that warns, so nothing is reported twice.
+        _discard(discard)
