@@ -25,6 +25,7 @@ import shutil
 import stat
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -359,3 +360,215 @@ def _extract_zip(archive: str, staging: str, executable_name: str) -> str | None
                 written = _guarded_copy(source, target, written, compressed)
             found = target
     return found
+
+
+_EXECUTABLE_NAMES = ("magi-rs", "magi-rs.exe")
+"""The ONLY names the sweep matches. Never a generic directory wipe: a user may
+legitimately keep other files here."""
+
+_DISCARD_PREFIX = ".magi-rs-old-"
+"""Prefix of a previous binary renamed aside because it could not be replaced
+in place (Windows holds a running executable). Carries the pid and a trailing
+``-`` exactly like ``_TEMP_PREFIX``."""
+
+_STALE_TEMPORARY_SECONDS = 3600
+"""How old ANOTHER process's temporary must be before the sweep may remove it.
+
+**Chosen, not derived, and the distinction is the point.** An earlier draft
+summed the download and extraction timeouts and called the result a bound --
+but ``_HTTP_TIMEOUT_SECONDS`` is a per-``read()`` timeout, not a total, and
+nothing enforced a deadline over the extraction at all. A docstring proving a
+property from premises the code does not enforce is worse than an unproven
+number: it reads as a guarantee. *(Caught by the Checkpoint 2 gate, round 2, in
+all three seats.)*
+
+One hour is justified on its own terms: it is far longer than any plausible
+bootstrap of a ~10 MB asset on any link that completes at all, so a temporary
+older than this is abandoned with practical certainty -- while a bootstrap that
+IS still running keeps its file. The cost of erring long is one leftover file
+until the next run; the cost of erring short is deleting a live download."""
+
+
+class UnsafeBinDirectoryError(Exception):
+    """``bin/`` exists and is not a real directory.
+
+    Deliberately NOT a subclass of ``ValidationError``: fail-closed. If the
+    container is not trustworthy, not even READING from it to verify a digest
+    is meaningful -- there is no way to know which directory is being read.
+    """
+
+
+def require_real_directory(path: str) -> None:
+    """Assert that ``path`` is a real directory, creating it if absent.
+
+    This is the precondition of the WHOLE bootstrap (R3c) -- download,
+    extraction, chmod, rename and sweep -- evaluated exactly once, before
+    anything is touched. It is not a guard repeated at each step: a guard you
+    must remember to repeat in five places is forgotten in the sixth, and the
+    dangerous half is the WRITE, not the delete. A ``bin/`` linked to
+    ``~/.cargo/bin`` would make every write land in the user's own binary
+    directory, overwriting their installation.
+
+    Args:
+        path: The plugin's ``bin/`` directory.
+
+    Returns:
+        None.
+
+    Raises:
+        UnsafeBinDirectoryError: ``path`` exists and is not a real directory --
+            a symlink, a Windows reparse point (junction, mount point), or a
+            regular file. The message names the path, what it is, and its
+            target if it is a link.
+        OSError: The directory cannot be created.
+
+    Side effects:
+        Creates ``path`` when it does not exist.
+    """
+    if not os.path.lexists(path):
+        os.makedirs(path)
+        return
+    if os.path.islink(path) or _is_reparse_point(path):
+        try:
+            target = os.readlink(path)
+        except OSError:
+            target = "<unresolvable>"
+        raise UnsafeBinDirectoryError(
+            f"{path} is a link to {target}, not a real directory; the bootstrap refuses to "
+            "write through or sweep through a link. Replace it with a real directory."
+        )
+    if not os.path.isdir(path):
+        raise UnsafeBinDirectoryError(
+            f"{path} exists and is not a directory; the bootstrap refuses to touch it. "
+            "Remove it so a real bin/ directory can be created."
+        )
+
+
+def _is_reparse_point(path: str) -> bool:
+    """Report whether a path is a Windows junction or mount point.
+
+    ``os.path.islink`` does not report junctions, which are exactly as
+    dangerous as a symlink for this purpose.
+
+    Args:
+        path: Directory to inspect.
+
+    Returns:
+        True if the entry carries the reparse-point attribute. Always False on
+        non-Windows platforms.
+
+    Raises:
+        UnsafeBinDirectoryError: On Windows, the attribute cannot be read. The
+            probe fails CLOSED: answering "not a reparse point" when unsure
+            would let the bootstrap write through a junction.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        attributes = os.lstat(path).st_file_attributes
+    except (OSError, AttributeError) as exc:
+        raise UnsafeBinDirectoryError(
+            f"{path}: cannot determine whether it is a reparse point ({exc}); refusing to "
+            "proceed on an unknown directory kind"
+        ) from exc
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def sweep(bin_dir: str, keep: str) -> list[str]:
+    """Delete every magi-rs executable in ``bin_dir`` except ``keep``.
+
+    This is the only destructive operation in the whole feature, and it obeys
+    four limits (R3b):
+
+    1. **Only inside the plugin's own bin/.** Never a ``magi-rs`` on PATH, in
+       ``~/.cargo/bin``, or anywhere else -- the user may have their own
+       install and destroying it would be real damage caused by a plugin that
+       had no business touching it.
+    2. **The directory has already passed** :func:`require_real_directory`.
+       The sweep does NOT resolve ``bin_dir``.
+    3. **Only files matching a known name** (``_EXECUTABLE_NAMES`` and this
+       module's own temporaries). Never a generic wipe.
+    4. **Links are unlinked, never followed.** The directory entry is removed;
+       whatever it pointed at survives. Following one would put the blast
+       radius outside limit 1 by the back door. (Hard links need no special
+       case: removing one entry leaves the file alive through its others.)
+
+    A delete that fails does NOT abort: on Windows an executable held by a
+    concurrent run cannot be deleted, and if the pinned one is present and
+    verified the gate is still correct. The sweep is idempotent and retries on
+    the next start.
+
+    Args:
+        bin_dir: The plugin's ``bin/``, already validated.
+        keep: File name of the pinned executable to preserve.
+
+    Returns:
+        Paths that could not be deleted, for the caller to warn about. Empty
+        when everything was removed.
+
+    Side effects:
+        Deletes files inside ``bin_dir``.
+
+    Complexity:
+        O(n) in the number of entries in ``bin_dir``, once per run.
+    """
+    pid = os.getpid()
+    own_token = f"{_TEMP_PREFIX}{pid}-"
+    own_discard_token = f"{_DISCARD_PREFIX}{pid}-"
+    now = time.time()
+    failed: list[str] = []
+    for entry in os.listdir(bin_dir):
+        if entry == keep:
+            continue
+        path = os.path.join(bin_dir, entry)
+        if not _is_sweepable(entry, path, own_token, own_discard_token, now):
+            continue
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                # An abandoned staging directory. rmtree never follows links
+                # out of it; a link ENTRY is handled by unlink below.
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        except OSError:
+            failed.append(path)
+    return failed
+
+
+def _is_sweepable(
+    entry: str, path: str, own_token: str, own_discard_token: str, now: float
+) -> bool:
+    """Decide whether the sweep may remove one directory entry.
+
+    Args:
+        entry: The entry's base name.
+        path: Its full path.
+        own_token: This process's temporary prefix, pid and delimiter included.
+        own_discard_token: This process's discard prefix, likewise.
+        now: Current wall-clock time, seconds since the epoch.
+
+    Returns:
+        True if the entry is a recognised magi-rs artifact this process is
+        allowed to delete.
+
+    Note:
+        A FOREIGN temporary younger than ``_STALE_TEMPORARY_SECONDS`` is left
+        alone: it may belong to a bootstrap running right now, and deleting it
+        would break the concurrency guarantee this module claims. Our own
+        temporaries are ours to remove at any age. The same rule covers a
+        foreign DISCARD, which a concurrent ``_replace`` may still roll back
+        to. A name carrying a prefix but no parseable pid is treated as
+        foreign: this module never writes one, so it is someone else's or
+        rubbish, and the age cutoff collects it either way.
+    """
+    if entry in _EXECUTABLE_NAMES:
+        return True
+    if entry.startswith((own_token, own_discard_token)):
+        return True
+    if not entry.startswith((_TEMP_PREFIX, _DISCARD_PREFIX)):
+        return False
+    try:
+        age = now - os.lstat(path).st_mtime
+    except OSError:
+        return False
+    return age > _STALE_TEMPORARY_SECONDS
