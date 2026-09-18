@@ -134,7 +134,7 @@ def test_a_pin_digest_that_is_not_64_lowercase_hex_is_rejected_at_load_time(tmp_
 
 @pytest.mark.parametrize(
     "name",
-    ["../escape.zip", "sub/asset.zip", "sub\asset.zip", "/abs.zip", "", ".", ".."],
+    ["../escape.zip", "sub/asset.zip", "sub\\asset.zip", "/abs.zip", "", ".", ".."],
 )
 def test_a_pin_asset_name_that_is_not_a_plain_file_name_is_rejected_at_load_time(tmp_path, name):
     # The asset name becomes part of a path inside bin/. The pin is a committed
