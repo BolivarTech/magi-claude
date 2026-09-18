@@ -156,3 +156,26 @@ def test_a_pin_asset_name_that_is_not_a_plain_file_name_is_rejected_at_load_time
     broken.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(PinFormatError):
         Pin.load(str(broken))
+
+
+@pytest.mark.parametrize("kind", ["7z", "tgz", "ZIP", ""])
+def test_a_pin_archive_kind_outside_the_two_supported_is_rejected_at_load_time(tmp_path, kind):
+    # extract_executable already refuses an unknown kind, but only after the
+    # download: the pin is where the mistake was made, so that is where it is
+    # named.
+    document = {
+        "version": "0.19.1",
+        "repository": "r",
+        "assets": {
+            "windows-x86_64": {
+                "name": "x.zip",
+                "archive_sha256": "0" * 64,
+                "executable_sha256": "0" * 64,
+                "archive_kind": kind,
+            }
+        },
+    }
+    broken = tmp_path / "pin.json"
+    broken.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(PinFormatError):
+        Pin.load(str(broken))

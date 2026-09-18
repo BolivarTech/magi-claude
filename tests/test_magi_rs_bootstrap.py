@@ -954,3 +954,87 @@ def test_a_zip_member_that_is_neither_a_file_nor_a_directory_is_refused(tmp_path
     with pytest.raises(UnsafeArchiveError):
         extract_executable(str(archive), "zip", str(destination), "magi-rs.exe")
     assert list(destination.iterdir()) == []
+
+
+# --------------------------------------------------------------------------
+# Block 6: MAGI gate cycle 3 -- the residuals that could not be deferred
+# --------------------------------------------------------------------------
+
+
+def test_a_version_probe_printing_undecodable_bytes_is_a_version_failure(tmp_path, monkeypatch):
+    # A digest-verified binary that prints bytes the console encoding cannot
+    # decode must fail as a version mismatch, not as a UnicodeDecodeError no
+    # caller is told to expect. The real subprocess machinery runs here, with
+    # exactly the keyword arguments the bootstrap passes: only argv is swapped
+    # for an interpreter that emits the hostile bytes.
+    import sys
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / _installed_name()).write_bytes(b"binary")
+    real_run = subprocess.run
+    emit = "import sys; sys.stdout.buffer.write(b'magi-rs \\xff\\xfe 0.9.9\\n')"
+
+    def _hostile(argv, **kwargs):
+        return real_run([sys.executable, "-c", emit], **kwargs)
+
+    monkeypatch.setattr("magi_rs_bootstrap.subprocess.run", _hostile)
+    pin = _pin_with(hashlib.sha256(b"binary").hexdigest())
+    with pytest.raises(VersionMismatchError):
+        BinaryBootstrap(pin, str(bin_dir)).verify()
+
+
+def test_the_sweep_leaves_a_directory_that_merely_carries_an_executable_name(tmp_path):
+    # R3b limit 2: only FILES matching the known names. A directory called
+    # magi-rs.exe is not an executable, so "exactly one executable" holds
+    # without touching it, and its contents are not the sweep's to remove.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "magi-rs").write_bytes(b"pinned")
+    stray = bin_dir / "magi-rs.exe"
+    stray.mkdir()
+    (stray / "inside.txt").write_bytes(b"not ours to delete")
+    failed = sweep(str(bin_dir), keep="magi-rs")
+    assert failed == []
+    assert (stray / "inside.txt").read_bytes() == b"not ours to delete"
+
+
+def test_a_failed_rollback_in_the_rename_dance_propagates_and_discards_the_staged_file(
+    tmp_path, monkeypatch
+):
+    # The rename dance: final is held -> rename it aside -> move the new one
+    # in -> on failure, rename the old one back. This pins the LAST branch:
+    # when the second rename fails, the error propagates (BDD-3h), the caller
+    # discards the staged file, and the previous binary is back at the final
+    # path.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / _installed_name()).write_bytes(b"previous version")
+    executable = b"#!/bin/sh\necho magi-rs 0.19.1\n"
+    archive_path = tmp_path / "asset.tar.gz"
+    _make_tar(archive_path, [(f"magi-rs-v0.19.1-x/{_installed_name()}", executable)])
+    payload = archive_path.read_bytes()
+    real_replace = os.replace
+    attempts_on_final: list[str] = []
+
+    def _hold_final(src, dst, *a, **k):
+        if os.path.basename(dst) == _installed_name() and os.path.basename(src).startswith(
+            ".magi-rs-tmp-"
+        ):
+            attempts_on_final.append(src)
+            raise PermissionError("held" if len(attempts_on_final) == 1 else "still held")
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(os, "replace", _hold_final)
+    with _Server(payload) as server:
+        pin = _pin_with(
+            hashlib.sha256(executable).hexdigest(),
+            archive_sha256=hashlib.sha256(payload).hexdigest(),
+            url=server.url,
+        )
+        with pytest.raises(PermissionError):
+            BinaryBootstrap(pin, str(bin_dir)).ensure()
+
+    assert len(attempts_on_final) == 2  # once directly, once after renaming aside
+    assert (bin_dir / _installed_name()).read_bytes() == b"previous version"  # rolled back
+    assert sorted(p.name for p in bin_dir.iterdir()) == [_installed_name()]  # staged discarded
