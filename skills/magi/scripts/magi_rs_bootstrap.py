@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.1.1
+# Version: 1.1.2
 # Date: 2026-09-18
 """Obtain, verify and install the pinned ``magi-rs`` executable.
 
@@ -552,7 +552,8 @@ def sweep(bin_dir: str, keep: str) -> list[str]:
     2. **The directory has already passed** :func:`require_real_directory`.
        The sweep does NOT resolve ``bin_dir``.
     3. **Only files matching a known name** (``_EXECUTABLE_NAMES`` and this
-       module's own temporaries). Never a generic wipe.
+       module's own temporaries). Never a generic wipe, and never a real
+       directory that merely carries one of the names.
     4. **Links are unlinked, never followed.** The directory entry is removed;
        whatever it pointed at survives. Following one would put the blast
        radius outside limit 1 by the back door. (Hard links need no special
@@ -586,9 +587,9 @@ def sweep(bin_dir: str, keep: str) -> list[str]:
         if entry == keep:
             continue
         path = os.path.join(bin_dir, entry)
-        if not _is_sweepable(entry, path, own_token, own_discard_token, now):
-            continue
         try:
+            if not _is_sweepable(entry, path, own_token, own_discard_token, now):
+                continue
             if os.path.islink(path):
                 os.unlink(path)  # the link entry, never what it points at
             elif _is_reparse_point(path):
@@ -636,7 +637,10 @@ def _is_sweepable(
         rubbish, and the age cutoff collects it either way.
     """
     if entry in _EXECUTABLE_NAMES:
-        return True
+        # Limit 3 of R3b: only FILES carrying the name. A link is a file
+        # entry (unlinked, never followed); a real directory that merely
+        # carries the name is not an executable and is not ours to remove.
+        return os.path.islink(path) or _is_reparse_point(path) or os.path.isfile(path)
     if entry.startswith((own_token, own_discard_token)):
         return True
     if not entry.startswith((_TEMP_PREFIX, _DISCARD_PREFIX)):
@@ -862,10 +866,16 @@ class BinaryBootstrap:
             Executes ``path`` once, with a timeout.
         """
         try:
+            # Decoded as UTF-8 with replacement on purpose: the probe must
+            # not depend on the console code page, and a binary printing
+            # undecodable bytes must fail as a version mismatch below, never
+            # as a UnicodeDecodeError no caller is told to expect.
             probe = subprocess.run(
                 [path, _VERSION_FLAG],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=_VERSION_PROBE_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:

@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.0.2
+# Version: 1.0.3
 # Date: 2026-09-18
 """Read-only view over the pinned ``magi-rs`` release.
 
@@ -42,6 +42,7 @@ _DIGEST_FIELDS = ("archive_sha256", "executable_sha256")
 _SHA256_HEX_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _NAME_SEPARATORS = ("/", "\\", "\x00")
+_ARCHIVE_KINDS = ("zip", "tar.gz")
 _RELEASE_URL_TEMPLATE = "https://github.com/{repository}/releases/download/v{version}/{name}"
 
 
@@ -106,8 +107,9 @@ class Pin:
 
         Raises:
             PinFormatError: The file is missing, unparsable, a required field
-                is absent, a digest is not 64 lowercase hex characters, or an
-                asset name is not a plain file name.
+                is absent, a digest is not 64 lowercase hex characters, an
+                asset name is not a plain file name, or an archive kind is
+                neither ``"zip"`` nor ``"tar.gz"``.
         """
         try:
             with open(path, encoding="utf-8") as handle:
@@ -149,11 +151,17 @@ class Pin:
                 raise PinFormatError(
                     f"pin file {path!r}: asset {key!r} name {name!r} is not a plain file name"
                 )
+            archive_kind = str(entry["archive_kind"])
+            if archive_kind not in _ARCHIVE_KINDS:
+                raise PinFormatError(
+                    f"pin file {path!r}: asset {key!r} archive_kind {archive_kind!r} is not "
+                    f"one of {_ARCHIVE_KINDS}"
+                )
             assets[key] = Asset(
                 name=name,
                 archive_sha256=str(entry["archive_sha256"]),
                 executable_sha256=str(entry["executable_sha256"]),
-                archive_kind=str(entry["archive_kind"]),
+                archive_kind=archive_kind,
             )
         return cls(version=str(raw["version"]), repository=str(raw["repository"]), assets=assets)
 
