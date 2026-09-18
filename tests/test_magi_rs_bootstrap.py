@@ -130,6 +130,20 @@ def test_an_unreachable_host_aborts_with_a_download_error(tmp_path):
     assert not destination.exists()
 
 
+def test_a_download_never_overwrites_a_file_already_at_its_destination(tmp_path):
+    # The destination name is unique per process, so anything already there is
+    # foreign -- and if it were a symlink, writing through it would land the
+    # archive bytes outside bin/. Refusing is the only cross-platform answer:
+    # O_NOFOLLOW does not exist on Windows.
+    payload = b"asset"
+    destination = tmp_path / "asset.bin"
+    destination.write_bytes(b"planted before the download")
+    with _Server(payload) as server:
+        with pytest.raises(DownloadError):
+            download_to(server.url, str(destination), hashlib.sha256(payload).hexdigest())
+    assert destination.read_bytes() == b"planted before the download"
+
+
 # --------------------------------------------------------------------------
 # Block 2: validated extraction -- traversal, bomb, layout, execute bit
 # --------------------------------------------------------------------------
@@ -316,6 +330,20 @@ def test_an_archive_without_the_executable_is_refused_naming_it(tmp_path):
     with pytest.raises(UnsafeArchiveError) as exc:
         extract_executable(str(archive), "tar.gz", str(destination), "magi-rs")
     assert "magi-rs" in str(exc.value)
+
+
+@pytest.mark.parametrize("archive_kind", ["zip", "tar.gz"])
+def test_a_verified_file_that_is_not_an_archive_is_refused_as_unsafe(tmp_path, archive_kind):
+    # A pin whose archive_sha256 matches bytes that are not an archive of the
+    # declared kind must fail with the documented error, not with a raw
+    # tarfile.ReadError / zipfile.BadZipFile that no caller is told to expect.
+    archive = tmp_path / "asset.bin"
+    archive.write_bytes(b"not an archive at all")
+    destination = tmp_path / "out"
+    destination.mkdir()
+    with pytest.raises(UnsafeArchiveError):
+        extract_executable(str(archive), archive_kind, str(destination), "magi-rs")
+    assert list(destination.iterdir()) == []
 
 
 # --------------------------------------------------------------------------
