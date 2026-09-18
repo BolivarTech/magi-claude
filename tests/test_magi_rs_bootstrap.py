@@ -846,3 +846,95 @@ def test_a_permission_error_on_a_first_install_is_not_masked_by_the_rename_dance
         with pytest.raises(PermissionError):
             BinaryBootstrap(pin, str(bin_dir)).ensure()
     assert not (bin_dir / _installed_name()).exists()
+
+
+# --------------------------------------------------------------------------
+# Block 5: MAGI gate cycle 1 -- the four warnings, pinned
+# --------------------------------------------------------------------------
+
+
+def test_a_download_larger_than_the_ceiling_is_aborted_before_the_digest(tmp_path, monkeypatch):
+    # The digest is compared only after the whole body arrived, so without a
+    # byte ceiling a hostile server fills the disk before the mismatch is ever
+    # seen. Content-Length is attacker data: the count is over bytes received.
+    monkeypatch.setattr("magi_rs_bootstrap._MAX_DOWNLOAD_BYTES", 4096)
+    payload = b"x" * (4096 + 1024)
+    destination = tmp_path / "asset.bin"
+    with _Server(payload) as server:
+        with pytest.raises(DownloadError) as exc:
+            download_to(server.url, str(destination), hashlib.sha256(payload).hexdigest())
+    assert "ceiling" in str(exc.value)
+    assert not destination.exists()
+
+
+def test_a_zip_symlink_member_is_refused(tmp_path):
+    # The tar guard has its own test; this pins the zip half, where a symlink
+    # is only a mode in external_attr and nothing in the name gives it away.
+    archive = tmp_path / "asset.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        info = zipfile.ZipInfo("magi-rs.exe")
+        info.external_attr = 0o120777 << 16  # S_IFLNK | 0777
+        bundle.writestr(info, "./harmless")
+    destination = tmp_path / "out"
+    destination.mkdir()
+    with pytest.raises(UnsafeArchiveError):
+        extract_executable(str(archive), "zip", str(destination), "magi-rs.exe")
+    assert list(destination.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions only exist on Windows")
+def test_the_sweep_removes_a_junction_and_never_its_target(tmp_path):
+    # R3b limit 3 on Windows: a junction is a directory to isdir() and not a
+    # link to islink(), so a naive "rmtree the directory" branch either follows
+    # it or refuses forever. The entry must go; what it points at must not.
+    import subprocess
+
+    victim = tmp_path / "elsewhere"
+    victim.mkdir()
+    (victim / "keep.txt").write_bytes(b"the user's own file")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "magi-rs").write_bytes(b"pinned")
+    junction = bin_dir / "magi-rs.exe"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(victim)],
+        check=True,
+        capture_output=True,
+    )
+    failed = sweep(str(bin_dir), keep="magi-rs")
+    assert failed == []
+    assert not junction.exists()
+    assert (victim / "keep.txt").read_bytes() == b"the user's own file"
+
+
+@pytest.mark.parametrize(
+    ("reported", "accepted"),
+    [
+        ("magi-rs 0.19.1", True),
+        ("magi-rs 0.19.1 (release build abc123)", True),
+        ("magi-rs version 0.19.1", True),
+        ("magi-rs 0.19.10", False),
+        ("magi-rs 10.19.1", False),
+        ("magi-rs 0.19.1-rc1", False),
+    ],
+)
+def test_the_version_probe_matches_the_pinned_version_as_a_whole_token(
+    tmp_path, monkeypatch, reported, accepted
+):
+    # The contract is "the output carries the pinned version as a standalone
+    # token", not "the last word is the version": a build suffix must not turn
+    # into a false mismatch, and a longer version must not match by prefix.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / _installed_name()).write_bytes(b"binary")
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.subprocess.run",
+        lambda *a, **k: SimpleNamespace(stdout=reported, stderr="", returncode=0),
+    )
+    pin = _pin_with(hashlib.sha256(b"binary").hexdigest())
+    bootstrap = BinaryBootstrap(pin, str(bin_dir))
+    if accepted:
+        bootstrap.verify()
+    else:
+        with pytest.raises(VersionMismatchError):
+            bootstrap.verify()

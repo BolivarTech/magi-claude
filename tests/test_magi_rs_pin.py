@@ -107,3 +107,26 @@ def test_a_pin_that_is_not_json_is_rejected_without_leaking_the_decoder_error(tm
     broken.write_text("{ not json", encoding="utf-8")
     with pytest.raises(PinFormatError):
         Pin.load(str(broken))
+
+
+@pytest.mark.parametrize("digest", ["0" * 63, "0" * 65, "G" * 64, "A" * 64])
+def test_a_pin_digest_that_is_not_64_lowercase_hex_is_rejected_at_load_time(tmp_path, digest):
+    # A digest with a character too few passes any "is it present" check and
+    # fails only at download time, with a message about digests rather than
+    # about a pin mistyped while moving the version.
+    document = {
+        "version": "0.19.1",
+        "repository": "r",
+        "assets": {
+            "windows-x86_64": {
+                "name": "x.zip",
+                "archive_sha256": digest,
+                "executable_sha256": "0" * 64,
+                "archive_kind": "zip",
+            }
+        },
+    }
+    broken = tmp_path / "pin.json"
+    broken.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(PinFormatError):
+        Pin.load(str(broken))
