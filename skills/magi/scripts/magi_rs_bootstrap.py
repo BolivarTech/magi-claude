@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
+# Version: 1.1.1
 # Date: 2026-09-18
 """Obtain, verify and install the pinned ``magi-rs`` executable.
 
@@ -404,10 +404,18 @@ def _extract_zip(archive: str, staging: str, executable_name: str) -> str | None
     with zipfile.ZipFile(archive) as bundle:
         for info in bundle.infolist():
             target = _safe_member_path(info.filename, staging)
-            if stat.S_ISLNK(info.external_attr >> 16):
+            mode = info.external_attr >> 16
+            if stat.S_ISLNK(mode):
                 raise UnsafeArchiveError(f"archive member {info.filename!r} is a link; refused")
             if info.is_dir():
                 continue
+            # Only the file-TYPE bits decide: a zip written without Unix
+            # attributes (Windows, or permission bits alone as zipfile's own
+            # writestr emits) carries no type and passes; a type that is set
+            # must say regular file, as the tar guard demands.
+            kind = stat.S_IFMT(mode)
+            if kind and kind != stat.S_IFREG:
+                raise UnsafeArchiveError(f"archive member {info.filename!r} is not a regular file")
             if os.path.basename(info.filename) != executable_name:
                 continue
             if found is not None:

@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.0.1
+# Version: 1.0.2
 # Date: 2026-09-18
 """Read-only view over the pinned ``magi-rs`` release.
 
@@ -41,6 +41,7 @@ _REQUIRED_ASSET_FIELDS = ("name", "archive_sha256", "executable_sha256", "archiv
 _DIGEST_FIELDS = ("archive_sha256", "executable_sha256")
 _SHA256_HEX_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
+_NAME_SEPARATORS = ("/", "\\", "\x00")
 _RELEASE_URL_TEMPLATE = "https://github.com/{repository}/releases/download/v{version}/{name}"
 
 
@@ -105,7 +106,8 @@ class Pin:
 
         Raises:
             PinFormatError: The file is missing, unparsable, a required field
-                is absent, or a digest is not 64 lowercase hex characters.
+                is absent, a digest is not 64 lowercase hex characters, or an
+                asset name is not a plain file name.
         """
         try:
             with open(path, encoding="utf-8") as handle:
@@ -140,8 +142,15 @@ class Pin:
                         f"pin file {path!r}: asset {key!r} field {field!r} is not a "
                         f"{_SHA256_HEX_LENGTH}-character lowercase hex sha256"
                     )
+            name = str(entry["name"])
+            # The name becomes a path component inside bin/: a separator in
+            # it would escape bin/ through the trust channel itself.
+            if name in ("", ".", "..") or any(sep in name for sep in _NAME_SEPARATORS):
+                raise PinFormatError(
+                    f"pin file {path!r}: asset {key!r} name {name!r} is not a plain file name"
+                )
             assets[key] = Asset(
-                name=str(entry["name"]),
+                name=name,
                 archive_sha256=str(entry["archive_sha256"]),
                 executable_sha256=str(entry["executable_sha256"]),
                 archive_kind=str(entry["archive_kind"]),
