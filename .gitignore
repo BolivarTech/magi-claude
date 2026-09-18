@@ -76,3 +76,7 @@ experiments/
 # why: a tracked `make release-check` calling a gitignored script is the v5.0.3 bug).
 /marker-adherence-report.json
 magi-corpus/
+
+# magi-rs executable installed by the bootstrap (v6.0.0). Never committed: the
+# pin (skills/magi/magi-rs.pin.json) is the trust channel, the binary is derived.
+/bin/
