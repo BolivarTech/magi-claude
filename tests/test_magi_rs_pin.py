@@ -84,3 +84,26 @@ def test_a_pin_missing_a_required_field_is_rejected_at_load_time(tmp_path):
     broken.write_text(json.dumps({"version": "0.19.1"}), encoding="utf-8")
     with pytest.raises(PinFormatError):
         Pin.load(str(broken))
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        ["not", "an", "object"],
+        {"version": "0.19.1", "repository": "r", "assets": "not an object"},
+        {"version": "0.19.1", "repository": "r", "assets": {"windows-x86_64": "not an object"}},
+        {"version": "0.19.1", "repository": "r", "assets": {"windows-x86_64": {"name": "x"}}},
+    ],
+)
+def test_a_pin_of_the_wrong_shape_is_rejected_at_load_time(tmp_path, document):
+    broken = tmp_path / "pin.json"
+    broken.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(PinFormatError):
+        Pin.load(str(broken))
+
+
+def test_a_pin_that_is_not_json_is_rejected_without_leaking_the_decoder_error(tmp_path):
+    broken = tmp_path / "pin.json"
+    broken.write_text("{ not json", encoding="utf-8")
+    with pytest.raises(PinFormatError):
+        Pin.load(str(broken))

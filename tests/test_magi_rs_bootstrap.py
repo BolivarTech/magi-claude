@@ -10,10 +10,12 @@ by an ``http.server`` on an ephemeral loopback port and every directory is a
 
 import contextlib
 import hashlib
+import json
 import http.server
 import io
 import os
 import platform
+import subprocess
 import tarfile
 import threading
 import time
@@ -343,6 +345,18 @@ def test_a_verified_file_that_is_not_an_archive_is_refused_as_unsafe(tmp_path, a
     destination.mkdir()
     with pytest.raises(UnsafeArchiveError):
         extract_executable(str(archive), archive_kind, str(destination), "magi-rs")
+    assert list(destination.iterdir()) == []
+
+
+def test_an_archive_holding_the_executable_twice_is_refused(tmp_path):
+    # Two candidates would mean choosing between them, and choosing is the
+    # failure shape this project already paid for in the verdict sentinel.
+    archive = tmp_path / "asset.zip"
+    _make_zip(archive, [("magi-rs.exe", b"one"), ("nested/magi-rs.exe", b"two")])
+    destination = tmp_path / "out"
+    destination.mkdir()
+    with pytest.raises(UnsafeArchiveError):
+        extract_executable(str(archive), "zip", str(destination), "magi-rs.exe")
     assert list(destination.iterdir()) == []
 
 
@@ -765,3 +779,70 @@ def test_ensure_clears_a_leftover_of_its_own_pid_before_downloading(tmp_path):
 
     assert sha256_of(installed) == hashlib.sha256(executable).hexdigest()
     assert sorted(p.name for p in bin_dir.iterdir()) == [_installed_name()]
+
+
+def test_the_bootstrap_errors_do_not_inherit_from_validationerror():
+    # Locked derogation, rule 3 of the milestone: a fail-closed event must not
+    # be swallowed by the orchestrator's
+    # `except (ValidationError, json.JSONDecodeError)`. Same guard as the pin
+    # module's; the five errors of this module were the ones nothing checked.
+    from synthesize import ValidationError
+
+    for error in (
+        DownloadError,
+        DigestMismatchError,
+        UnsafeArchiveError,
+        UnsafeBinDirectoryError,
+        VersionMismatchError,
+    ):
+        assert not issubclass(error, ValidationError), error.__name__
+        assert not issubclass(error, json.JSONDecodeError), error.__name__
+
+
+def test_a_hanging_version_probe_is_a_version_failure_not_a_stray_timeout(tmp_path, monkeypatch):
+    # _VERSION_PROBE_TIMEOUT_SECONDS bounds the hang; this pins that the
+    # RESULT of the bound is part of the module's own error taxonomy, not a
+    # subprocess.TimeoutExpired no caller is told to expect.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / _installed_name()).write_bytes(b"binary")
+
+    def _hang(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=a[0], timeout=k.get("timeout", 0))
+
+    monkeypatch.setattr("magi_rs_bootstrap.subprocess.run", _hang)
+    pin = _pin_with(hashlib.sha256(b"binary").hexdigest())
+    with pytest.raises(VersionMismatchError):
+        BinaryBootstrap(pin, str(bin_dir)).verify()
+
+
+def test_a_permission_error_on_a_first_install_is_not_masked_by_the_rename_dance(
+    tmp_path, monkeypatch
+):
+    # The rename-aside dance answers ONE cause of PermissionError: the final
+    # path is a running executable. On a first install there is no final path
+    # to rename aside, so the original error must surface -- not a
+    # FileNotFoundError from trying to move a file that never existed.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable = b"#!/bin/sh\necho magi-rs 0.19.1\n"
+    archive_path = tmp_path / "asset.tar.gz"
+    _make_tar(archive_path, [(f"magi-rs-v0.19.1-x/{_installed_name()}", executable)])
+    payload = archive_path.read_bytes()
+    real_replace = os.replace
+
+    def _refuse_final(src, dst, *a, **k):
+        if os.path.basename(dst) == _installed_name():
+            raise PermissionError("read-only bin/")
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(os, "replace", _refuse_final)
+    with _Server(payload) as server:
+        pin = _pin_with(
+            hashlib.sha256(executable).hexdigest(),
+            archive_sha256=hashlib.sha256(payload).hexdigest(),
+            url=server.url,
+        )
+        with pytest.raises(PermissionError):
+            BinaryBootstrap(pin, str(bin_dir)).ensure()
+    assert not (bin_dir / _installed_name()).exists()
