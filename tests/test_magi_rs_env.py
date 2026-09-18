@@ -69,7 +69,9 @@ def test_the_passphrase_never_reaches_the_child():
     ],
 )
 def test_every_platform_variable_is_inherited(name):
-    built = EnvironmentPolicy.build({name: "value", "PATH": "/usr/bin"})
+    # PATH last-wins in a dict literal would clobber the parametrized entry
+    # when name == "PATH"; the declared variable goes last on purpose.
+    built = EnvironmentPolicy.build({"PATH": "/usr/bin", name: "value"})
     assert built[name] == "value"
 
 
