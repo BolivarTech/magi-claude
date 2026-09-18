@@ -130,3 +130,29 @@ def test_a_pin_digest_that_is_not_64_lowercase_hex_is_rejected_at_load_time(tmp_
     broken.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(PinFormatError):
         Pin.load(str(broken))
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../escape.zip", "sub/asset.zip", "sub\asset.zip", "/abs.zip", "", ".", ".."],
+)
+def test_a_pin_asset_name_that_is_not_a_plain_file_name_is_rejected_at_load_time(tmp_path, name):
+    # The asset name becomes part of a path inside bin/. The pin is a committed
+    # file, but a name with a separator would still escape bin/ through the
+    # trust channel itself, so it is refused where the pin is read.
+    document = {
+        "version": "0.19.1",
+        "repository": "r",
+        "assets": {
+            "windows-x86_64": {
+                "name": name,
+                "archive_sha256": "0" * 64,
+                "executable_sha256": "0" * 64,
+                "archive_kind": "zip",
+            }
+        },
+    }
+    broken = tmp_path / "pin.json"
+    broken.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(PinFormatError):
+        Pin.load(str(broken))

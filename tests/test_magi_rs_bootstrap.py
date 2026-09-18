@@ -938,3 +938,19 @@ def test_the_version_probe_matches_the_pinned_version_as_a_whole_token(
     else:
         with pytest.raises(VersionMismatchError):
             bootstrap.verify()
+
+
+def test_a_zip_member_that_is_neither_a_file_nor_a_directory_is_refused(tmp_path):
+    # Symmetry with the tar guard: a zip carries the member kind only in the
+    # mode bits of external_attr, and a FIFO or device there is as unwanted as
+    # in a tar. A zero mode (Windows-created zips) still passes as a file.
+    archive = tmp_path / "asset.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        info = zipfile.ZipInfo("magi-rs.exe")
+        info.external_attr = 0o010644 << 16  # S_IFIFO
+        bundle.writestr(info, "fifo?")
+    destination = tmp_path / "out"
+    destination.mkdir()
+    with pytest.raises(UnsafeArchiveError):
+        extract_executable(str(archive), "zip", str(destination), "magi-rs.exe")
+    assert list(destination.iterdir()) == []
