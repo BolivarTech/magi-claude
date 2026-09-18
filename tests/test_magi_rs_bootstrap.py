@@ -8,30 +8,36 @@ by an ``http.server`` on an ephemeral loopback port and every directory is a
 ``tmp_path``.
 """
 
+import contextlib
 import hashlib
 import http.server
 import io
 import os
+import platform
 import tarfile
 import threading
 import time
 import zipfile
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
 from magi_rs_bootstrap import (
     _STALE_TEMPORARY_SECONDS,  # the cutoff the age tests backdate against
+    BinaryBootstrap,
     DigestMismatchError,
     DownloadError,
     UnsafeArchiveError,
     UnsafeBinDirectoryError,
+    VersionMismatchError,
     download_to,
     extract_executable,
     require_real_directory,
     sha256_of,
     sweep,
 )
+from magi_rs_pin import Asset, Pin
 
 # --------------------------------------------------------------------------
 # Block 1: download and digest verification
@@ -492,3 +498,215 @@ def test_a_delete_that_fails_is_reported_and_does_not_raise(tmp_path, monkeypatc
     monkeypatch.setattr(os, "unlink", _refuse)
     failed = sweep(str(bin_dir), keep="magi-rs")
     assert [os.path.basename(p) for p in failed] == ["magi-rs.exe"]
+
+
+# --------------------------------------------------------------------------
+# Block 4: BinaryBootstrap -- the order IS the correctness
+# --------------------------------------------------------------------------
+
+
+def _pin_with(executable_sha256, archive_sha256="a" * 64, version="0.19.1", url=None):
+    """Build a Pin whose single asset matches whatever THIS platform selects.
+
+    When ``url`` is given the pin serves it from ``download_url`` -- the seam
+    the end-to-end tests need to point the bootstrap at the loopback server
+    without reaching into a private attribute.
+    """
+    asset = Asset(
+        name="magi-rs-vX-test.tar.gz",
+        archive_sha256=archive_sha256,
+        executable_sha256=executable_sha256,
+        archive_kind="tar.gz",
+    )
+    key = _platform_key()
+    pin = Pin(version=version, repository="BolivarTech/magi", assets={key: asset})
+    if url is None:
+        return pin
+    return _PinnedAt(pin, url)
+
+
+def _platform_key():
+    """The pin key this platform selects, so tests need not hardcode one."""
+    from magi_rs_pin import _PLATFORM_KEYS
+
+    return _PLATFORM_KEYS[(platform.system(), platform.machine())]
+
+
+class _PinnedAt:
+    """A Pin that serves one fixed download URL. Delegates everything else."""
+
+    def __init__(self, pin, url):
+        self._pin, self._url = pin, url
+
+    def __getattr__(self, name):
+        return getattr(self._pin, name)
+
+    def download_url(self, asset):
+        return self._url
+
+
+@contextlib.contextmanager
+def _version_reporting(text):
+    """Make the bootstrap's `--version` probe report `text` without launching."""
+    with mock.patch(
+        "magi_rs_bootstrap.subprocess.run",
+        return_value=SimpleNamespace(stdout=text, stderr="", returncode=0),
+    ):
+        yield
+
+
+def _installed_name():
+    """The file name the bootstrap installs on THIS platform."""
+    return "magi-rs.exe" if os.name == "nt" else "magi-rs"
+
+
+def test_a_binary_whose_digest_does_not_match_the_pin_is_never_executed(tmp_path, monkeypatch):
+    # R4/BDD-4: the strongest guarantee in the milestone. The failing input is
+    # a present, plausible, WRONG binary -- and the proof is that no execution
+    # was ATTEMPTED, not merely that a check reported false. A verify() that
+    # checked the digest, raised, and had ALREADY run --version to learn the
+    # version passes a test that only asserts the exception, and violates R4
+    # just the same.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / _installed_name()).write_bytes(b"an impostor")
+
+    executed: list[object] = []
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.subprocess.run",
+        lambda *a, **k: executed.append(a),
+    )
+    with pytest.raises(DigestMismatchError):
+        BinaryBootstrap(_pin_with("0" * 64), str(bin_dir)).verify()
+    assert executed == []
+
+
+def test_a_binary_matching_the_pin_is_accepted_end_to_end(tmp_path, monkeypatch):
+    # The mirror of the test above, and the one that would have caught the
+    # archive-vs-executable digest confusion: the suite proving only REJECTION
+    # is compatible with a verify() that can never accept anything.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    installed = bin_dir / _installed_name()
+    installed.write_bytes(b"a plausible binary")
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.subprocess.run",
+        lambda *a, **k: SimpleNamespace(stdout="magi-rs 0.19.1", stderr="", returncode=0),
+    )
+    pin = _pin_with(hashlib.sha256(b"a plausible binary").hexdigest())
+    assert BinaryBootstrap(pin, str(bin_dir)).verify() == str(installed)
+
+
+def test_a_matching_digest_with_the_wrong_reported_version_is_refused(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / _installed_name()).write_bytes(b"binary")
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.subprocess.run",
+        lambda *a, **k: SimpleNamespace(stdout="magi-rs 0.9.9", stderr="", returncode=0),
+    )
+    pin = _pin_with(hashlib.sha256(b"binary").hexdigest())
+    with pytest.raises(VersionMismatchError):
+        BinaryBootstrap(pin, str(bin_dir)).verify()
+
+
+def test_ensure_does_not_download_when_the_installed_digest_matches(tmp_path, monkeypatch):
+    # BDD-2, at the ensure() level rather than the helper level.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / _installed_name()).write_bytes(b"already correct")
+    downloads: list[str] = []
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.download_to",
+        lambda url, *a, **k: downloads.append(url),
+    )
+    pin = _pin_with(hashlib.sha256(b"already correct").hexdigest())
+    BinaryBootstrap(pin, str(bin_dir)).ensure()
+    assert downloads == []
+
+
+def test_ensure_sweeps_even_when_it_does_not_download(tmp_path, monkeypatch):
+    # The steady state IS every run but the first. A sweep placed after the
+    # digest short circuit would never run there, and "exactly one executable"
+    # would hold only on install day. The leftover carries THIS process's
+    # token: a foreign, fresh discard is deliberately spared by the sweep
+    # (R3b limit 2), so seeding one would test the wrong rule.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / _installed_name()).write_bytes(b"already correct")
+    stale = bin_dir / f".magi-rs-old-{os.getpid()}-4242"
+    stale.write_bytes(b"a leftover discard")
+    pin = _pin_with(hashlib.sha256(b"already correct").hexdigest())
+    BinaryBootstrap(pin, str(bin_dir)).ensure()
+    assert not stale.exists()
+
+
+def test_ensure_installs_from_a_served_asset_and_returns_a_binary_that_verifies(tmp_path):
+    # The whole download-extract-replace-verify path, over the loopback server
+    # already used above. Round 1's archive-vs-executable digest confusion
+    # lived exactly here and NO automated test touched it -- the path rested on
+    # a SMOKE, which a tired operator can report as passed.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # The member name must be the one THIS platform installs: on Windows the
+    # bootstrap looks for magi-rs.exe, and a hardcoded "magi-rs" would make
+    # both end-to-end tests fail on the development platform.
+    executable = b"#!/bin/sh\necho magi-rs 0.19.1\n"
+    archive_path = tmp_path / "asset.tar.gz"
+    _make_tar(archive_path, [(f"magi-rs-v0.19.1-x/{_installed_name()}", executable)])
+    payload = archive_path.read_bytes()
+
+    with _Server(payload) as server:
+        pin = _pin_with(
+            hashlib.sha256(executable).hexdigest(),
+            archive_sha256=hashlib.sha256(payload).hexdigest(),
+            url=server.url,
+        )
+        with _version_reporting("magi-rs 0.19.1"):
+            installed = BinaryBootstrap(pin, str(bin_dir)).ensure()
+
+    assert os.path.basename(installed) == _installed_name()
+    assert sha256_of(installed) == hashlib.sha256(executable).hexdigest()
+    # R3b: nothing else survives -- no archive, no staging directory.
+    assert sorted(p.name for p in bin_dir.iterdir()) == [_installed_name()]
+
+
+def test_ensure_fails_closed_when_the_pinned_executable_digest_is_wrong(tmp_path):
+    # Without the post-install verify(), a wrong executable_sha256 degrades
+    # into a SILENT download loop: mismatch, re-download, install, mismatch,
+    # forever, with no error anyone sees.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable = b"#!/bin/sh\necho magi-rs 0.19.1\n"
+    archive_path = tmp_path / "asset.tar.gz"
+    _make_tar(archive_path, [(f"magi-rs-v0.19.1-x/{_installed_name()}", executable)])
+    payload = archive_path.read_bytes()
+
+    with _Server(payload) as server:
+        pin = _pin_with(
+            "f" * 64,  # <-- the wrong executable digest
+            archive_sha256=hashlib.sha256(payload).hexdigest(),
+            url=server.url,
+        )
+        with pytest.raises(DigestMismatchError):
+            BinaryBootstrap(pin, str(bin_dir)).ensure()
+
+    # NOT merely "it raised": an unverified binary must not be sitting in bin/.
+    # A version that installs first and checks afterwards raises identically
+    # and leaves the impostor in place for the next run to execute.
+    assert not (bin_dir / _installed_name()).exists()
+
+
+def test_ensure_refuses_before_touching_anything_when_bin_is_not_a_directory(tmp_path, monkeypatch):
+    # R3c is a precondition of the WHOLE bootstrap, so it must fire before the
+    # download -- not somewhere in the middle.
+    not_a_dir = tmp_path / "bin"
+    not_a_dir.write_text("regular file", encoding="utf-8")
+    downloads: list[str] = []
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.download_to",
+        lambda url, *a, **k: downloads.append(url),
+    )
+    with pytest.raises(UnsafeBinDirectoryError):
+        BinaryBootstrap(_pin_with("0" * 64), str(not_a_dir)).ensure()
+    assert downloads == []
