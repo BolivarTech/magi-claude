@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.0.2
+# Version: 1.1.0
 # Date: 2026-09-18
 """Obtain, verify and install the pinned ``magi-rs`` executable.
 
@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -41,6 +42,13 @@ of asset size -- the asset is never held whole in memory."""
 
 _HTTP_TIMEOUT_SECONDS = 60
 """Per-``read()`` timeout on the release download."""
+
+_MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
+"""Ceiling on bytes RECEIVED for one asset. The digest is only compared once
+the whole body has arrived, so without this a hostile server fills the disk
+before the mismatch is seen. Counted over bytes received, never over
+Content-Length (attacker data). Task 0 measured the largest real archive at
+11.6 MB; 64 MiB matches the extraction ceiling."""
 
 _TEMP_PREFIX = ".magi-rs-tmp-"
 """Prefix of this module's own staging files and directories. Every name built
@@ -67,6 +75,19 @@ class DownloadError(Exception):
     orchestrator's ``except (ValidationError, json.JSONDecodeError)`` must not
     consume it.
     """
+
+
+class _DownloadCeilingReached(Exception):
+    """Internal signal: the download loop crossed ``_MAX_DOWNLOAD_BYTES``.
+
+    Raised inside the ``with`` block so the response and the file close before
+    the destination is discarded; translated to :class:`DownloadError` at the
+    boundary. Never leaves the module.
+    """
+
+    def __init__(self, received: int) -> None:
+        super().__init__(received)
+        self.received = received
 
 
 class DigestMismatchError(Exception):
@@ -129,8 +150,9 @@ def download_to(url: str, destination: str, expected_sha256: str) -> None:
         None.
 
     Raises:
-        DownloadError: The asset could not be retrieved, or ``destination``
-            already exists. The message names the URL and what went wrong.
+        DownloadError: The asset could not be retrieved, ``destination``
+            already exists, or more than ``_MAX_DOWNLOAD_BYTES`` arrived. The
+            message names the URL and what went wrong.
         DigestMismatchError: The bytes arrived but hash to something else. The
             message names both digests.
 
@@ -140,8 +162,10 @@ def download_to(url: str, destination: str, expected_sha256: str) -> None:
     if os.path.lexists(destination):
         # The name is unique to this process, so anything already there is
         # foreign. Opening it would follow a planted symlink and write the
-        # archive bytes outside bin/; refusing is the cross-platform answer
-        # (O_NOFOLLOW does not exist on Windows).
+        # archive bytes outside bin/; refusing narrows that to the window
+        # between this check and open() (O_NOFOLLOW does not exist on
+        # Windows), which the spec's threat model accepts: the planter already
+        # has write access to the plugin directory.
         raise DownloadError(
             f"refusing to download {url}: {destination} already exists and is not ours"
         )
@@ -151,9 +175,19 @@ def download_to(url: str, destination: str, expected_sha256: str) -> None:
             urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT_SECONDS) as response,
             open(destination, "wb") as handle,
         ):
+            received = 0
             for chunk in iter(lambda: response.read(_CHUNK_BYTES), b""):
+                received += len(chunk)
+                if received > _MAX_DOWNLOAD_BYTES:
+                    raise _DownloadCeilingReached(received)
                 handle.write(chunk)
                 digest.update(chunk)
+    except _DownloadCeilingReached as exc:
+        _discard(destination)
+        raise DownloadError(
+            f"aborted downloading {url}: more than {_MAX_DOWNLOAD_BYTES} bytes received, "
+            f"past the download ceiling (got {exc.received} and counting)"
+        ) from None
     except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
         # URLError covers HTTPError (a status) and the connection failures;
         # HTTPException covers IncompleteRead (a stream cut short of its
@@ -547,13 +581,22 @@ def sweep(bin_dir: str, keep: str) -> list[str]:
         if not _is_sweepable(entry, path, own_token, own_discard_token, now):
             continue
         try:
-            if os.path.isdir(path) and not os.path.islink(path):
-                # An abandoned staging directory. rmtree never follows links
-                # out of it; a link ENTRY is handled by unlink below.
+            if os.path.islink(path):
+                os.unlink(path)  # the link entry, never what it points at
+            elif _is_reparse_point(path):
+                # A Windows junction: isdir() says directory, islink() says
+                # no. rmdir removes the junction entry and leaves its target
+                # untouched; rmtree would refuse it and leave it forever.
+                os.rmdir(path)
+            elif os.path.isdir(path):
+                # An abandoned staging directory of our own. rmtree does not
+                # follow links out of it.
                 shutil.rmtree(path)
             else:
                 os.unlink(path)
-        except OSError:
+        except (OSError, UnsafeBinDirectoryError):
+            # UnsafeBinDirectoryError: the reparse probe failed closed on an
+            # entry it could not classify; leave it and report it.
             failed.append(path)
     return failed
 
@@ -828,7 +871,11 @@ class BinaryBootstrap:
                 f"{path} {_VERSION_FLAG} exited {probe.returncode} with no usable version "
                 f"(stderr: {probe.stderr.strip()!r})"
             )
-        if reported.split()[-1] != self._pin.version:
+        # The contract: the output carries the pinned version as a standalone
+        # token. A build suffix must not read as a mismatch, and a longer
+        # version must not match by prefix.
+        token = rf"(?<![\w.]){re.escape(self._pin.version)}(?![\w.-])"
+        if re.search(token, reported) is None:
             raise VersionMismatchError(
                 f"{path} reports {reported!r}, the pin expects version {self._pin.version}; "
                 "the pin is inconsistent with the asset it names"
@@ -866,7 +913,11 @@ class BinaryBootstrap:
         Raises:
             OSError: The replacement could not be completed even after renaming
                 the old binary aside. Aborting is correct: an error naming the
-                held file beats a half-updated ``bin/``.
+                held file beats a half-updated ``bin/``. If the roll-back of
+                the old binary fails too, ``bin/`` is left with no executable
+                at the final path -- the next run finds it absent and
+                reinstalls (self-healing, BDD-3k); it never runs an unverified
+                one.
 
         Side effects:
             Renames within ``bin/``; may leave a discard file behind for the

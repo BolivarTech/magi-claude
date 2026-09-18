@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
+# Version: 1.0.1
 # Date: 2026-09-18
 """Read-only view over the pinned ``magi-rs`` release.
 
@@ -38,6 +38,9 @@ _PLATFORM_KEYS: Mapping[tuple[str, str], str] = {
 
 _REQUIRED_PIN_FIELDS = ("version", "repository", "assets")
 _REQUIRED_ASSET_FIELDS = ("name", "archive_sha256", "executable_sha256", "archive_kind")
+_DIGEST_FIELDS = ("archive_sha256", "executable_sha256")
+_SHA256_HEX_LENGTH = 64
+_HEX_DIGITS = frozenset("0123456789abcdef")
 _RELEASE_URL_TEMPLATE = "https://github.com/{repository}/releases/download/v{version}/{name}"
 
 
@@ -101,8 +104,8 @@ class Pin:
             The parsed pin.
 
         Raises:
-            PinFormatError: The file is missing, unparsable, or a required
-                field is absent.
+            PinFormatError: The file is missing, unparsable, a required field
+                is absent, or a digest is not 64 lowercase hex characters.
         """
         try:
             with open(path, encoding="utf-8") as handle:
@@ -126,6 +129,16 @@ class Pin:
                 if field not in entry:
                     raise PinFormatError(
                         f"pin file {path!r}: asset {key!r} lacks the required field {field!r}"
+                    )
+            for field in _DIGEST_FIELDS:
+                digest = str(entry[field])
+                # A digest one character short passes any presence check and
+                # fails only at download time, as a message about digests
+                # rather than about a pin mistyped while moving the version.
+                if len(digest) != _SHA256_HEX_LENGTH or not set(digest) <= _HEX_DIGITS:
+                    raise PinFormatError(
+                        f"pin file {path!r}: asset {key!r} field {field!r} is not a "
+                        f"{_SHA256_HEX_LENGTH}-character lowercase hex sha256"
                     )
             assets[key] = Asset(
                 name=str(entry["name"]),
