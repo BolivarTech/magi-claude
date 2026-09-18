@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
+# Version: 1.0.1
 # Date: 2026-09-18
 """Obtain, verify and install the pinned ``magi-rs`` executable.
 
@@ -120,21 +120,31 @@ def download_to(url: str, destination: str, expected_sha256: str) -> None:
 
     Args:
         url: Absolute URL of the release asset.
-        destination: Path to write to. Overwritten if present.
+        destination: Path to write to. Must NOT already exist: the name is
+            unique per process, so a pre-existing entry is foreign and is
+            refused rather than written through.
         expected_sha256: The digest from the pin, 64 lowercase hex characters.
 
     Returns:
         None.
 
     Raises:
-        DownloadError: The asset could not be retrieved. The message names the
-            URL and what went wrong.
+        DownloadError: The asset could not be retrieved, or ``destination``
+            already exists. The message names the URL and what went wrong.
         DigestMismatchError: The bytes arrived but hash to something else. The
             message names both digests.
 
     Side effects:
         Network read; writes ``destination``; deletes it again on failure.
     """
+    if os.path.lexists(destination):
+        # The name is unique to this process, so anything already there is
+        # foreign. Opening it would follow a planted symlink and write the
+        # archive bytes outside bin/; refusing is the cross-platform answer
+        # (O_NOFOLLOW does not exist on Windows).
+        raise DownloadError(
+            f"refusing to download {url}: {destination} already exists and is not ours"
+        )
     digest = hashlib.sha256()
     try:
         with (
@@ -221,7 +231,8 @@ def extract_executable(
 
     Raises:
         UnsafeArchiveError: A member escapes the destination, is a link, the
-            ceilings are crossed, or the executable is absent.
+            ceilings are crossed, the executable is absent, or the file is not
+            an archive of ``archive_kind`` at all.
         OSError: The archive cannot be read or the destination written.
 
     Side effects:
@@ -235,12 +246,20 @@ def extract_executable(
     """
     staging = tempfile.mkdtemp(prefix=f"{_TEMP_PREFIX}{os.getpid()}-", dir=destination_dir)
     try:
-        if archive_kind == "zip":
-            extracted = _extract_zip(archive, staging, member_name)
-        elif archive_kind == "tar.gz":
-            extracted = _extract_tar(archive, staging, member_name)
-        else:
-            raise UnsafeArchiveError(f"unknown archive kind {archive_kind!r} for {archive}")
+        try:
+            if archive_kind == "zip":
+                extracted = _extract_zip(archive, staging, member_name)
+            elif archive_kind == "tar.gz":
+                extracted = _extract_tar(archive, staging, member_name)
+            else:
+                raise UnsafeArchiveError(f"unknown archive kind {archive_kind!r} for {archive}")
+        except (tarfile.TarError, zipfile.BadZipFile) as exc:
+            # Verified bytes that are not an archive of the declared kind: the
+            # pin is inconsistent, and the caller is told UnsafeArchiveError,
+            # not a stdlib type it has no reason to expect.
+            raise UnsafeArchiveError(
+                f"{archive} is not a valid {archive_kind} archive: {exc}"
+            ) from exc
         if extracted is None:
             raise UnsafeArchiveError(
                 f"{archive} does not contain an executable named {member_name!r}"
@@ -606,8 +625,8 @@ class BinaryBootstrap:
     2. If the installed binary already matches the pin, stop: no download
        (BDD-2). The trigger is the PIN, not the file's absence, so a perfectly
        healthy previous version is replaced when the pin moves (R3a/BDD-3a).
-    3. Download to a per-process-unique temporary and verify it THERE. Nothing
-       moves before it verifies.
+    3. Sweep our own leftovers, then download to a per-process-unique
+       temporary and verify it THERE. Nothing moves before it verifies.
     4. Extract to staging inside the same ``bin/`` -- same volume, so the
        rename is atomic and not a copy.
     5. Rename into place. If the destination is held (Windows cannot overwrite
@@ -720,6 +739,11 @@ class BinaryBootstrap:
             # would hold only on install day.
             self._sweep_and_warn(_INSTALLED_NAME)
             return final
+        # Install path: sweep FIRST. Pids are reused, so a crashed earlier run
+        # may have left a temporary carrying this pid's token; download_to
+        # refuses a pre-existing destination, and the sweep is what clears
+        # our own leftovers (and stale foreign ones) before we write.
+        self._sweep_and_warn(_INSTALLED_NAME)
         token = f"{_TEMP_PREFIX}{os.getpid()}-"
         archive = os.path.join(self._bin_dir, f"{token}{asset.name}")
         download_to(self._pin.download_url(asset), archive, asset.archive_sha256)
