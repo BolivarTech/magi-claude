@@ -48,14 +48,17 @@ def test_each_verdict_carries_the_seven_contract_keys_with_no_translation():
         }
 
 
-def test_the_captured_verdicts_are_accepted_by_the_existing_validator():
+def test_the_captured_verdicts_are_accepted_by_the_existing_validator(tmp_path):
     # The strongest test in the milestone, and the one that would catch a
     # contract drift: it does not check field NAMES, it runs the real
-    # load_agent_output over a real captured envelope.
+    # load_agent_output over a real captured envelope. The validator reads a
+    # FILE (measured signature), exactly as the Claude path feeds it.
     from synthesize import load_agent_output
 
     for verdict in ConsultResult.from_json(_fixture("three-agents.json")).agents:
-        load_agent_output(json.dumps(verdict))  # raises if the contract broke
+        path = tmp_path / f"{verdict['agent']}.json"
+        path.write_text(json.dumps(verdict), encoding="utf-8")
+        load_agent_output(str(path))  # raises if the contract broke
 
 
 def test_a_two_agent_run_is_read_and_flagged_degraded():
