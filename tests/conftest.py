@@ -99,3 +99,16 @@ def preflight_env(monkeypatch):
     monkeypatch.setattr("ollama_preflight.fetch_capabilities", fake_caps)
     monkeypatch.setattr("ollama_preflight.probe_prompt_tokens", fake_probe)
     return state
+
+
+class _Ok:
+    """A completed ``subprocess.run`` result for stubbing a child that exited 0.
+
+    Lives here, not in a test file: the ollama-init tests and the trio tests
+    are different modules and cannot import from a sibling test file.
+    """
+
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
