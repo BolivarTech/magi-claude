@@ -23,6 +23,8 @@ import http.client
 import os
 import shutil
 import stat
+import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -30,6 +32,8 @@ import urllib.error
 import urllib.request
 import zipfile
 from typing import IO
+
+from magi_rs_pin import Pin
 
 _CHUNK_BYTES = 64 * 1024
 """Streaming unit for download and hashing. Keeps memory constant regardless
@@ -572,3 +576,292 @@ def _is_sweepable(
     except OSError:
         return False
     return age > _STALE_TEMPORARY_SECONDS
+
+
+_INSTALLED_NAME = "magi-rs.exe" if os.name == "nt" else "magi-rs"
+"""File name the executable is installed under on THIS platform, and the name
+it is looked up by inside the archive."""
+
+_VERSION_FLAG = "--version"
+_VERSION_PROBE_TIMEOUT_SECONDS = 30
+"""Ceiling on the ``--version`` probe: a verified binary that hangs on its
+cheapest command must not hang the gate."""
+
+
+class VersionMismatchError(Exception):
+    """The installed binary reports a version other than the pinned one.
+
+    Deliberately NOT a subclass of ``ValidationError`` -- see
+    :class:`DownloadError`.
+    """
+
+
+class BinaryBootstrap:
+    """Obtain, verify and install the pinned ``magi-rs`` executable.
+
+    The order of operations IS the correctness of this class, and each step
+    exists because a specific failure was measured or specified:
+
+    1. :func:`require_real_directory` -- ONCE, before anything (R3c).
+    2. If the installed binary already matches the pin, stop: no download
+       (BDD-2). The trigger is the PIN, not the file's absence, so a perfectly
+       healthy previous version is replaced when the pin moves (R3a/BDD-3a).
+    3. Download to a per-process-unique temporary and verify it THERE. Nothing
+       moves before it verifies.
+    4. Extract to staging inside the same ``bin/`` -- same volume, so the
+       rename is atomic and not a copy.
+    5. Rename into place. If the destination is held (Windows cannot overwrite
+       a running executable), rename the OLD one aside first: an executable in
+       use cannot be DELETED but CAN be renamed.
+    6. Sweep, then warn about what could not be deleted.
+
+    Two instances bootstrapping the same ``bin/`` cannot corrupt each other: the
+    temporaries are unique per process and the CONTENT is fixed by digest, so
+    both move identical bytes and "last one wins" means nothing. No lock is
+    needed -- and adding one would introduce a state file in the very release
+    that removes the only one there was.
+
+    The window between renaming the old aside and moving the new in is real and
+    accepted: a run starting exactly then finds no binary and SELF-HEALS by
+    reinstalling (R3/BDD-3k). Overwriting in place does not exist on Windows,
+    so there is no window-free design to choose instead.
+
+    Example:
+        >>> pin = Pin.load("skills/magi/magi-rs.pin.json")
+        >>> path = BinaryBootstrap(pin, "bin").ensure()
+
+    Side effects:
+        Network, file writes, file deletion, archive extraction, chmod.
+    """
+
+    def __init__(self, pin: Pin, bin_dir: str) -> None:
+        """Bind the bootstrap to one pin and one directory.
+
+        Args:
+            pin: The parsed pin.
+            bin_dir: The plugin's ``bin/``. Validated on the first ``ensure()``
+                or ``verify()``, never in the constructor -- construction must
+                not have side effects.
+        """
+        self._pin = pin
+        self._bin_dir = bin_dir
+
+    @property
+    def executable_path(self) -> str:
+        """Path the pinned executable occupies, whether or not it exists yet."""
+        return os.path.join(self._bin_dir, _INSTALLED_NAME)
+
+    def verify(self) -> str:
+        """Check the installed binary against the pin WITHOUT executing it.
+
+        The digest is checked first and the version second, and that order is
+        load-bearing: reading the version means RUNNING the binary, and R4
+        forbids running one that has not verified.
+
+        Returns:
+            Path of the verified executable.
+
+        Raises:
+            DigestMismatchError: The file is present but hashes to something
+                else. The binary is not executed.
+            DownloadError: The file is absent.
+            VersionMismatchError: The digest matches but ``--version`` reports
+                another version -- which means the pin itself is inconsistent.
+            UnsafeBinDirectoryError: ``bin/`` is not a real directory.
+            UnsupportedPlatformError: No asset for this platform.
+            OSError: The digest matched but the binary could not be launched.
+
+        Side effects:
+            Runs the executable ONLY after its digest has matched.
+        """
+        require_real_directory(self._bin_dir)
+        asset = self._pin.asset_for_current_platform()
+        path = self.executable_path
+        if not os.path.isfile(path):
+            raise DownloadError(
+                f"{path} is absent; run the bootstrap (ensure) or place the pinned "
+                f"magi-rs {self._pin.version} executable there by hand"
+            )
+        self._require_digest(path, asset.executable_sha256)
+        self._require_version(path)
+        return path
+
+    def ensure(self) -> str:
+        """Install the pinned executable if it is not already installed.
+
+        Idempotent and self-healing: an absent binary (a plugin update wiped
+        the ephemeral plugin root) or one whose digest no longer matches the
+        pin is downloaded again.
+
+        Returns:
+            Path of the installed, verified executable.
+
+        Raises:
+            UnsafeBinDirectoryError: ``bin/`` is not a real directory. Nothing
+                is downloaded, extracted, written or deleted.
+            UnsupportedPlatformError: No asset for this platform.
+            DownloadError: The release could not be retrieved. The escape is
+                explicit: place the pinned executable in ``bin/`` by hand --
+                ``verify()`` checks its digest just the same.
+            DigestMismatchError: What arrived is not what the pin expects.
+            UnsafeArchiveError: The archive would escape or expand past the
+                ceilings.
+            VersionMismatchError: The fresh install reports another version.
+            OSError: The replacement could not be completed (see ``_replace``).
+
+        Side effects:
+            All five.
+        """
+        require_real_directory(self._bin_dir)
+        asset = self._pin.asset_for_current_platform()
+        final = self.executable_path
+        if os.path.isfile(final) and sha256_of(final) == asset.executable_sha256:
+            # Steady state: the sweep still runs, or "exactly one executable"
+            # would hold only on install day.
+            self._sweep_and_warn(_INSTALLED_NAME)
+            return final
+        token = f"{_TEMP_PREFIX}{os.getpid()}-"
+        archive = os.path.join(self._bin_dir, f"{token}{asset.name}")
+        download_to(self._pin.download_url(asset), archive, asset.archive_sha256)
+        try:
+            staged = extract_executable(
+                archive,
+                asset.archive_kind,
+                self._bin_dir,
+                _INSTALLED_NAME,
+                install_as=f"{token}{_INSTALLED_NAME}",
+            )
+        finally:
+            _discard(archive)
+        try:
+            # Verified while still in STAGING: the final path is what R4 gates
+            # on, so an unverified file must not occupy it for an instant.
+            self._require_digest(staged, asset.executable_sha256)
+            self._replace(staged, final)
+        except Exception:
+            _discard(staged)
+            raise
+        self._sweep_and_warn(_INSTALLED_NAME)
+        return self.verify()
+
+    def _require_digest(self, path: str, expected: str) -> None:
+        """Compare a file's digest with the pin's, raising on any difference.
+
+        Args:
+            path: File to hash.
+            expected: The pin's ``executable_sha256``.
+
+        Returns:
+            None.
+
+        Raises:
+            DigestMismatchError: The digests differ; the message names both.
+        """
+        actual = sha256_of(path)
+        if actual != expected:
+            raise DigestMismatchError(
+                f"{path} hashes to {actual}, the pin expects {expected}; the file is not "
+                "executed. Delete it and re-run the bootstrap, or place the pinned "
+                "executable there by hand."
+            )
+
+    def _require_version(self, path: str) -> None:
+        """Run ``--version`` on an already digest-verified binary and compare.
+
+        Args:
+            path: The verified executable.
+
+        Returns:
+            None.
+
+        Raises:
+            VersionMismatchError: The reported version is not the pinned one,
+                or the probe exited non-zero.
+            OSError: The binary could not be launched.
+
+        Side effects:
+            Executes ``path`` once, with a timeout.
+        """
+        probe = subprocess.run(
+            [path, _VERSION_FLAG],
+            capture_output=True,
+            text=True,
+            timeout=_VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+        reported = probe.stdout.strip()
+        if probe.returncode != 0 or not reported:
+            raise VersionMismatchError(
+                f"{path} {_VERSION_FLAG} exited {probe.returncode} with no usable version "
+                f"(stderr: {probe.stderr.strip()!r})"
+            )
+        if reported.split()[-1] != self._pin.version:
+            raise VersionMismatchError(
+                f"{path} reports {reported!r}, the pin expects version {self._pin.version}; "
+                "the pin is inconsistent with the asset it names"
+            )
+
+    def _sweep_and_warn(self, keep: str) -> None:
+        """Sweep ``bin/`` and report on stderr what could not be removed.
+
+        Args:
+            keep: File name of the pinned executable to preserve.
+
+        Returns:
+            None.
+
+        Side effects:
+            Deletes files inside ``bin/``; writes warnings to stderr.
+        """
+        for leftover in sweep(self._bin_dir, keep):
+            print(
+                f"[WARNING] could not remove {leftover} from bin/ (held by another run?); "
+                "the next bootstrap will retry",
+                file=sys.stderr,
+            )
+
+    def _replace(self, staged: str, final: str) -> None:
+        """Move the staged executable into place, working around a held file.
+
+        Args:
+            staged: The verified executable, in ``bin/`` under a temporary name.
+            final: Where it must end up.
+
+        Returns:
+            None.
+
+        Raises:
+            OSError: The replacement could not be completed even after renaming
+                the old binary aside. Aborting is correct: an error naming the
+                held file beats a half-updated ``bin/``.
+
+        Side effects:
+            Renames within ``bin/``; may leave a discard file behind for the
+            sweep to collect.
+        """
+        try:
+            os.replace(staged, final)
+            return
+        except PermissionError:
+            # Not swallowed -- a change of strategy. PermissionError, not
+            # OSError: only "the destination is a running executable" (Windows)
+            # is what the rename dance below addresses. A full disk or a
+            # read-only directory must propagate, or bin/ ends up with NO
+            # executable after the old one was renamed aside.
+            pass
+        discard = os.path.join(self._bin_dir, f"{_DISCARD_PREFIX}{os.getpid()}-{int(time.time())}")
+        os.replace(final, discard)
+        try:
+            os.replace(staged, final)
+        except OSError:
+            # Roll the old binary back so bin/ keeps an executable; the error
+            # that follows names the held file (BDD-3h).
+            os.replace(discard, final)
+            raise
+        try:
+            os.unlink(discard)
+        except OSError:
+            print(
+                f"[WARNING] the previous magi-rs is still in use and was left as {discard}; "
+                "the next bootstrap will remove it",
+                file=sys.stderr,
+            )
