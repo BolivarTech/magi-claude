@@ -506,11 +506,12 @@ def test_the_ollama_flag_selects_the_magi_rs_executor(monkeypatch, tmp_path):
     import run_magi
 
     chosen = {}
-    monkeypatch.setattr(
-        run_magi,
-        "MagiRsTrio",
-        lambda *a, **k: chosen.setdefault("executor", "magi-rs") or _StubTrio(),
-    )
+
+    def _magi_rs(*args, **kwargs):
+        chosen["executor"] = "magi-rs"
+        return _StubTrio()
+
+    monkeypatch.setattr(run_magi, "MagiRsTrio", _magi_rs)
     monkeypatch.chdir(tmp_path)
     executor = run_magi._select_executor(_args(ollama=True), 1800)
     assert chosen["executor"] == "magi-rs"
