@@ -263,8 +263,9 @@ def test_the_timeout_resolves_to_the_measured_healthy_default_and_warns_below_it
     assert (warning is not None) == warns
 
 
-@pytest.mark.parametrize("bad", [0, -1, -1800])
+@pytest.mark.parametrize("bad", [0, -1, -1800, True])
 def test_a_non_positive_timeout_is_refused_deterministically(bad):
+    # ``True`` is an int subclass that would otherwise slip through as 1 (gate, cycle 1).
     # The Raises block promised this and nothing executed it. Deterministic, so
     # MagiRsContractError -- a retry with the same value fails the same way.
     with pytest.raises(MagiRsContractError):
@@ -404,7 +405,9 @@ async def test_a_verdict_breaking_the_seven_key_contract_is_rejected_per_mage(
     monkeypatch.setattr("asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(payload)))
     verdicts = await _run(monkeypatch, tmp_path)
     assert isinstance(verdicts["caspar"], ValidationError)
-    assert isinstance(verdicts["melchior"], dict)
+    # BOTH other seats survive: a _validate that dropped the rest on one
+    # failure would still have passed a melchior-only assertion (gate, cycle 1).
+    assert isinstance(verdicts["melchior"], dict) and isinstance(verdicts["balthasar"], dict)
 
 
 @pytest.mark.asyncio

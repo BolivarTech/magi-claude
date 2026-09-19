@@ -1,7 +1,10 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 1.1.0
+# Date: 2026-09-19
 """Tests for the allowlisted child environment of magi-rs (MS3 Task 1)."""
+
+import os
+import sys
 
 import pytest
 
@@ -138,3 +141,13 @@ def test_the_withheld_names_are_listed_so_a_child_failure_is_diagnosable():
     withheld = EnvironmentPolicy.withheld(parent)
     assert withheld == ["CORP_CA_HINT", "MAGI_PASSPHRASE"]
     assert "hunter2" not in " ".join(withheld)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows normalises environment keys")
+def test_windows_path_reaches_the_child_whatever_its_case_in_the_registry():
+    # The gate asked whether a `Path` (mixed case) entry would be withheld by
+    # the exact-name allowlist. It cannot: on Windows ``os.environ`` upper-cases
+    # every key, so the projection sees ``PATH`` regardless of how the variable
+    # is spelled in the registry. Pinned against the REAL os.environ.
+    child = EnvironmentPolicy.build(os.environ)
+    assert "PATH" in child and child["PATH"] == os.environ["PATH"]
