@@ -1566,6 +1566,8 @@ def _select_executor(args: argparse.Namespace, timeout: int) -> MagiRsTrio | Non
 _SECTION_HEADING = re.compile(r"^(#{1,2}) (.+?)\s*$")
 #: An optional ownership declaration right under a heading: ``<!-- defines: A, B -->``.
 _SECTION_DEFINES = re.compile(r"^<!--\s*defines:\s*(.+?)\s*-->\s*$")
+#: A markdown code fence, at column zero: headings inside it are not sections.
+_CODE_FENCE = "```"
 #: The name of the text before the first heading.
 _PREAMBLE_SECTION = "(preamble)"
 #: The extra segment that re-reads the contracts a split cut through.
@@ -1606,8 +1608,14 @@ def split_sections(text: str) -> list[dict[str, Any]]:
     name = _PREAMBLE_SECTION
     lines: list[str] = []
     defines: list[str] = []
+    in_fence = False
     for line in text.splitlines(keepends=True):
-        heading = _SECTION_HEADING.match(line)
+        if line.startswith(_CODE_FENCE):
+            # A fenced block is opaque: a `# Author:` line inside a pasted
+            # source is not a heading, and cutting a fence in half would
+            # hand a mage a segment whose markdown no longer parses.
+            in_fence = not in_fence
+        heading = None if in_fence else _SECTION_HEADING.match(line)
         if heading:
             if lines:
                 sections.append({"name": name, "body": "".join(lines), "defines": defines})
