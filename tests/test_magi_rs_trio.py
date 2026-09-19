@@ -751,3 +751,68 @@ def test_a_preflight_failure_inside_the_run_is_FATAL_not_a_traceback(
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert f"[FATAL] {failure}" in err and "Traceback" not in err
+
+
+# Loop 2 cycle 1 (the gate itself) hit this: magi-rs reported Caspar in
+# ``failed_agents`` and left it out of ``agents`` (degraded 2-of-3), and the
+# executor returned a dict WITHOUT a caspar entry -- run_orchestrator died on
+# ``verdicts["caspar"]`` (KeyError) instead of entering the degraded path.
+
+
+def _payload_with_dead_mage(agent, cause):
+    """The MS0 envelope as magi-rs emits it when one mage never delivered."""
+    envelope = json.loads(open(_MS0_FIXTURE, encoding="utf-8").read())
+    consult = envelope["consult"]
+    consult["agents"] = [v for v in consult["agents"] if v["agent"] != agent]
+    consult["failed_agents"] = {agent: cause}
+    consult["degraded"] = True
+    return json.dumps(envelope).encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_mage_magi_rs_reports_as_failed_is_returned_as_its_failure(monkeypatch, tmp_path):
+    # The contract: ONE entry per mage, the verdict or ITS exception. A mage
+    # absent from ``agents`` is a dead mage, and its cause is what magi-rs said.
+    cause = "no_fitting_candidate: timeout: request failed for http://localhost:11434/"
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(_payload_with_dead_mage("caspar", cause))),
+    )
+    verdicts = await _run(monkeypatch, tmp_path)
+    assert set(verdicts) == {"melchior", "balthasar", "caspar"}
+    assert isinstance(verdicts["caspar"], RuntimeError) and cause in str(verdicts["caspar"])
+    assert isinstance(verdicts["melchior"], dict) and isinstance(verdicts["balthasar"], dict)
+
+
+@pytest.mark.asyncio
+async def test_a_two_of_three_envelope_degrades_the_run_instead_of_crashing_it(
+    monkeypatch, tmp_path, capsys
+):
+    # D7: exactly two valid verdicts -> the EXISTING degraded machinery, flag
+    # in the report and warning on stderr. Never a KeyError.
+    import run_magi
+
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(_payload_with_dead_mage("caspar", "timeout"))),
+    )
+    _initialise(tmp_path)
+    _stub_bootstrap(monkeypatch)
+    executor = MagiRsTrio(
+        workdir=str(tmp_path),
+        mode="design",
+        timeout=1800,
+        bin_dir=str(tmp_path / "bin"),
+        pin=_stub_pin(),
+    )
+    report = await run_magi.run_orchestrator(
+        agents_dir=str(tmp_path),
+        prompt="payload",
+        output_dir=str(tmp_path),
+        timeout=1800,
+        executor=executor,
+        show_status=False,
+    )
+    assert report["degraded"] is True and report["failed_agents"] == ["caspar"]
+    assert {a["agent"] for a in report["agents"]} == {"melchior", "balthasar"}
+    assert "caspar" in capsys.readouterr().err
