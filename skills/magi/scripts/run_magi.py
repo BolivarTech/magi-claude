@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.9.1
+# Version: 2.10.0
 # Date: 2026-09-19
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -71,6 +71,12 @@ from backend import AgentBackend  # noqa: E402
 from backoff import next_backoff, parse_retry_after  # noqa: E402
 from claude_backend import ClaudeBackend  # noqa: E402
 from trio_executor import ClaudeTrio, TrioExecutor  # noqa: E402
+from bundle_segmenter import (  # noqa: E402
+    CONSULT_INPUT_CEILING_BYTES,
+    BundleSegmenter,
+    SegmentPlan,
+    SegmentTooLargeError,
+)
 from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
 from magi_rs_pin import Pin  # noqa: E402
 from magi_rs_result import ConsultResult  # noqa: E402
@@ -1548,6 +1554,356 @@ def _select_executor(args: argparse.Namespace, timeout: int) -> MagiRsTrio | Non
     )
 
 
+# --- MS4b: segmentation of a bundle that does not fit the consult ceiling ----------------
+#
+# The transport ceiling is a measured fact (MS0: 262 144 bytes of stdin, inclusive), and a
+# verdict on a truncated payload is indistinguishable from a legitimate one. So a bundle
+# that does not fit under the headroom is split at SECTION boundaries, each segment is
+# evaluated as its own run, ONE AT A TIME (an Ollama invocation takes all three slots),
+# and the gate is approved only when EVERY segment is (CLAUDE.local.md §6.2).
+
+#: A top-level markdown heading opens a section: ``# `` or ``## `` at column zero.
+_SECTION_HEADING = re.compile(r"^(#{1,2}) (.+?)\s*$")
+#: An optional ownership declaration right under a heading: ``<!-- defines: A, B -->``.
+_SECTION_DEFINES = re.compile(r"^<!--\s*defines:\s*(.+?)\s*-->\s*$")
+#: The name of the text before the first heading.
+_PREAMBLE_SECTION = "(preamble)"
+#: The extra segment that re-reads the contracts a split cut through.
+_INTEGRATION_SECTION = "(integration)"
+#: Per-section rendering overhead when a segment is re-assembled: the heading line and
+#: the blank line after it, measured on the longest heading the project's bundles use.
+_SECTION_RENDER_OVERHEAD_BYTES = 128
+#: Sub-directory of the run holding one segment's artefacts.
+_SEGMENT_DIR = "segment-{order}"
+#: Consensus labels that count as a PASS for one segment (§6: >= GO WITH CAVEATS).
+_PASSING_LABEL_PREFIXES = ("STRONG GO", "GO")
+#: The label a degraded segment is tabled under: a degraded run approves nothing.
+_INVALID_SEGMENT_LABEL = "INVALID (degraded)"
+
+
+def split_sections(text: str) -> list[dict[str, Any]]:
+    """Split a bundle into the sections the segmenter plans over.
+
+    A section is opened by a top-level markdown heading (``#`` or ``##`` at
+    column zero); its name is the heading text. Text before the first heading
+    is the ``(preamble)`` section. A section may declare the shared interfaces
+    it OWNS with one ``<!-- defines: A, B -->`` line right under its heading
+    (§6.2.3: the segmenter never infers ownership). Deeper headings (``###``)
+    stay inside their section.
+
+    Args:
+        text: The bundle, exactly as the run would send it.
+
+    Returns:
+        ``[{"name": str, "body": str, "defines": [str]}, ...]`` in bundle order.
+        The bodies concatenate back to the input (headings included in their
+        section's body), so nothing is lost or duplicated.
+
+    Complexity:
+        O(n) in the number of lines, once per run.
+    """
+    sections: list[dict[str, Any]] = []
+    name = _PREAMBLE_SECTION
+    lines: list[str] = []
+    defines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        heading = _SECTION_HEADING.match(line)
+        if heading:
+            if lines:
+                sections.append({"name": name, "body": "".join(lines), "defines": defines})
+            name, lines, defines = heading.group(2), [line], []
+            continue
+        declared = _SECTION_DEFINES.match(line)
+        if declared and lines and not defines:
+            defines = [n.strip() for n in declared.group(1).split(",") if n.strip()]
+        lines.append(line)
+    if lines:
+        sections.append({"name": name, "body": "".join(lines), "defines": defines})
+    return sections
+
+
+def announce_segmentation(plan: SegmentPlan, payload_bytes: int, ceiling: int) -> None:
+    """Say on stderr that the bundle was split, into how many, and why.
+
+    A user who does not know their bundle was split cannot read the verdicts
+    they get back: each one judged a PART, not the whole.
+
+    Args:
+        plan: The segmentation plan.
+        payload_bytes: The size of the whole payload, in bytes.
+        ceiling: The transport ceiling it did not fit under.
+
+    Returns:
+        None.
+
+    Side effects:
+        Writes one line to stderr.
+    """
+    print(
+        f"[!] WARNING: the bundle was SPLIT into {len(plan.segments)} segments: "
+        f"{payload_bytes} bytes do not fit under magi-rs's {ceiling}-byte input ceiling "
+        f"({plan.headroom:.0%} headroom). Each verdict below judges ONE segment; the gate "
+        "is approved only when every segment is.",
+        file=sys.stderr,
+    )
+
+
+@dataclass(frozen=True)
+class SegmentationVerdict:
+    """The gate's decision over the per-segment verdicts (§6.2.6).
+
+    Attributes:
+        approved: True only when at least one segment was evaluated and EVERY
+            one of them passed.
+        failing: The labels that sank the gate, verbatim.
+    """
+
+    approved: bool
+    failing: list[str]
+
+
+def segmentation_verdict(labels: list[str]) -> SegmentationVerdict:
+    """Approve the gate only when EVERY segment passed.
+
+    Two of three segments passing reads like "mostly approved", and it is not
+    approved at all. Nothing evaluated approves nothing.
+
+    Args:
+        labels: One consensus label per segment, verbatim (a degraded segment
+            arrives as ``INVALID (degraded)``).
+
+    Returns:
+        The decision and the labels that failed.
+    """
+    failing = [label for label in labels if not label.startswith(_PASSING_LABEL_PREFIXES)]
+    return SegmentationVerdict(approved=bool(labels) and not failing, failing=failing)
+
+
+def needs_integration_pass(plan: SegmentPlan) -> bool:
+    """Whether the split crossed a shared interface.
+
+    Args:
+        plan: The segmentation plan.
+
+    Returns:
+        True when any segment references a name another segment defines --
+        i.e. the split cut through a contract. False for a clean split, where
+        the extra pass would be cost without a defect to catch, and False when
+        nothing was split at all.
+    """
+    if not plan.is_segmented:
+        return False
+    return any(segment.references for segment in plan.segments)
+
+
+def _integration_text(sections: list[dict[str, Any]], plan: SegmentPlan) -> str:
+    """The contracts a split cut through: every line that names a shared interface.
+
+    Not the bodies -- those were reviewed in their own segment -- but the
+    signatures, the calls and the prose that mention each declared name, from
+    every section, in bundle order.
+
+    Args:
+        sections: All sections.
+        plan: The segmentation plan (its ``defines`` are the names).
+
+    Returns:
+        A markdown document, one ``##`` per section that mentions a name.
+    """
+    names = [n for segment in plan.segments for n in segment.defines]
+    parts: list[str] = [
+        "# Integration pass: the contracts the segmentation cut through\n\n"
+        f"Shared interfaces: {', '.join(names)}. Only the lines that mention them, per section.\n"
+    ]
+    for section in sections:
+        hits = [line for line in str(section["body"]).splitlines() if any(n in line for n in names)]
+        if hits:
+            parts.append(f"\n## {section['name']}\n\n" + "\n".join(hits) + "\n")
+    return "".join(parts)
+
+
+def _write_segmentation_map(output_dir: str, report: dict[str, Any]) -> None:
+    """Write the run's top-level report -- first with the map only, then with every result.
+
+    Called BEFORE the first segment runs (the map is the decision, not a record
+    of what happened: if the run dies halfway, the file still says what the
+    split was going to be) and again after each segment.
+
+    Args:
+        output_dir: The run's output directory.
+        report: The top-level report (``segmentation`` block inside).
+
+    Side effects:
+        Writes ``magi-report.json``.
+    """
+    with open(os.path.join(output_dir, "magi-report.json"), "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+
+
+def _evaluate_segment(
+    order: int,
+    text: str,
+    args: argparse.Namespace,
+    output_dir: str,
+    agents_dir: str,
+    timeout: int,
+) -> dict[str, Any]:
+    """Run ONE segment as its own gate run, into its own directory.
+
+    Args:
+        order: The segment's 1-based position (names the directory).
+        text: The segment's content, exactly as a whole bundle would be given.
+        args: The parsed CLI namespace.
+        output_dir: The run's output directory; the segment gets a child.
+        agents_dir: The shipped agent prompts.
+        timeout: The resolved wall timeout.
+
+    Returns:
+        The segment's report, as ``run_orchestrator`` returns it plus the
+        ``magi_rs`` block and the unpriced cost; also written to
+        ``segment-N/magi-report.json``.
+
+    Raises:
+        Whatever ``run_orchestrator`` raises (rendered by ``main()``).
+
+    Side effects:
+        Launches one magi-rs run; writes the segment's artefacts.
+    """
+    segment_dir = os.path.join(output_dir, _SEGMENT_DIR.format(order=order))
+    os.makedirs(segment_dir, exist_ok=True)
+    executor = _select_executor(args, timeout)
+    prompt = build_user_prompt(args.mode, text)
+    report: dict[str, Any] = asyncio.run(
+        run_orchestrator(
+            agents_dir,
+            prompt,
+            segment_dir,
+            timeout,
+            executor=executor,
+            show_status=args.show_status,
+        )
+    )
+    report["cost"] = unpriced_cost()
+    result: ConsultResult | None = getattr(executor, "last_result", None)
+    if result is not None:
+        report.update(build_report_block(result))
+    with open(os.path.join(segment_dir, "magi-report.json"), "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    if result is not None:
+        announce_magi_rs_telemetry(result, degraded_locally=bool(report.get("degraded", False)))
+    return report
+
+
+def run_segmented(
+    plan: SegmentPlan,
+    sections: list[dict[str, Any]],
+    args: argparse.Namespace,
+    output_dir: str,
+    agents_dir: str,
+    timeout: int,
+) -> dict[str, Any]:
+    """Evaluate a split bundle: the map first, then one segment at a time, then the gate.
+
+    Segments run IN SERIES and in plan order (§Concurrencia: one Ollama
+    invocation holds all three slots). A segment that fails does not abort the
+    run -- it is tabled as it came back and the next one runs, so the report is
+    complete, not partial (§6.2.5); the gate is approved only when every
+    segment passed (§6.2.6). When the split cut through a shared interface, an
+    extra integration segment re-reads those contracts and must pass too.
+
+    Args:
+        plan: The segmentation plan.
+        sections: The bundle's sections, in order.
+        args: The parsed CLI namespace.
+        output_dir: The run's output directory.
+        agents_dir: The shipped agent prompts.
+        timeout: The resolved wall timeout.
+
+    Returns:
+        The top-level report: ``{"segmented": True, "segmentation": {map...,
+        "results": [{order, section_names, consensus, degraded, agents}],
+        "integration_pass": bool, "approved": bool, "failing": [str]}}``.
+
+    Side effects:
+        Writes ``magi-report.json`` before the first segment and after each;
+        prints each segment's report and a final table on stdout.
+    """
+    by_name = {section["name"]: section for section in sections}
+    jobs: list[tuple[int, list[str], str]] = [
+        (seg.order, seg.section_names, "".join(str(by_name[n]["body"]) for n in seg.section_names))
+        for seg in plan.segments
+    ]
+    integration = needs_integration_pass(plan)
+    if integration:
+        jobs.append((len(jobs) + 1, [_INTEGRATION_SECTION], _integration_text(sections, plan)))
+
+    segmentation: dict[str, Any] = dict(plan.as_map())
+    segmentation.update(results=[], integration_pass=integration, approved=None, failing=[])
+    report: dict[str, Any] = {"segmented": True, "segmentation": segmentation}
+    _write_segmentation_map(output_dir, report)  # the decision, before anything runs
+
+    for order, names, text in jobs:
+        print(f"\n=== segment-{order}: {', '.join(names)} ===")
+        segment_report = _evaluate_segment(order, text, args, output_dir, agents_dir, timeout)
+        degraded = bool(segment_report.get("degraded", False))
+        label = (
+            _INVALID_SEGMENT_LABEL
+            if degraded
+            else str(segment_report.get("consensus", {}).get("consensus", ""))
+        )
+        print(format_report(segment_report["agents"], segment_report["consensus"]))
+        segmentation["results"].append(
+            {
+                "order": order,
+                "section_names": names,
+                "consensus": label,
+                "degraded": degraded,
+                "agents": len(segment_report.get("agents", [])),
+                "output_dir": os.path.join(output_dir, _SEGMENT_DIR.format(order=order)),
+            }
+        )
+        _write_segmentation_map(output_dir, report)  # every result lands as it comes
+
+    verdict = segmentation_verdict([r["consensus"] for r in segmentation["results"]])
+    segmentation["approved"] = verdict.approved
+    segmentation["failing"] = verdict.failing
+    _write_segmentation_map(output_dir, report)
+    print(_format_segmentation_table(segmentation))
+    return report
+
+
+def _format_segmentation_table(segmentation: dict[str, Any]) -> str:
+    """Render the closing table of a segmented run, verdicts verbatim (§6.2.6).
+
+    Args:
+        segmentation: The ``segmentation`` block of the top-level report.
+
+    Returns:
+        A markdown table plus one line with the gate's decision.
+    """
+    rows = [
+        "",
+        "## Segmented run",
+        "",
+        "| Segment | Sections | Verdict | Passes |",
+        "|---|---|---|---|",
+    ]
+    for entry in segmentation["results"]:
+        passes = "yes" if entry["consensus"].startswith(_PASSING_LABEL_PREFIXES) else "NO"
+        rows.append(
+            f"| segment-{entry['order']} | {', '.join(entry['section_names'])} | "
+            f"{entry['consensus']} | {passes} |"
+        )
+    decision = (
+        "APPROVED: every segment passed"
+        if segmentation["approved"]
+        else ("NOT APPROVED: " + ", ".join(segmentation["failing"]) + " -- stop and escalate")
+    )
+    rows.append("")
+    rows.append(f"GATE {decision}")
+    return "\n".join(rows)
+
+
 def _default_agents_dir() -> str:
     """The shipped ``agents/`` directory, next to this script's package.
 
@@ -2740,6 +3096,47 @@ def main() -> None:
     print(f"|  Output: {output_dir}")
     print("+==================================================+")
     print(flush=True)
+
+    # MS4b: a bundle that does not fit under magi-rs's input ceiling (with headroom)
+    # is split at section boundaries and evaluated one segment at a time. The whole
+    # prompt is what travels, so the wrapper sanitize adds is charged against the
+    # ceiling. Decided BEFORE anything runs; a section too large to fit is refused.
+    if executor is not None:
+        sections = split_sections(input_content)
+        wrapper_bytes = len(build_user_prompt(args.mode, "").encode("utf-8"))
+        try:
+            segment_plan = BundleSegmenter.plan(
+                sections,
+                CONSULT_INPUT_CEILING_BYTES - wrapper_bytes,
+                overhead_bytes=_SECTION_RENDER_OVERHEAD_BYTES,
+            )
+        except SegmentTooLargeError as exc:
+            if is_temp_dir:
+                shutil.rmtree(output_dir, ignore_errors=True)
+            print(f"[FATAL] {exc}", file=sys.stderr)
+            sys.exit(1)
+        if segment_plan.is_segmented:
+            announce_segmentation(
+                segment_plan,
+                payload_bytes=len(prompt.encode("utf-8")),
+                ceiling=CONSULT_INPUT_CEILING_BYTES,
+            )
+            try:
+                run_segmented(
+                    segment_plan, sections, args, output_dir, agents_dir, resolved_timeout
+                )
+            except BaseException as exc:
+                if isinstance(exc, FAIL_CLOSED_ERRORS):
+                    print(f"[FATAL] {exc}", file=sys.stderr)
+                    sys.exit(1)
+                if isinstance(exc, (MagiRsProcessError, MagiRsContractError)):
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    sys.exit(1)
+                raise
+            print(f"\nFull report saved to: {os.path.join(output_dir, 'magi-report.json')}")
+            if is_temp_dir:
+                remove_lock(output_dir)
+            return
 
     # ``BaseException`` rather than ``Exception`` so KeyboardInterrupt and
     # SystemExit also trigger the temp-dir cleanup — otherwise Ctrl-C mid

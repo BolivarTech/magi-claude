@@ -36,6 +36,30 @@ def _sections(count):
     return [{"name": f"s{i}", "body": f"body {i}", "defines": [f"Name{i}"]} for i in range(count)]
 
 
+def _agents():
+    """Three minimal seven-key verdicts, enough for format_report to render."""
+    return [
+        {
+            "agent": name,
+            "verdict": "approve",
+            "confidence": 0.9,
+            "summary": "s",
+            "reasoning": "r",
+            "findings": [],
+            "recommendation": "rec",
+        }
+        for name in ("caspar", "melchior", "balthasar")
+    ]
+
+
+def _report():
+    """A real report shape: the existing consensus over the three verdicts."""
+    from synthesize import determine_consensus
+
+    agents = _agents()
+    return {"agents": agents, "consensus": determine_consensus(agents)}
+
+
 def _args(**overrides):
     """A parsed-args namespace shaped like run_magi's (fields read by run_segmented)."""
     fields = dict(ollama=True, model=None, mode="design", timeout=None, show_status=False)
@@ -57,7 +81,7 @@ def test_the_map_is_written_before_the_first_segment_is_evaluated(monkeypatch, t
 
     def _fake_segment(*a, **k):
         order.append("segment")
-        return {"consensus": {"consensus": "GO (3-0)"}, "agents": [1, 2, 3]}
+        return _report()
 
     monkeypatch.setattr(run_magi, "_evaluate_segment", _fake_segment)
     run_magi.run_segmented(_plan_with(3), _sections(3), _args(), str(tmp_path), "agents", 1800)
@@ -130,7 +154,7 @@ def test_a_segmented_run_evaluates_in_series_and_writes_the_table(monkeypatch, t
 
     async def _orch(agents_dir, prompt, output_dir, timeout, **kwargs):
         calls.append((output_dir, prompt))
-        return {"agents": [1, 2, 3], "consensus": {"consensus": "GO (3-0)", "score": 1.0}}
+        return _report()
 
     monkeypatch.setattr(run_magi, "run_orchestrator", _orch)
     plan = _plan_with(2)
@@ -138,8 +162,8 @@ def test_a_segmented_run_evaluates_in_series_and_writes_the_table(monkeypatch, t
     assert [c[0] for c in calls] == [str(tmp_path / "segment-1"), str(tmp_path / "segment-2")]
     assert "body 0" in calls[0][1] and "body 1" not in calls[0][1]
     assert report["segmentation"]["segments"][0]["order"] == 1
-    assert [r["consensus"] for r in report["segmentation"]["results"]] == ["GO (3-0)", "GO (3-0)"]
+    assert [r["consensus"] for r in report["segmentation"]["results"]] == ["STRONG GO", "STRONG GO"]
     assert report["segmentation"]["approved"] is True
     assert json.loads((tmp_path / "magi-report.json").read_text(encoding="utf-8"))["segmentation"]
     out = capsys.readouterr().out
-    assert "segment-1" in out and "GO (3-0)" in out
+    assert "segment-1" in out and "STRONG GO" in out and "APPROVED" in out
