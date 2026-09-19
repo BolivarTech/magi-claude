@@ -5286,18 +5286,23 @@ def test_ollama_init_bootstrap_failure_is_fatal_not_a_traceback(monkeypatch, cap
 
 
 def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
-    """--ollama must not abort when 'claude' is absent from PATH."""
+    """--ollama must not abort when 'claude' is absent from PATH.
+
+    v6 (MS3 Task 5, declared replacement): the open-weight path is executed by
+    ``magi-rs``, so what must reach ``run_orchestrator`` is a ``MagiRsTrio``
+    executor -- the v5 assertion on an ``OllamaBackend`` tested a transport
+    the flag no longer selects.
+    """
     import run_magi
+    from magi_rs_trio import MagiRsTrio
 
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
     monkeypatch.setattr(run_magi.shutil, "which", lambda _: None)  # claude absent
-    monkeypatch.setattr(run_magi, "resolve_config", lambda **k: _make_ollama_cfg())
-    monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
 
     captured: dict[str, object] = {}
 
     async def _fake_orch(*a: object, **k: object) -> dict[str, object]:
-        captured["backend"] = k.get("backend")
+        captured["executor"] = k.get("executor")
         # Return a minimal-but-valid report shape so main() can run to completion
         # without crashing in format_report / consensus / cost paths.
         raise SystemExit(0)
@@ -5308,9 +5313,8 @@ def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
         run_magi.main()
     except SystemExit as e:
         assert e.code != 1, f"Expected not exit(1), got exit({e.code})"
-    from ollama_backend import OllamaBackend
 
-    assert isinstance(captured["backend"], OllamaBackend)
+    assert isinstance(captured["executor"], MagiRsTrio)
 
 
 def test_retry_feedback_truncates_a_huge_error():

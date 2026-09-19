@@ -470,3 +470,101 @@ async def test_a_status_callback_that_raises_does_not_take_the_run_down(monkeypa
 
     verdicts = await _run(monkeypatch, tmp_path, on_state=_explode)
     assert set(verdicts) == {"melchior", "balthasar", "caspar"}
+
+
+# --------------------------------------------------------------------------
+# Task 5 -- the wiring: ``--ollama`` selects the magi-rs executor
+# --------------------------------------------------------------------------
+
+
+def _args(**overrides):
+    """A parsed-args namespace shaped like run_magi's, for the wiring tests.
+
+    Field names measured from ``parse_args`` (Task 5, Step 1): ``ollama``,
+    ``model``, ``mode``, ``timeout``.
+    """
+    fields = dict(ollama=False, model=None, mode="design", timeout=None)
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+class _StubTrio:
+    """A TrioExecutor that returns three canned verdicts without launching."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def run_trio(
+        self, prompt, agents_dir, output_dir, timeout, models, max_attempts, on_state=None
+    ):
+        self.calls += 1
+        envelope = json.loads(_ok_payload().decode("utf-8"))
+        return {v["agent"]: v for v in envelope["consult"]["agents"]}
+
+
+def test_the_ollama_flag_selects_the_magi_rs_executor(monkeypatch, tmp_path):
+    import run_magi
+
+    chosen = {}
+    monkeypatch.setattr(
+        run_magi,
+        "MagiRsTrio",
+        lambda *a, **k: chosen.setdefault("executor", "magi-rs") or _StubTrio(),
+    )
+    monkeypatch.chdir(tmp_path)
+    executor = run_magi._select_executor(_args(ollama=True), 1800)
+    assert chosen["executor"] == "magi-rs"
+    assert isinstance(executor, _StubTrio)
+
+
+def test_the_magi_rs_executor_is_bound_to_the_cwd_mode_timeout_and_plugin_paths(
+    monkeypatch, tmp_path
+):
+    # R6 (-w is the project root, never inherited implicitly), R10 (the mode
+    # is always explicit) and R3 (bin/ + pin live under the plugin root).
+    import run_magi
+
+    seen = {}
+
+    def _record(**kwargs):
+        seen.update(kwargs)
+        return _StubTrio()
+
+    monkeypatch.setattr(run_magi, "MagiRsTrio", _record)
+    monkeypatch.chdir(tmp_path)
+    run_magi._select_executor(_args(ollama=True, mode="code-review"), 1800)
+    assert seen["workdir"] == os.getcwd()
+    assert seen["mode"] == "code-review"
+    assert seen["timeout"] == 1800
+    assert os.path.basename(seen["bin_dir"]) == "bin"
+    assert seen["pin"].version == "0.19.1"
+
+
+def test_without_the_flag_no_executor_is_selected(monkeypatch):
+    # The Claude path keeps ClaudeTrio bound inside run_orchestrator to its own
+    # telemetry (R20): the selector must not construct anything for it.
+    import run_magi
+
+    monkeypatch.setattr(run_magi, "MagiRsTrio", _raising(AssertionError("constructed")))
+    assert run_magi._select_executor(_args(ollama=False), 900) is None
+
+
+@pytest.mark.asyncio
+async def test_run_orchestrator_runs_the_given_executor_instead_of_claude(monkeypatch, tmp_path):
+    # Everything below the raw verdicts does NOT fork: the same run_orchestrator
+    # consumes what the magi-rs executor returns.
+    import run_magi
+
+    monkeypatch.setattr(run_magi, "ClaudeTrio", _raising(AssertionError("ClaudeTrio built")))
+    stub = _StubTrio()
+    report = await run_magi.run_orchestrator(
+        agents_dir=str(tmp_path),
+        prompt="payload",
+        output_dir=str(tmp_path),
+        timeout=1800,
+        executor=stub,
+        show_status=False,
+    )
+    assert stub.calls == 1
+    assert {a["agent"] for a in report["agents"]} == {"melchior", "balthasar", "caspar"}
+    assert "consensus" in report
