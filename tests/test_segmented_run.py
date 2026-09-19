@@ -167,3 +167,15 @@ def test_a_segmented_run_evaluates_in_series_and_writes_the_table(monkeypatch, t
     assert json.loads((tmp_path / "magi-report.json").read_text(encoding="utf-8"))["segmentation"]
     out = capsys.readouterr().out
     assert "segment-1" in out and "STRONG GO" in out and "APPROVED" in out
+
+
+def test_a_heading_inside_a_code_fence_does_not_open_a_section():
+    # SMOKE (Task 4) found it: every module starts with `# Author:` at column
+    # zero, and a bundle of fenced sources split into 257 "sections", cutting
+    # fences in half. A fence is opaque to the section scanner.
+    from run_magi import split_sections
+
+    text = "## file.py\n\n```python\n# Author: someone\n# Version: 1\ncode\n```\n\n## other.py\n\nmore\n"
+    sections = split_sections(text)
+    assert [s["name"] for s in sections] == ["file.py", "other.py"]
+    assert "# Author: someone" in sections[0]["body"]
