@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.2.0
+# Version: 1.3.0
 # Date: 2026-09-19
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
@@ -369,6 +369,8 @@ class MagiRsTrio(TrioExecutor):
                 and stderr VERBATIM, names the environment allowlist as a
                 suspect and lists the parent variables it withheld (names
                 only), and nothing is recovered from partial output.
+            MagiRsContractError: The payload cannot be encoded as UTF-8 (a lone
+                surrogate). Refused before the child starts; deterministic.
 
         Side effects:
             Launches a process with an allowlisted environment; writes
@@ -376,6 +378,16 @@ class MagiRsTrio(TrioExecutor):
         """
         env = EnvironmentPolicy.build(os.environ)
         _emit(on_state, _TRIO_NODE, "running")
+        # Encode BEFORE anything starts: a lone surrogate (argv or a file that
+        # arrived via surrogateescape) is a deterministic payload defect, not a
+        # transport failure -- refused as a contract error, never a traceback
+        # from inside communicate(), and never an orphaned child.
+        try:
+            payload = prompt.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise MagiRsContractError(
+                f"the payload cannot be encoded as UTF-8 for magi-rs's stdin: {exc}"
+            ) from exc
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv,
@@ -388,9 +400,7 @@ class MagiRsTrio(TrioExecutor):
             _emit(on_state, _TRIO_NODE, "failed")
             raise MagiRsProcessError(f"could not start {argv[0]}: {exc}") from exc
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(prompt.encode("utf-8")), timeout=timeout
-            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(payload), timeout=timeout)
         except (asyncio.TimeoutError, TimeoutError) as exc:
             process.kill()
             await process.wait()
