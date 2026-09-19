@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.7.0
+# Version: 2.8.0
 # Date: 2026-09-19
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -31,7 +31,7 @@ import urllib.error
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import IO, Any, Callable, Mapping
 
 # Bootstrap: make sibling modules importable under invocations that do NOT
 # auto-inject this directory into sys.path (e.g. ``python -m
@@ -73,6 +73,7 @@ from claude_backend import ClaudeBackend  # noqa: E402
 from trio_executor import ClaudeTrio, TrioExecutor  # noqa: E402
 from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
 from magi_rs_pin import Pin  # noqa: E402
+from magi_rs_result import ConsultResult  # noqa: E402
 from magi_rs_trio import (  # noqa: E402
     FAIL_CLOSED_ERRORS,
     MagiRsContractError,
@@ -1586,6 +1587,103 @@ def check_prompts(agents_dir: str) -> None:
         sys.exit(1)
     print(f"OK: the prompts in {agents_dir} honour the verdict-marker contract.")
     sys.exit(0)
+
+
+#: D3: the remedy for an unmeasured context window lives in the USER's file, which the
+#: plugin never opens (R7) -- so the warning names it instead.
+_UNMEASURED_REMEDY = "set `strict_context_guard = true` in .magi/magi.toml"
+
+
+def announce_magi_rs_telemetry(result: ConsultResult, stream: IO[str] | None = None) -> None:
+    """Warn about anything that degrades a gate, on a channel a human reads.
+
+    Emits at most four warnings, and NONE of them on a clean run -- a channel
+    that speaks every time is a channel nobody reads, and then the run that
+    mattered scrolls past unread. Sibling of :func:`announce_extraction_failures`
+    and of the ``$0.00`` / unattributed warnings of v5.4.0, for the same reason:
+    a field in a file nobody opens is found too late.
+
+    Args:
+        result: The parsed consult result.
+        stream: Where to write; ``sys.stderr`` when None, resolved at CALL
+            time (a default bound at definition time would outlive a
+            redirected stderr). Injected so a test can capture it.
+
+    Returns:
+        None.
+
+    Raises:
+        Nothing. Telemetry must not be able to destroy the artifact it
+        annotates -- the same fail-soft contract ``read_served_models`` has,
+        and for the same reason: this runs immediately before ``json.dump``.
+
+    Side effects:
+        Writes to ``stream``.
+    """
+    out = sys.stderr if stream is None else stream
+    try:
+        _announce_magi_rs_telemetry(result, out)
+    except Exception as exc:  # noqa: BLE001 -- fail-soft by contract (see the docstring)
+        print(f"[!] WARNING: could not render the magi-rs telemetry warnings ({exc})", file=out)
+
+
+def _announce_magi_rs_telemetry(result: ConsultResult, stream: IO[str]) -> None:
+    """The four warnings of :func:`announce_magi_rs_telemetry`, without the fail-soft wrap."""
+    telemetry = result.telemetry
+    if result.degraded:
+        print(
+            "[!] WARNING: magi-rs reports the run DEGRADED (a seat delivered no verdict). "
+            "The gate is INVALID whatever the verdict says -- resolve the cause and re-run.",
+            file=stream,
+        )
+    capped = result.capped_agents
+    if capped:
+        completions = telemetry.get("completions") or {}
+        detail = ", ".join(
+            f"{mage} ({completions[mage][-1].get('model')}, cap {completions[mage][-1].get('cap')})"
+            for mage in capped
+        )
+        print(
+            f"[!] WARNING: the accepted attempt hit the completion cap for {detail}. The verdict "
+            "counts (D2: the cut fell after the closing marker), but trailing prose was lost.",
+            file=stream,
+        )
+    unmeasured = telemetry.get("ran_unmeasured")
+    if isinstance(unmeasured, list) and unmeasured:
+        seats = ", ".join(str(name) for name in sorted(unmeasured))
+        if len(unmeasured) >= len(AGENTS):
+            print(
+                f"[!] WARNING: NOBODY MEASURED the context window: {seats} all ran unmeasured, "
+                "so the input may have been silently truncated for every seat. "
+                f"To fail closed instead, {_UNMEASURED_REMEDY}.",
+                file=stream,
+            )
+        else:
+            print(
+                f"[!] WARNING: the context window was not measured for {seats}; the guard "
+                f"estimated it and ran. To fail closed instead, {_UNMEASURED_REMEDY}.",
+                file=stream,
+            )
+    failures = telemetry.get("extraction_failures")
+    if isinstance(failures, dict):
+        records = [
+            (mage, rec)
+            for mage, recs in sorted(failures.items())
+            if isinstance(recs, list)
+            for rec in recs
+            if isinstance(rec, dict)
+        ]
+        if records:
+            detail = "; ".join(
+                f"{mage}: attempt {rec.get('attempt')} {rec.get('cause')} ({rec.get('model')})"
+                for mage, rec in records
+            )
+            print(
+                f"[!] WARNING: {len(records)} verdict extraction failure(s) upstream -- {detail}. "
+                "magi-rs retried (and may have rotated); a seat that keeps doing this is a "
+                "model drifting away from the marker contract.",
+                file=stream,
+            )
 
 
 def announce_extraction_failures(failures: Mapping[str, Mapping[str, int]]) -> None:
