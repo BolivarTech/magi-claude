@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.4.0
+# Version: 1.4.1
 # Date: 2026-09-19
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
@@ -116,7 +116,13 @@ class MagiRsProcessError(ValidationError):
 
     This one DOES inherit from ``ValidationError``, and for the reason the rule
     gives: a child that timed out or was OOM-killed may well succeed on a
-    second attempt, so the orchestrator's existing retry is exactly right.
+    second attempt -- it is the transient class of the taxonomy. Note what
+    that does and does not buy today: on the magi-rs path NOTHING retries it
+    (``run_orchestrator`` runs the executor once; the per-mage retry lives
+    inside ``ClaudeTrio``, and magi-rs owns its own retries and rotation), so
+    the inheritance keeps the project's error taxonomy honest -- transient vs
+    deterministic -- rather than driving a loop. ``main()`` renders it as one
+    ``ERROR:`` line and exits 1.
     """
 
 
