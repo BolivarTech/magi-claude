@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 1.1.0
+# Date: 2026-09-19
 """Tests for reading a magi-rs consult envelope (MS3 Task 3c).
 
 The fixtures under ``tests/fixtures/magi-rs-consult/`` derive from ONE real
@@ -241,3 +241,111 @@ def test_a_null_report_reads_as_empty_not_the_string_None():
     envelope = json.loads(_fixture("three-agents.json"))
     envelope["consult"]["report"] = None
     assert ConsultResult.from_json(json.dumps(envelope)).report == ""
+
+
+# --------------------------------------------------------------------------
+# MS4 Task 2 -- capped_agents (D2): a `finish: length` on the LAST attempt counts, and is shouted
+# --------------------------------------------------------------------------
+
+
+def _result(**telemetry):
+    """A ConsultResult carrying only the telemetry a test cares about.
+
+    Every default is the shape a clean run REALLY produces -- read off the
+    MS0b fixture, not imagined. Mappings keyed by mage, never flat lists with
+    an "agent" field: a helper that invents a shape makes every test on top
+    of it pass against the wrong contract.
+    """
+    fields = dict(
+        degraded=False,
+        mode="code-review",
+        mode_source="explicit",
+        extraction_failures={"balthasar": [], "caspar": [], "melchior": []},
+        input_size={"estimated_tokens": 0, "exceeded": False, "warn_threshold": 98304},
+        report_truncated="none",
+        endpoint_divergence=False,
+        timeout_below_formula=False,
+        failed_agents={},
+        rotations=[],
+        ran_unmeasured=[],
+        completions={},
+        pool_eligibility={},
+    )
+    fields.update(telemetry)
+    return ConsultResult(
+        agents=[], telemetry=fields, report="", degraded=fields["degraded"], run_id=None
+    )
+
+
+def _result_with_completions(records):
+    """A ConsultResult whose only interesting telemetry is `completions`.
+
+    `records` is the measured shape: a mapping of mage -> list of attempts,
+    each `{model, cap, finish, completion_tokens, prompt_tokens}`. `None`
+    models an older magi-rs that emits no completions at all -- which must
+    yield no capped agents rather than raising.
+    """
+    return _result(completions=records if records is not None else None)
+
+
+def _attempt(finish, model="m", cap=16384):
+    """One completion record in the measured shape (no `agent` key)."""
+    return {
+        "model": model,
+        "cap": cap,
+        "finish": finish,
+        "completion_tokens": 0,
+        "prompt_tokens": 0,
+    }
+
+
+def test_an_agent_whose_last_attempt_stopped_cleanly_is_not_capped():
+    assert _result_with_completions({"caspar": [_attempt("stop")]}).capped_agents == []
+
+
+def test_an_agent_whose_last_attempt_hit_the_cap_is_capped():
+    assert _result_with_completions({"caspar": [_attempt("length")]}).capped_agents == ["caspar"]
+
+
+def test_an_agent_that_recovered_on_retry_is_NOT_capped():
+    # The measured case from §2.4: attempt 1 `length`, attempt 2 `stop`. The
+    # LAST attempt is what the verdict came from.
+    result = _result_with_completions({"caspar": [_attempt("length"), _attempt("stop")]})
+    assert result.capped_agents == []
+
+
+def test_an_agent_that_hit_the_cap_on_its_LAST_attempt_is_capped_despite_an_earlier_stop():
+    result = _result_with_completions({"caspar": [_attempt("stop"), _attempt("length")]})
+    assert result.capped_agents == ["caspar"]
+
+
+def test_a_finish_that_is_neither_stop_nor_length_still_counts_as_capped():
+    # D2 says `finish != "stop"`, not `== "length"`: magi-core's enum is
+    # non-exhaustive, and an unknown reason is exactly where silence is worst.
+    result = _result_with_completions({"melchior": [_attempt("content_filter", cap=1)]})
+    assert result.capped_agents == ["melchior"]
+
+
+def test_several_capped_agents_come_back_sorted_by_name():
+    result = _result_with_completions(
+        {
+            "melchior": [_attempt("length", cap=1)],
+            "balthasar": [_attempt("stop")],
+            "caspar": [_attempt("length", cap=1)],
+        }
+    )
+    assert result.capped_agents == ["caspar", "melchior"]
+
+
+def test_an_absent_completions_key_yields_no_capped_agents_and_does_not_raise():
+    assert _result_with_completions(None).capped_agents == []
+
+
+def test_a_malformed_completions_record_is_skipped_not_fatal():
+    # An empty attempt list, an attempt without `finish`, a null `finish`
+    # (MEASURED in MS0c: a timed-out attempt), and a value that is not a list:
+    # none may raise, none may count. A null finish is "no output at all".
+    result = _result_with_completions(
+        {"caspar": [], "melchior": [{"model": "m"}], "balthasar": "?", "x": [_attempt(None)]}
+    )
+    assert result.capped_agents == []
