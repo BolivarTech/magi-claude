@@ -631,3 +631,81 @@ def test_a_plugin_root_that_does_not_verify_is_FATAL_under_ollama(monkeypatch, t
     assert _main_with_ollama(monkeypatch, tmp_path) == 1
     err = capsys.readouterr().err
     assert "[FATAL] CLAUDE_PLUGIN_ROOT=/nope" in err and "Traceback" not in err
+
+
+# SMOKE #1 (Task 6, S3) found these: the preflight ran inside the orchestrator,
+# after the banner and the temp dir, and escaped main() as a traceback.
+
+
+def test_an_uninitialised_project_is_FATAL_before_the_payload_is_built(
+    monkeypatch, tmp_path, capsys
+):
+    # R7/BDD-7 + the spec's own order (bootstrap and preflight BEFORE the
+    # payload): fail-closed, names the command, and nothing downstream runs.
+    import run_magi
+
+    _stub_bootstrap(monkeypatch)
+    monkeypatch.chdir(tmp_path)  # no .magi/ here
+
+    def _payload_built(arg):
+        raise AssertionError("the payload was built before the preflight")
+
+    monkeypatch.setattr(run_magi, "_load_input_content", _payload_built)
+    assert _main_with_ollama(monkeypatch, tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "[FATAL]" in err and "/magi --ollama-init" in err and "Traceback" not in err
+    assert not (tmp_path / ".magi").exists()
+
+
+def test_the_binary_is_verified_before_the_payload_is_built(monkeypatch, tmp_path, capsys):
+    # R4 at the CLI boundary: a digest that does not verify is one [FATAL] line.
+    import run_magi
+
+    monkeypatch.setattr(
+        "magi_rs_trio.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(
+            ensure=lambda: "/bin/magi-rs", verify=_raising(DigestMismatchError("digest differs"))
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    def _payload_built(arg):
+        raise AssertionError("the payload was built before the binary verified")
+
+    monkeypatch.setattr(run_magi, "_load_input_content", _payload_built)
+    assert _main_with_ollama(monkeypatch, tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "[FATAL] digest differs" in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [MagiRsProcessError("magi-rs exited 2: boom"), MagiRsContractError("consult is null")],
+    ids=["process", "contract"],
+)
+def test_a_failed_magi_rs_run_is_an_ERROR_line_not_a_traceback(
+    monkeypatch, tmp_path, capsys, failure
+):
+    # BDD-14a/14b/14d: no report, the cause relayed, a non-zero exit -- and the
+    # operator can tell "the trio never formed" from "the plugin broke".
+    import run_magi
+
+    _stub_bootstrap(monkeypatch)
+    _initialise(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    async def _dies(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(run_magi, "run_orchestrator", _dies)
+    monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+    monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+    import sys
+
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert f"ERROR: {failure}" in err and "Traceback" not in err
+    assert not list(tmp_path.glob("**/magi-report.json"))
