@@ -819,3 +819,23 @@ async def test_a_two_of_three_envelope_degrades_the_run_instead_of_crashing_it(
     assert report["degraded"] is True and report["failed_agents"] == ["caspar"]
     assert {a["agent"] for a in report["agents"]} == {"melchior", "balthasar"}
     assert "caspar" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_a_payload_that_cannot_be_utf8_encoded_is_refused_before_launch(
+    monkeypatch, tmp_path
+):
+    # Gate (cycle 3): a lone surrogate -- possible when argv or a file arrives
+    # via surrogateescape -- raised UnicodeEncodeError from inside communicate(),
+    # a traceback no boundary rendered. It is a contract failure of the payload,
+    # deterministic, and it is caught BEFORE any process starts.
+    launched = []
+
+    async def _never(*argv, **kwargs):
+        launched.append(argv)
+        raise AssertionError("the child must not start")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _never)
+    with pytest.raises(MagiRsContractError, match="UTF-8"):
+        await _run(monkeypatch, tmp_path, prompt="payload with a lone surrogate \ud800")
+    assert launched == []
