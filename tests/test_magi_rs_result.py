@@ -233,3 +233,11 @@ def test_a_contract_failure_is_deterministic_and_not_retryable():
     from synthesize import ValidationError
 
     assert not issubclass(MagiRsContractError, ValidationError)
+
+
+def test_a_null_report_reads_as_empty_not_the_string_None():
+    # Gate, cycle 4: ``str(None)`` would have turned an absent report into the
+    # literal text "None" -- a value that LOOKS like content.
+    envelope = json.loads(_fixture("three-agents.json"))
+    envelope["consult"]["report"] = None
+    assert ConsultResult.from_json(json.dumps(envelope)).report == ""

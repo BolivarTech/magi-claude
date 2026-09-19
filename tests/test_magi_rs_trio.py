@@ -7,6 +7,7 @@ Every child process is faked: nothing here launches a binary, reaches the
 network, or touches the plugin's real ``bin/``.
 """
 
+import asyncio
 import json
 import os
 from types import SimpleNamespace
@@ -839,3 +840,65 @@ async def test_a_payload_that_cannot_be_utf8_encoded_is_refused_before_launch(
     with pytest.raises(MagiRsContractError, match="UTF-8"):
         await _run(monkeypatch, tmp_path, prompt="payload with a lone surrogate \ud800")
     assert launched == []
+
+
+# Gate, cycle 4 -- three defensive gaps in the result and timeout paths.
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_carrying_a_lone_surrogate_fails_its_own_seat_only(monkeypatch, tmp_path):
+    # json.loads happily produces a lone surrogate from a "\ud800" escape;
+    # writing that seat's {mage}.json as UTF-8 raised UnicodeEncodeError past
+    # every boundary. It is THAT seat's failure, and the other two survive.
+    envelope = json.loads(_ok_payload().decode("utf-8"))
+    for verdict in envelope["consult"]["agents"]:
+        if verdict["agent"] == "caspar":
+            verdict["summary"] = "lone \ud800 surrogate"
+    payload = json.dumps(envelope).encode("utf-8")  # json escapes it; the file write cannot
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(payload)))
+    verdicts = await _run(monkeypatch, tmp_path)
+    assert isinstance(verdicts["caspar"], UnicodeEncodeError)
+    assert isinstance(verdicts["melchior"], dict) and isinstance(verdicts["balthasar"], dict)
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_names_the_allowlist_as_a_suspect_too(monkeypatch, tmp_path):
+    # A proxy variable the allowlist withheld makes the child HANG on connect,
+    # not exit non-zero: the diagnosis must reach the timeout path as well.
+    class _Hanging(_FakeProcess):
+        async def communicate(self, input=None):
+            raise asyncio.TimeoutError()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _exec_returning(_Hanging()))
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.corp:3128")
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    assert "ALL_PROXY" in str(exc.value) and "allowlist" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_run_trio_launches_with_the_constructor_timeout_not_its_argument(
+    monkeypatch, tmp_path
+):
+    # Pinned, not only documented: the argv bound and the wall bound are one
+    # value, the constructor's, so they cannot race.
+    seen = {}
+
+    async def _record(*argv, **kwargs):
+        seen["argv"] = argv
+        return _FakeProcess(_ok_payload())
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _record)
+    _initialise(tmp_path)
+    _stub_bootstrap(monkeypatch)
+    trio = MagiRsTrio(
+        workdir=str(tmp_path),
+        mode="design",
+        timeout=4242,
+        bin_dir=str(tmp_path / "bin"),
+        pin=_stub_pin(),
+    )
+    await trio.run_trio(
+        prompt="p", agents_dir="a", output_dir=str(tmp_path), timeout=1, models={}, max_attempts=1
+    )
+    assert seen["argv"][-1] == "4242"
