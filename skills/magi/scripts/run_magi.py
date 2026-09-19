@@ -73,7 +73,12 @@ from claude_backend import ClaudeBackend  # noqa: E402
 from trio_executor import ClaudeTrio, TrioExecutor  # noqa: E402
 from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
 from magi_rs_pin import Pin  # noqa: E402
-from magi_rs_trio import MagiRsContractError, MagiRsProcessError, MagiRsTrio  # noqa: E402
+from magi_rs_trio import (  # noqa: E402
+    FAIL_CLOSED_ERRORS,
+    MagiRsContractError,
+    MagiRsProcessError,
+    MagiRsTrio,
+)
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
 from ollama_backend import (  # noqa: E402
     TRANSPORT_CONNECTION_MARKERS,
@@ -1984,6 +1989,9 @@ async def run_orchestrator(
                     agents_dir,
                     output_dir,
                     timeout,
+                    # Inert on the magi-rs path: MagiRsTrio ignores ``models`` (the
+                    # trio is declared in .magi/magi.toml), so the "opus" defaults
+                    # above never reach anything there.
                     {name: spec.model for name, spec in agent_models.items()},
                     max_attempts,
                     on_state=_on_state,
@@ -2558,6 +2566,11 @@ def main() -> None:
                     f"WARNING: Failed to clean up {output_dir}: {cleanup_exc}",
                     file=sys.stderr,
                 )
+        if isinstance(exc, FAIL_CLOSED_ERRORS):
+            # The preflight run_trio repeats (R4) failed differently from the
+            # one main() ran: same rendering as the first, never a traceback.
+            print(f"[FATAL] {exc}", file=sys.stderr)
+            sys.exit(1)
         if isinstance(exc, (MagiRsProcessError, MagiRsContractError)):
             # BDD-14a/14b/14d: the trio never formed (the child died, timed out,
             # or answered off-contract). No report, the cause relayed, exit 1 --

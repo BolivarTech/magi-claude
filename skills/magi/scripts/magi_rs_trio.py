@@ -17,10 +17,18 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from magi_rs_bootstrap import BinaryBootstrap
+from magi_rs_bootstrap import (
+    BinaryBootstrap,
+    DigestMismatchError,
+    DownloadError,
+    UnsafeArchiveError,
+    UnsafeBinDirectoryError,
+    VersionMismatchError,
+)
 from magi_rs_env import EnvironmentPolicy
-from magi_rs_pin import Pin
-from magi_rs_preflight import ProjectPreflight
+from magi_rs_paths import PluginRootError
+from magi_rs_pin import Pin, PinFormatError, UnsupportedPlatformError
+from magi_rs_preflight import ProjectNotInitialisedError, ProjectPreflight
 from magi_rs_result import ConsultResult, MagiRsContractError
 from synthesize import ValidationError, load_agent_output
 from trio_executor import TrioExecutor
@@ -80,6 +88,23 @@ historical 900 would roughly halve it, back to the 72 s ceiling that made E-B
 abort with one seat of three."""
 _MIN_HEALTHY_TIMEOUT_SECONDS = 1200
 _STDERR_EXCERPT_CHARS = 2000
+
+
+#: Every fail-closed error the bootstrap and the preflight can raise. All are
+#: siblings of ``Exception`` (retrying does not fix any of them), so the CLI
+#: boundary renders each as one ``[FATAL]`` line -- wherever it surfaces: the
+#: early ``preflight()`` in ``main()`` or the one ``run_trio`` repeats.
+FAIL_CLOSED_ERRORS: tuple[type[Exception], ...] = (
+    PluginRootError,
+    PinFormatError,
+    UnsupportedPlatformError,
+    UnsafeBinDirectoryError,
+    DownloadError,
+    UnsafeArchiveError,
+    DigestMismatchError,
+    VersionMismatchError,
+    ProjectNotInitialisedError,
+)
 
 
 class MagiRsProcessError(ValidationError):
@@ -279,6 +304,9 @@ class MagiRsTrio(TrioExecutor):
             ``magi-rs-raw.json`` and the per-mage verdict files.
         """
         del agents_dir, models, max_attempts, timeout  # accepted, unused: see the docstring
+        # Repeated on purpose: ``main()`` already ran it before the payload, but
+        # R4 says EVERY run verifies right before executing. Sub-100 ms for a
+        # 12 MB hash plus one ``--version`` spawn -- accepted redundancy.
         executable = self.preflight()
         argv = build_argv(executable, self._workdir, self._mode, self._timeout)
         stdout = await self._launch(argv, prompt, self._timeout, on_state, output_dir)
