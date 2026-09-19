@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.4.1
+# Version: 1.5.0
 # Date: 2026-09-19
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
@@ -197,6 +197,38 @@ def resolve_timeout(flag_value: int | None) -> tuple[int, str | None]:
     return flag_value, None
 
 
+def write_raw_artifact(output_dir: str, raw: str | bytes) -> str:
+    """Persist magi-rs's stdout VERBATIM, under its own name (R16).
+
+    Two producers under one name is ambiguity nobody disambiguates later, so
+    this writes ``magi-rs-raw.json`` and never ``magi-report.json``.
+
+    Args:
+        output_dir: The run's output directory.
+        raw: The child's stdout, exactly as received. NOT re-serialised -- a
+            round-trip through json would silently normalise key order and
+            float formatting, and this file is the audit artifact. ``str`` is
+            written as UTF-8.
+
+    Returns:
+        The path written.
+
+    Raises:
+        OSError: The file cannot be written. NOT swallowed here: the strict
+            primitive. :meth:`MagiRsTrio._persist_raw` is the fail-soft caller
+            that turns it into a warning, because an audit artifact must not
+            be able to destroy the verdicts it records.
+
+    Side effects:
+        Writes one file.
+    """
+    path = os.path.join(output_dir, _RAW_ARTIFACT)
+    payload = raw.encode("utf-8") if isinstance(raw, str) else raw
+    with open(path, "wb") as handle:
+        handle.write(payload)
+    return path
+
+
 def _emit(on_state: Callable[[str, str], None] | None, node: str, state: str) -> None:
     """Forward one status transition, tolerating a callback that raises.
 
@@ -258,6 +290,11 @@ class MagiRsTrio(TrioExecutor):
         self._timeout = timeout
         self._bin_dir = bin_dir
         self._pin = pin
+        #: The parsed envelope of the LAST run, for the report's ``magi_rs``
+        #: block and the stderr warnings (MS4). ``None`` until a run completes
+        #: past the contract check; the verdicts themselves travel through
+        #: ``run_trio``'s return value, exactly as ``ClaudeTrio``'s do.
+        self.last_result: ConsultResult | None = None
 
     async def run_trio(
         self,
@@ -320,7 +357,8 @@ class MagiRsTrio(TrioExecutor):
         executable = self.preflight()
         argv = build_argv(executable, self._workdir, self._mode, self._timeout)
         stdout = await self._launch(argv, prompt, self._timeout, on_state, output_dir)
-        return self._validate(ConsultResult.from_json(stdout), output_dir)
+        self.last_result = ConsultResult.from_json(stdout)
+        return self._validate(self.last_result, output_dir)
 
     def preflight(self) -> str:
         """Verify the binary and the project, spending nothing.
@@ -459,8 +497,7 @@ class MagiRsTrio(TrioExecutor):
             audit artifact must not be able to destroy the verdicts it records.
         """
         try:
-            with open(os.path.join(output_dir, _RAW_ARTIFACT), "wb") as handle:
-                handle.write(stdout)
+            write_raw_artifact(output_dir, stdout)
         except OSError as exc:
             print(f"WARNING: failed to persist {_RAW_ARTIFACT}: {exc}", file=sys.stderr)
 
