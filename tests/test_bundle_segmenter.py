@@ -140,9 +140,14 @@ def test_the_overhead_per_section_counts_toward_the_size():
 
 def test_a_segment_records_the_names_it_references_but_does_not_define():
     # The datum needs_integration_pass reads: a split that cut through a
-    # contract has a definer on one side and a reference on the other.
+    # contract has a definer on one side and a reference on the other. The
+    # three sections are 100 kB each so each lands in its own segment.
     sections = [
-        {"name": "owner", "body": "class TrioExecutor: ...", "defines": ["TrioExecutor"]},
+        {
+            "name": "owner",
+            "body": "x" * 100_000 + " class TrioExecutor",
+            "defines": ["TrioExecutor"],
+        },
         {"name": "user", "body": "x" * 100_000 + " uses TrioExecutor here", "defines": []},
         {"name": "other", "body": "x" * 100_000, "defines": []},
     ]
