@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.2.0
+# Version: 1.2.1
 # Date: 2026-09-19
 """Read the result of one ``magi-rs consult`` invocation.
 
@@ -112,7 +112,8 @@ class ConsultResult:
             the LAST attempt of each mage is the one that decides.
 
         Complexity:
-            O(n) in the number of completion records, once per run.
+            O(m) in the number of seats in ``completions`` -- only each seat's
+            LAST attempt is examined -- once per run.
         """
         completions = self.telemetry.get("completions")
         if not isinstance(completions, dict):

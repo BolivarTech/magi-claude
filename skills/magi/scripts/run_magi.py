@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.9.0
+# Version: 2.9.1
 # Date: 2026-09-19
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -1640,10 +1640,9 @@ def build_report_block(result: ConsultResult) -> dict[str, Any]:
     block["capped_agents"] = result.capped_agents
     block["model_used"] = _model_used(result.telemetry.get("completions"))
     block["run_id"] = result.run_id
-    unmeasured = result.telemetry.get("ran_unmeasured")
-    block["gate_ran_on_unverified_context"] = isinstance(unmeasured, list) and len(
-        set(unmeasured)
-    ) >= len(AGENTS)
+    block["gate_ran_on_unverified_context"] = _every_seat_unmeasured(
+        result.telemetry.get("ran_unmeasured")
+    )
     return {"magi_rs": block}
 
 
@@ -1667,7 +1666,29 @@ def _model_used(completions: Any) -> dict[str, Any]:
     return used
 
 
-def announce_magi_rs_telemetry(result: ConsultResult, stream: IO[str] | None = None) -> None:
+def _every_seat_unmeasured(unmeasured: Any) -> bool:
+    """Whether EVERY seat of the trio ran with an unmeasured context window.
+
+    The ONE predicate behind both the report marker
+    (``gate_ran_on_unverified_context``) and the raised tone of the stderr
+    warning: two definitions would let the message and the artefact disagree.
+
+    Args:
+        unmeasured: The ``ran_unmeasured`` telemetry value, or anything else
+            (fail-soft).
+
+    Returns:
+        True only when the set of names covers all of ``AGENTS``; duplicates
+        do not count twice, an unknown name does not count at all.
+    """
+    if not isinstance(unmeasured, list):
+        return False
+    return set(AGENTS) <= {str(name) for name in unmeasured}
+
+
+def announce_magi_rs_telemetry(
+    result: ConsultResult, stream: IO[str] | None = None, *, degraded_locally: bool = False
+) -> None:
     """Warn about anything that degrades a gate, on a channel a human reads.
 
     Emits at most four warnings, and NONE of them on a clean run -- a channel
@@ -1681,6 +1702,11 @@ def announce_magi_rs_telemetry(result: ConsultResult, stream: IO[str] | None = N
         stream: Where to write; ``sys.stderr`` when None, resolved at CALL
             time (a default bound at definition time would outlive a
             redirected stderr). Injected so a test can capture it.
+        degraded_locally: The orchestrator's own ``degraded`` flag. magi-rs
+            reports ITS degradation (a seat that delivered nothing); a verdict
+            that reached us and then failed the seven-key contract degrades the
+            run on THIS side with magi-rs none the wiser (D6/BDD-28) -- the
+            "gate is INVALID" warning must fire for either.
 
     Returns:
         None.
@@ -1695,17 +1721,24 @@ def announce_magi_rs_telemetry(result: ConsultResult, stream: IO[str] | None = N
     """
     out = sys.stderr if stream is None else stream
     try:
-        _announce_magi_rs_telemetry(result, out)
+        _announce_magi_rs_telemetry(result, out, degraded_locally)
     except Exception as exc:  # noqa: BLE001 -- fail-soft by contract (see the docstring)
         print(f"[!] WARNING: could not render the magi-rs telemetry warnings ({exc})", file=out)
 
 
-def _announce_magi_rs_telemetry(result: ConsultResult, stream: IO[str]) -> None:
+def _announce_magi_rs_telemetry(
+    result: ConsultResult, stream: IO[str], degraded_locally: bool
+) -> None:
     """The four warnings of :func:`announce_magi_rs_telemetry`, without the fail-soft wrap."""
     telemetry = result.telemetry
-    if result.degraded:
+    if result.degraded or degraded_locally:
+        cause = (
+            "a seat delivered no verdict"
+            if result.degraded
+            else "a delivered verdict failed the seven-key contract here"
+        )
         print(
-            "[!] WARNING: magi-rs reports the run DEGRADED (a seat delivered no verdict). "
+            f"[!] WARNING: the run is DEGRADED ({cause}). "
             "The gate is INVALID whatever the verdict says -- resolve the cause and re-run.",
             file=stream,
         )
@@ -1724,7 +1757,7 @@ def _announce_magi_rs_telemetry(result: ConsultResult, stream: IO[str]) -> None:
     unmeasured = telemetry.get("ran_unmeasured")
     if isinstance(unmeasured, list) and unmeasured:
         seats = ", ".join(str(name) for name in sorted(unmeasured))
-        if len(unmeasured) >= len(AGENTS):
+        if _every_seat_unmeasured(unmeasured):
             print(
                 f"[!] WARNING: NOBODY MEASURED the context window: {seats} all ran unmeasured, "
                 "so the input may have been silently truncated for every seat. "
@@ -2881,7 +2914,9 @@ def main() -> None:
     # And what degrades a gate is SHOUTED, after the report exists so the message
     # and the file it points to always agree (D2, D3, D11, R17).
     if magi_rs_result is not None:
-        announce_magi_rs_telemetry(magi_rs_result)
+        announce_magi_rs_telemetry(
+            magi_rs_result, degraded_locally=bool(report.get("degraded", False))
+        )
 
     # R18 made ACTIVE: filing the counts was not enough (MAGI gate, Caspar). Announced here,
     # after the report exists, so the message and the file it points to always agree.
