@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-04-01
+# Version: 1.1.0
+# Date: 2026-09-19
 """Tests for run_magi.py — async Python orchestrator."""
 
 from __future__ import annotations
@@ -5246,50 +5246,66 @@ def _make_ollama_cfg():  # type: ignore[return]  # OllamaConfig imported lazily
 
 
 def test_ollama_init_short_circuits(monkeypatch, tmp_path, capsys):
-    """--ollama-init calls write_template() and exits 0 before mode/input checks."""
+    """--ollama-init calls run_ollama_init(cwd) and exits 0 before mode/input checks.
+
+    MS3 Task 4: the two tests this replaces pinned the v5 behaviour (scaffolding
+    ``.claude/magi-ollama.toml``), which R5a removes; the command is now one
+    call to ``magi-rs init`` and the relay of its output.
+    """
     import run_magi
 
-    written: dict[str, str] = {}
+    seen: dict[str, str] = {}
 
-    def _fake_write_template(**k: object) -> str:
-        written["p"] = "X"
-        return "X"
+    def _fake_init(workdir: str) -> str:
+        seen["workdir"] = workdir
+        return "initialised\n"
 
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
-    monkeypatch.setattr(run_magi, "write_template", _fake_write_template)
+    monkeypatch.setattr(run_magi, "run_ollama_init", _fake_init)
     with pytest.raises(SystemExit) as ei:
         run_magi.main()
     assert ei.value.code == 0
-    assert written.get("p") == "X"
+    assert seen["workdir"] == os.getcwd()
+    assert "initialised" in capsys.readouterr().out
 
 
-def test_ollama_init_file_exists_exits_0(monkeypatch, capsys):
-    """--ollama-init exits 0 (not 1) when config already exists (FileExistsError)."""
+def test_ollama_init_bootstrap_failure_is_fatal_not_a_traceback(monkeypatch, capsys):
+    """A binary that does not verify aborts --ollama-init with [FATAL] and exit 1."""
     import run_magi
+    from magi_rs_bootstrap import DigestMismatchError
 
-    def _fake_write_template(**k: object) -> str:
-        raise FileExistsError(".claude/magi-ollama.toml")
+    def _fake_init(workdir: str) -> str:
+        raise DigestMismatchError("digest differs")
 
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
-    monkeypatch.setattr(run_magi, "write_template", _fake_write_template)
+    monkeypatch.setattr(run_magi, "run_ollama_init", _fake_init)
     with pytest.raises(SystemExit) as ei:
         run_magi.main()
-    assert ei.value.code == 0
+    assert ei.value.code == 1
+    assert "[FATAL]" in capsys.readouterr().err
 
 
 def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
-    """--ollama must not abort when 'claude' is absent from PATH."""
+    """--ollama must not abort when 'claude' is absent from PATH.
+
+    v6 (MS3 Task 5, declared replacement): the open-weight path is executed by
+    ``magi-rs``, so what must reach ``run_orchestrator`` is a ``MagiRsTrio``
+    executor -- the v5 assertion on an ``OllamaBackend`` tested a transport
+    the flag no longer selects.
+    """
     import run_magi
+    from magi_rs_trio import MagiRsTrio
 
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
     monkeypatch.setattr(run_magi.shutil, "which", lambda _: None)  # claude absent
-    monkeypatch.setattr(run_magi, "resolve_config", lambda **k: _make_ollama_cfg())
-    monkeypatch.setattr(run_magi, "preflight", _preflight_ok)
+    # Hermetic: never the real bin/ nor this checkout's .magi/ (Loop 1 finding).
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(MagiRsTrio, "preflight", lambda self: "magi-rs")
 
     captured: dict[str, object] = {}
 
     async def _fake_orch(*a: object, **k: object) -> dict[str, object]:
-        captured["backend"] = k.get("backend")
+        captured["executor"] = k.get("executor")
         # Return a minimal-but-valid report shape so main() can run to completion
         # without crashing in format_report / consensus / cost paths.
         raise SystemExit(0)
@@ -5300,9 +5316,8 @@ def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
         run_magi.main()
     except SystemExit as e:
         assert e.code != 1, f"Expected not exit(1), got exit({e.code})"
-    from ollama_backend import OllamaBackend
 
-    assert isinstance(captured["backend"], OllamaBackend)
+    assert isinstance(captured["executor"], MagiRsTrio)
 
 
 def test_retry_feedback_truncates_a_huge_error():

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.6.0
-# Date: 2026-05-23
+# Version: 2.7.0
+# Date: 2026-09-19
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
 Launches Melchior, Balthasar, and Caspar in parallel using asyncio,
@@ -70,7 +70,16 @@ from synthesize import (  # noqa: E402
 from backend import AgentBackend  # noqa: E402
 from backoff import next_backoff, parse_retry_after  # noqa: E402
 from claude_backend import ClaudeBackend  # noqa: E402
-from trio_executor import ClaudeTrio  # noqa: E402
+from trio_executor import ClaudeTrio, TrioExecutor  # noqa: E402
+from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
+from magi_rs_pin import Pin  # noqa: E402
+from magi_rs_trio import (  # noqa: E402
+    FAIL_CLOSED_ERRORS,
+    MagiRsContractError,
+    MagiRsProcessError,
+    MagiRsTrio,
+)
+from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
 from ollama_backend import (  # noqa: E402
     TRANSPORT_CONNECTION_MARKERS,
     TRANSPORT_HTTP_PATTERN,
@@ -83,7 +92,7 @@ from ollama_config import (  # noqa: E402
     OllamaConfigError,
     resolve_config,
 )
-from ollama_init import write_template  # noqa: E402
+from ollama_init import run_ollama_init  # noqa: E402
 from ollama_preflight import (  # noqa: E402
     CONTEXT_GUARD_ENFORCED,
     CONTEXT_GUARD_ESTIMATED,
@@ -1502,6 +1511,42 @@ async def select_backend(
     return OllamaBackend(config), dict(config.models), rotation, config.timeout
 
 
+def _select_executor(args: argparse.Namespace, timeout: int) -> MagiRsTrio | None:
+    """Choose the trio executor for the open-weight path.
+
+    ``--ollama`` names the open-weight path, and since v6 that path is executed
+    by ``magi-rs`` (R18): one ``consult`` runs the three mages. Everything
+    below the raw verdicts does not fork, so the ONLY thing the flag decides is
+    which :class:`TrioExecutor` :func:`run_orchestrator` runs.
+
+    Args:
+        args: Parsed CLI namespace (``.ollama`` and ``.mode`` are read).
+        timeout: The wall-clock ceiling already resolved for this run.
+
+    Returns:
+        A :class:`MagiRsTrio` bound to the current working directory (the
+        project root, exactly as ``--ollama-init`` resolves it -- R6), the
+        explicit mode (R10), the resolved timeout and the plugin's ``bin/`` +
+        pin (R3); ``None`` on the Claude path, whose :class:`ClaudeTrio` is
+        built inside :func:`run_orchestrator` because it binds to that
+        function's own telemetry (R20 -- untouched).
+
+    Raises:
+        PluginRootError: ``CLAUDE_PLUGIN_ROOT`` is set but is not a directory.
+        PinFormatError: The shipped pin does not parse.
+    """
+    if not args.ollama:
+        return None
+    root = plugin_root()
+    return MagiRsTrio(
+        workdir=os.getcwd(),
+        mode=args.mode,
+        timeout=timeout,
+        bin_dir=bin_dir(root),
+        pin=Pin.load(pin_path(root)),
+    )
+
+
 def _default_agents_dir() -> str:
     """The shipped ``agents/`` directory, next to this script's package.
 
@@ -1605,6 +1650,7 @@ async def run_orchestrator(
     agent_models: dict[str, ModelSpec] | None = None,
     backend: AgentBackend | None = None,
     rotation: RotationContext | None = None,
+    executor: TrioExecutor | None = None,
     show_status: bool = True,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> dict[str, Any]:
@@ -1630,6 +1676,10 @@ async def run_orchestrator(
             so every agent uses the same model (BDD-30 back-compat).
         backend: Transport backend. When None, defaults to ClaudeBackend()
             to preserve 3.x behavior for existing callers.
+        executor: The :class:`TrioExecutor` that produces the raw verdicts
+            when ``rotation`` is None. When None (every v5 caller), a
+            :class:`ClaudeTrio` bound to this run's telemetry is built here;
+            ``main()`` passes a :class:`MagiRsTrio` on ``--ollama`` (v6).
         show_status: Render a live status tree while agents run. When the
             stream is not a TTY, plain one-line-per-event output is emitted
             instead.
@@ -1873,10 +1923,17 @@ async def run_orchestrator(
     # This is the design rather than a detour: ``select_backend`` resolves
     # CONFIG -- models, rotation, timeout -- not TRANSPORT. Having it also build
     # the backend was a coupling MS5 would have had to undo anyway.
-    claude_trio = ClaudeTrio(
-        on_extraction_failure=lambda name, err: _record_extraction_failure(
-            extraction_failures, name, err
-        ),
+    # v6: the open-weight path hands its executor in. ``MagiRsTrio`` reports
+    # extraction failures through the envelope's telemetry (MS4), not through
+    # this callback, so only the Claude executor is wired to it.
+    trio: TrioExecutor = (
+        executor
+        if executor is not None
+        else ClaudeTrio(
+            on_extraction_failure=lambda name, err: _record_extraction_failure(
+                extraction_failures, name, err
+            ),
+        )
     )
 
     def _on_state(name: str, state: str) -> None:
@@ -1926,12 +1983,15 @@ async def run_orchestrator(
     with _buffered_stderr_while(active=display is not None):
         try:
             if rotation is None:
-                # Claude path: the executor owns the gather AND the per-mage retry.
-                verdicts = await claude_trio.run_trio(
+                # Executor path: it owns the gather AND any per-mage retry.
+                verdicts = await trio.run_trio(
                     prompt,
                     agents_dir,
                     output_dir,
                     timeout,
+                    # Inert on the magi-rs path: MagiRsTrio ignores ``models`` (the
+                    # trio is declared in .magi/magi.toml), so the "opus" defaults
+                    # above never reach anything there.
                     {name: spec.model for name, spec in agent_models.items()},
                     max_attempts,
                     on_state=_on_state,
@@ -2294,19 +2354,21 @@ def main() -> None:
     # happened on an earlier print.
     _enable_utf8_console_io()
 
-    # Short-circuit: --ollama-init scaffolds the repo TOML and exits before
-    # parse_args() so that mode/input positional arguments are not required.
-    # We screen sys.argv directly; the flag is unambiguous (no value follows it).
+    # Short-circuit: --ollama-init delegates to ``magi-rs init`` and exits
+    # before parse_args() so that mode/input positional arguments are not
+    # required. We screen sys.argv directly; the flag is unambiguous (no value
+    # follows it). The whole command is ONE call (R5): no config of the
+    # plugin's own is written, nothing under .claude/ is read.
     if "--ollama-init" in sys.argv[1:]:
         try:
-            path = write_template()
-        except FileExistsError as exc:
-            print(
-                f"Config already exists at {exc}; not overwriting.",
-                file=sys.stderr,
-            )
-            sys.exit(0)
-        print(f"Wrote Ollama config template to {path}")
+            output = run_ollama_init(os.getcwd())
+        except Exception as exc:  # noqa: BLE001 - every bootstrap error is fatal here
+            # The bootstrap's fail-closed errors are siblings of Exception on
+            # purpose; at the CLI boundary each of them is a [FATAL] with its
+            # own actionable message, never a traceback.
+            print(f"[FATAL] {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(output, end="" if output.endswith("\n") else "\n")
         sys.exit(0)
 
     args = parse_args()
@@ -2317,6 +2379,41 @@ def main() -> None:
     # and then quietly ignored (MAGI gate, Balthasar).
     if args.check_prompts:
         check_prompts(_default_agents_dir())
+
+    # v6: the open-weight executor is chosen and verified HERE, before any input is
+    # read -- see _select_executor. ``executor`` stays None on the Claude path.
+    executor: TrioExecutor | None = None
+    if args.ollama:
+        # v6: the open-weight path is executed by magi-rs (R18). Nothing of the
+        # v5 subsystem runs -- no plugin TOML, no preflight of our own: the trio,
+        # its rotation and its context guard are declared in .magi/magi.toml and
+        # owned by magi-rs (R7). The v5 backend factory is the Claude path's only.
+        backend, agent_models, rotation = None, None, None
+        # R12: --timeout is BOTH the wall ceiling and the source magi-rs derives
+        # each mage's attempt budget from; the default is the measured 1800 and
+        # a low explicit value is honoured with a warning, never silently.
+        try:
+            resolved_timeout, timeout_warning = resolve_magi_rs_timeout(args.timeout)
+        except MagiRsContractError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if timeout_warning is not None:
+            print(f"[!] WARNING: {timeout_warning}", file=sys.stderr)
+        try:
+            executor = _select_executor(args, resolved_timeout)
+            # Bootstrap + project preflight BEFORE the payload is built (spec
+            # §3.2): both are fail-closed and free; a bundle built for a run
+            # that cannot start is pure waste. (``None`` is the Claude path's
+            # arm of the selector and cannot occur under ``--ollama``.)
+            if executor is not None:
+                executor.preflight()
+        except Exception as exc:  # noqa: BLE001 -- every bootstrap/preflight error is fatal here
+            # Fail-closed siblings of Exception (PluginRootError, PinFormatError,
+            # the bootstrap's, ProjectNotInitialisedError): at the CLI boundary
+            # each is a [FATAL] with its own message, never a traceback, exactly
+            # like --ollama-init.
+            print(f"[FATAL] {exc}", file=sys.stderr)
+            sys.exit(1)
 
     try:
         input_content, input_label = _load_input_content(args.input)
@@ -2384,23 +2481,26 @@ def main() -> None:
         print(f"[FATAL] {exc}", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        # select_backend is async now (T9): the Ollama preflight MEASURES the
-        # payload. Its own asyncio.run runs here, BEFORE the output dir is created,
-        # so a config/preflight error exits without leaking a temp run dir -- the
-        # exact ordering of the v4 sync call it replaces. The rotation's asyncio.Event
-        # is only constructed (never awaited) in this loop, so it binds lazily to the
-        # run_orchestrator loop on its first wait().
-        backend, agent_models, rotation, toml_timeout = asyncio.run(select_backend(args, prompt))
-    except (OllamaConfigError, OllamaPreflightError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
+    if not args.ollama:
+        try:
+            # select_backend is async now (T9): the Ollama preflight MEASURES the
+            # payload. Its own asyncio.run runs here, BEFORE the output dir is created,
+            # so a config/preflight error exits without leaking a temp run dir -- the
+            # exact ordering of the v4 sync call it replaces. The rotation's asyncio.Event
+            # is only constructed (never awaited) in this loop, so it binds lazily to the
+            # run_orchestrator loop on its first wait().
+            backend, agent_models, rotation, toml_timeout = asyncio.run(
+                select_backend(args, prompt)
+            )
+        except (OllamaConfigError, OllamaPreflightError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
 
-    # MS3 (R6): flag --timeout > TOML timeout > 900s default, for BOTH backends. On
-    # the Claude path ``toml_timeout`` is always None, so this is exactly the v4
-    # behaviour (flag or 900). AUDITED: no other read of ``args.timeout`` survives
-    # below -- every per-agent timeout use goes through this single resolution.
-    resolved_timeout = int(_resolve_timeout(args.timeout, toml_timeout))
+        # MS3 (R6): flag --timeout > TOML timeout > 900s default. On the Claude path
+        # ``toml_timeout`` is always None, so this is exactly the v4 behaviour (flag
+        # or 900). AUDITED: no other read of ``args.timeout`` survives below --
+        # every per-agent timeout use goes through this single resolution.
+        resolved_timeout = int(_resolve_timeout(args.timeout, toml_timeout))
 
     is_temp_dir = args.output_dir is None
     if is_temp_dir:
@@ -2428,8 +2528,8 @@ def main() -> None:
     if enrich_note is not None:
         print(f"|  Context: {enrich_note}")
     if args.ollama:
-        model_label = "ollama/" + "/".join(sorted({s.model for s in agent_models.values()}))
-        print(f"|  Model: {model_label}")
+        # The trio is magi-rs's business, declared in the project's own file.
+        print("|  Model: magi-rs (.magi/magi.toml)")
     else:
         print(f"|  Model: {args.model} ({MODEL_IDS[args.model]})")
     print(f"|  Timeout: {resolved_timeout}s")
@@ -2452,11 +2552,12 @@ def main() -> None:
                 agent_models=agent_models,
                 backend=backend,
                 rotation=rotation,
+                executor=executor,
                 show_status=args.show_status,
                 max_attempts=args.max_attempts,
             )
         )
-    except BaseException:
+    except BaseException as exc:
         if is_temp_dir:
             try:
                 shutil.rmtree(output_dir)
@@ -2465,6 +2566,17 @@ def main() -> None:
                     f"WARNING: Failed to clean up {output_dir}: {cleanup_exc}",
                     file=sys.stderr,
                 )
+        if isinstance(exc, FAIL_CLOSED_ERRORS):
+            # The preflight run_trio repeats (R4) failed differently from the
+            # one main() ran: same rendering as the first, never a traceback.
+            print(f"[FATAL] {exc}", file=sys.stderr)
+            sys.exit(1)
+        if isinstance(exc, (MagiRsProcessError, MagiRsContractError)):
+            # BDD-14a/14b/14d: the trio never formed (the child died, timed out,
+            # or answered off-contract). No report, the cause relayed, exit 1 --
+            # and no traceback, so the operator can tell this from a plugin bug.
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
         raise
 
     # A2 + R8: apply the diff-grounded finding guard to each agent BEFORE the
