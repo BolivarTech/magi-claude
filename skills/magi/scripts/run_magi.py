@@ -1506,7 +1506,7 @@ async def select_backend(
     return OllamaBackend(config), dict(config.models), rotation, config.timeout
 
 
-def _select_executor(args: argparse.Namespace, timeout: int) -> TrioExecutor | None:
+def _select_executor(args: argparse.Namespace, timeout: int) -> MagiRsTrio | None:
     """Choose the trio executor for the open-weight path.
 
     ``--ollama`` names the open-weight path, and since v6 that path is executed
@@ -2379,7 +2379,7 @@ def main() -> None:
         # v6: the open-weight path is executed by magi-rs (R18). Nothing of the
         # v5 subsystem runs -- no plugin TOML, no preflight of our own: the trio,
         # its rotation and its context guard are declared in .magi/magi.toml and
-        # owned by magi-rs (R7). ``select_backend`` is the Claude path's only.
+        # owned by magi-rs (R7). The v5 backend factory is the Claude path's only.
         backend, agent_models, rotation = None, None, None
         # R12: --timeout is BOTH the wall ceiling and the source magi-rs derives
         # each mage's attempt budget from; the default is the measured 1800 and
@@ -2395,8 +2395,10 @@ def main() -> None:
             executor = _select_executor(args, resolved_timeout)
             # Bootstrap + project preflight BEFORE the payload is built (spec
             # §3.2): both are fail-closed and free; a bundle built for a run
-            # that cannot start is pure waste.
-            executor.preflight()
+            # that cannot start is pure waste. (``None`` is the Claude path's
+            # arm of the selector and cannot occur under ``--ollama``.)
+            if executor is not None:
+                executor.preflight()
         except Exception as exc:  # noqa: BLE001 -- every bootstrap/preflight error is fatal here
             # Fail-closed siblings of Exception (PluginRootError, PinFormatError,
             # the bootstrap's, ProjectNotInitialisedError): at the CLI boundary
