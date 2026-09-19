@@ -569,3 +569,65 @@ async def test_run_orchestrator_runs_the_given_executor_instead_of_claude(monkey
     assert stub.calls == 1
     assert {a["agent"] for a in report["agents"]} == {"melchior", "balthasar", "caspar"}
     assert "consensus" in report
+
+
+def _main_with_ollama(monkeypatch, tmp_path, *extra_argv):
+    """Drive run_magi.main() under --ollama up to the orchestrator, which is stubbed.
+
+    Returns the SystemExit code main() ended with (0 when the stub orchestrator
+    was reached).
+    """
+    import sys
+
+    import run_magi
+
+    async def _reached_orchestrator(*args, **kwargs):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(run_magi, "run_orchestrator", _reached_orchestrator)
+    monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+    monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+    monkeypatch.setattr(
+        sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status", *extra_argv]
+    )
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    return exc.value.code
+
+
+def test_a_low_timeout_under_ollama_reaches_the_run_with_a_stderr_warning(
+    monkeypatch, tmp_path, capsys
+):
+    # R12: honoured, never silently -- the warning names the measured-healthy floor.
+    assert _main_with_ollama(monkeypatch, tmp_path, "--timeout", "600") == 0
+    err = capsys.readouterr().err
+    assert "[!] WARNING:" in err and "--timeout 600" in err
+
+
+def test_a_timeout_the_magi_rs_contract_rejects_is_an_ERROR_line_not_a_traceback(
+    monkeypatch, tmp_path, capsys
+):
+    import run_magi
+
+    def _reject(flag_value):
+        raise MagiRsContractError("--timeout must be a positive integer, got 0")
+
+    monkeypatch.setattr(run_magi, "resolve_magi_rs_timeout", _reject)
+    assert _main_with_ollama(monkeypatch, tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "ERROR: --timeout must be a positive integer" in err and "Traceback" not in err
+
+
+def test_a_plugin_root_that_does_not_verify_is_FATAL_under_ollama(monkeypatch, tmp_path, capsys):
+    # The same CLI-boundary shape as --ollama-init: a fail-closed sibling of
+    # Exception becomes one [FATAL] line and exit 1, never a traceback.
+    import run_magi
+    from magi_rs_paths import PluginRootError
+
+    def _unverified_root(args, timeout):
+        raise PluginRootError("CLAUDE_PLUGIN_ROOT=/nope")
+
+    monkeypatch.setattr(run_magi, "_select_executor", _unverified_root)
+    assert _main_with_ollama(monkeypatch, tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "[FATAL] CLAUDE_PLUGIN_ROOT=/nope" in err and "Traceback" not in err
