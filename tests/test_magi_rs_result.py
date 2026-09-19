@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 1.1.0
+# Date: 2026-09-19
 """Tests for reading a magi-rs consult envelope (MS3 Task 3c).
 
 The fixtures under ``tests/fixtures/magi-rs-consult/`` derive from ONE real
@@ -241,3 +241,361 @@ def test_a_null_report_reads_as_empty_not_the_string_None():
     envelope = json.loads(_fixture("three-agents.json"))
     envelope["consult"]["report"] = None
     assert ConsultResult.from_json(json.dumps(envelope)).report == ""
+
+
+# --------------------------------------------------------------------------
+# MS4 Task 2 -- capped_agents (D2): a `finish: length` on the LAST attempt counts, and is shouted
+# --------------------------------------------------------------------------
+
+
+def _result(**telemetry):
+    """A ConsultResult carrying only the telemetry a test cares about.
+
+    Every default is the shape a clean run REALLY produces -- read off the
+    MS0b fixture, not imagined. Mappings keyed by mage, never flat lists with
+    an "agent" field: a helper that invents a shape makes every test on top
+    of it pass against the wrong contract.
+    """
+    fields = dict(
+        degraded=False,
+        mode="code-review",
+        mode_source="explicit",
+        extraction_failures={"balthasar": [], "caspar": [], "melchior": []},
+        input_size={"estimated_tokens": 0, "exceeded": False, "warn_threshold": 98304},
+        report_truncated="none",
+        endpoint_divergence=False,
+        timeout_below_formula=False,
+        failed_agents={},
+        rotations=[],
+        ran_unmeasured=[],
+        completions={},
+        pool_eligibility={},
+    )
+    fields.update(telemetry)
+    return ConsultResult(
+        agents=[], telemetry=fields, report="", degraded=fields["degraded"], run_id=None
+    )
+
+
+def _result_with_completions(records):
+    """A ConsultResult whose only interesting telemetry is `completions`.
+
+    `records` is the measured shape: a mapping of mage -> list of attempts,
+    each `{model, cap, finish, completion_tokens, prompt_tokens}`. `None`
+    models an older magi-rs that emits no completions at all -- which must
+    yield no capped agents rather than raising.
+    """
+    return _result(completions=records if records is not None else None)
+
+
+def _attempt(finish, model="m", cap=16384):
+    """One completion record in the measured shape (no `agent` key)."""
+    return {
+        "model": model,
+        "cap": cap,
+        "finish": finish,
+        "completion_tokens": 0,
+        "prompt_tokens": 0,
+    }
+
+
+def test_an_agent_whose_last_attempt_stopped_cleanly_is_not_capped():
+    assert _result_with_completions({"caspar": [_attempt("stop")]}).capped_agents == []
+
+
+def test_an_agent_whose_last_attempt_hit_the_cap_is_capped():
+    assert _result_with_completions({"caspar": [_attempt("length")]}).capped_agents == ["caspar"]
+
+
+def test_an_agent_that_recovered_on_retry_is_NOT_capped():
+    # The measured case from §2.4: attempt 1 `length`, attempt 2 `stop`. The
+    # LAST attempt is what the verdict came from.
+    result = _result_with_completions({"caspar": [_attempt("length"), _attempt("stop")]})
+    assert result.capped_agents == []
+
+
+def test_an_agent_that_hit_the_cap_on_its_LAST_attempt_is_capped_despite_an_earlier_stop():
+    result = _result_with_completions({"caspar": [_attempt("stop"), _attempt("length")]})
+    assert result.capped_agents == ["caspar"]
+
+
+def test_a_finish_that_is_neither_stop_nor_length_still_counts_as_capped():
+    # D2 says `finish != "stop"`, not `== "length"`: magi-core's enum is
+    # non-exhaustive, and an unknown reason is exactly where silence is worst.
+    result = _result_with_completions({"melchior": [_attempt("content_filter", cap=1)]})
+    assert result.capped_agents == ["melchior"]
+
+
+def test_several_capped_agents_come_back_sorted_by_name():
+    result = _result_with_completions(
+        {
+            "melchior": [_attempt("length", cap=1)],
+            "balthasar": [_attempt("stop")],
+            "caspar": [_attempt("length", cap=1)],
+        }
+    )
+    assert result.capped_agents == ["caspar", "melchior"]
+
+
+def test_an_absent_completions_key_yields_no_capped_agents_and_does_not_raise():
+    assert _result_with_completions(None).capped_agents == []
+
+
+def test_a_malformed_completions_record_is_skipped_not_fatal():
+    # An empty attempt list, an attempt without `finish`, a null `finish`
+    # (MEASURED in MS0c: a timed-out attempt), and a value that is not a list:
+    # none may raise, none may count. A null finish is "no output at all".
+    result = _result_with_completions(
+        {"caspar": [], "melchior": [{"model": "m"}], "balthasar": "?", "x": [_attempt(None)]}
+    )
+    assert result.capped_agents == []
+
+
+# --------------------------------------------------------------------------
+# MS4 Task 3 -- the warnings: what degrades a gate is shouted (stderr, verbatim)
+# --------------------------------------------------------------------------
+
+
+def _announce(result):
+    from run_magi import announce_magi_rs_telemetry
+
+    announce_magi_rs_telemetry(result)
+
+
+def test_the_capped_warning_names_the_mage_the_model_and_the_cap(capsys):
+    _announce(
+        _result(
+            completions={"caspar": [_attempt("length", model="deepseek-v4-pro:cloud", cap=16384)]}
+        )
+    )
+    err = capsys.readouterr().err
+    assert "caspar" in err and "deepseek-v4-pro:cloud" in err and "16384" in err
+
+
+def test_the_unmeasured_warning_names_every_mage_that_ran_unmeasured(capsys):
+    # Measured in §2.4: ran_unmeasured hit ALL THREE main models.
+    _announce(_result(ran_unmeasured=["balthasar", "caspar", "melchior"]))
+    err = capsys.readouterr().err
+    assert all(name in err for name in ("balthasar", "caspar", "melchior"))
+
+
+def test_the_unmeasured_warning_names_the_remedy_without_opening_the_toml(capsys):
+    # D3: half a warning is no warning -- it says what to set and where, and the
+    # plugin never reads the file it points at (R7).
+    _announce(_result(ran_unmeasured=["caspar"]))
+    err = capsys.readouterr().err
+    assert "strict_context_guard = true" in err and ".magi/magi.toml" in err
+
+
+def test_all_three_unmeasured_raises_the_tone_over_one_or_two(capsys):
+    # D11: with one or two seats unmeasured the guard still bounded the others;
+    # with all three nobody measured anything, and the message says so.
+    _announce(_result(ran_unmeasured=["caspar"]))
+    partial = capsys.readouterr().err
+    _announce(_result(ran_unmeasured=["balthasar", "caspar", "melchior"]))
+    total = capsys.readouterr().err
+    assert "nobody measured" in total.lower() and "nobody measured" not in partial.lower()
+
+
+def test_the_extraction_failure_warning_names_the_count(capsys):
+    _announce(
+        _result(
+            extraction_failures={
+                "balthasar": [
+                    {"attempt": 1, "cause": "invalid-json", "model": "m"},
+                    {"attempt": 2, "cause": "unterminated", "model": "m"},
+                ],
+                "caspar": [],
+                "melchior": [],
+            }
+        )
+    )
+    assert "2" in capsys.readouterr().err
+
+
+def test_an_extraction_failure_cause_nobody_has_seen_is_relayed_verbatim(capsys):
+    # `cause` is an OPEN set on magi-core's side. Never matched against a list.
+    _announce(
+        _result(
+            extraction_failures={
+                "caspar": [{"attempt": 1, "cause": "some-cause-added-upstream", "model": "m"}],
+                "balthasar": [],
+                "melchior": [],
+            }
+        )
+    )
+    assert "some-cause-added-upstream" in capsys.readouterr().err
+
+
+def test_the_degraded_warning_fires_and_says_the_gate_is_invalid(capsys):
+    _announce(_result(degraded=True))
+    err = capsys.readouterr().err.lower()
+    assert "degraded" in err
+    assert "invalid" in err
+
+
+def test_a_clean_run_emits_no_warning_at_all(capsys):
+    _announce(_result())
+    assert capsys.readouterr().err == ""
+
+
+def test_a_malformed_telemetry_value_never_takes_the_announcer_down(capsys):
+    # Fail-soft by contract: it runs right before json.dump.
+    _announce(_result(ran_unmeasured=None, extraction_failures="?", completions=42))
+    capsys.readouterr()
+
+
+# --------------------------------------------------------------------------
+# MS4 Task 4 -- artefacts and the `magi_rs` block of magi-report.json
+# --------------------------------------------------------------------------
+
+_CLEAN_REPORT = os.path.join(_FIXTURES, "clean-magi-report.json")
+"""A magi-report.json from a healthy Claude-path run (the MS1 SMOKE #2 opus
+certification), captured not authored: the test that uses it proves the REAL
+shape stays valid without the magi_rs block."""
+
+
+def _report_without(key):
+    """A magi-report payload with one block absent, to prove it is optional."""
+    report = json.loads(open(_CLEAN_REPORT, encoding="utf-8").read())
+    report.pop(key, None)
+    return report
+
+
+def test_the_raw_output_is_persisted_verbatim_under_its_own_name(tmp_path):
+    # R16: two producers, two names.
+    from magi_rs_trio import write_raw_artifact
+
+    raw = _fixture("three-agents.json")
+    write_raw_artifact(str(tmp_path), raw)
+    assert (tmp_path / "magi-rs-raw.json").read_text(encoding="utf-8") == raw
+    assert not (tmp_path / "magi-report.json").exists()
+
+
+def test_a_raw_artifact_that_cannot_be_written_raises_not_swallows(tmp_path):
+    from magi_rs_trio import write_raw_artifact
+
+    with pytest.raises(OSError):
+        write_raw_artifact(str(tmp_path / "missing" / "dir"), "{}")
+
+
+def test_the_report_carries_a_magi_rs_block_with_the_telemetry_verbatim():
+    from run_magi import build_report_block
+
+    report = build_report_block(_result(rotations=[]))
+    assert report["magi_rs"]["rotations"] == []  # the POSITIVE certificate
+    assert "capped_agents" in report["magi_rs"]
+    assert "run_id" in report["magi_rs"] and report["magi_rs"]["run_id"] is None
+    assert set(report["magi_rs"]) >= {
+        "degraded",
+        "mode",
+        "mode_source",
+        "extraction_failures",
+        "input_size",
+        "report_truncated",
+        "endpoint_divergence",
+        "timeout_below_formula",
+        "failed_agents",
+        "rotations",
+        "ran_unmeasured",
+        "completions",
+        "pool_eligibility",
+    }
+
+
+def test_the_block_carries_the_tag_each_seat_actually_used_as_model_used():
+    # D8: the tag magi-rs USED is telemetry under a name that says so -- never
+    # the `served` of the `model` block, which means server-confirmed.
+    from run_magi import build_report_block
+
+    result = _result(
+        completions={
+            "caspar": [
+                _attempt("length", model="deepseek-v4-pro:cloud"),
+                _attempt("stop", model="glm-5.2:cloud"),
+            ],
+            "melchior": [_attempt("stop", model="qwen3.5:397b-cloud")],
+        }
+    )
+    assert build_report_block(result)["magi_rs"]["model_used"] == {
+        "caspar": "glm-5.2:cloud",
+        "melchior": "qwen3.5:397b-cloud",
+    }
+
+
+def test_three_unmeasured_seats_leave_the_marker_in_the_report_and_two_do_not():
+    # D11 / BDD-34: who consumes the gate reads the report, not the terminal.
+    from run_magi import build_report_block
+
+    every = build_report_block(_result(ran_unmeasured=["balthasar", "caspar", "melchior"]))
+    some = build_report_block(_result(ran_unmeasured=["caspar", "melchior"]))
+    assert every["magi_rs"]["gate_ran_on_unverified_context"] is True
+    assert some["magi_rs"]["gate_ran_on_unverified_context"] is False
+
+
+def test_a_report_without_the_magi_rs_block_is_still_valid():
+    # Additive and fail-soft, exactly like v5.4.0's `model` block.
+    from synthesize import format_report
+
+    report = _report_without("magi_rs")
+    format_report(report["agents"], report["consensus"])  # raises if it were required
+
+
+def test_the_open_weight_cost_is_unpriced_never_zero():
+    # R20: magi-rs exposes no usage per mage. `null` fails a consumer that sums
+    # it LOUDLY; `0.0` sums in silence and lies; an absent key breaks each
+    # consumer differently.
+    from run_magi import unpriced_cost
+
+    assert unpriced_cost() == {"total_usd": None, "per_agent": {}, "cost_source": "unpriced"}
+
+
+# Loop 1 (MS4) findings.
+
+
+def test_a_run_degraded_locally_by_a_broken_verdict_is_shouted_invalid_too(capsys):
+    # magi-rs delivered three verdicts (its own degraded: false) but one failed
+    # OUR seven-key contract in _validate: the run is degraded on this side,
+    # and the "gate is INVALID" warning must fire for that path as well.
+    from run_magi import announce_magi_rs_telemetry
+
+    announce_magi_rs_telemetry(_result(degraded=False), degraded_locally=True)
+    err = capsys.readouterr().err.lower()
+    assert "degraded" in err and "the gate is invalid" in err
+
+
+def test_the_unmeasured_marker_and_the_tone_share_one_definition(capsys):
+    # A duplicated seat name must not make stderr say "nobody measured" while
+    # the report's marker stays False: one predicate, both sides.
+    from run_magi import announce_magi_rs_telemetry, build_report_block
+
+    dup = _result(ran_unmeasured=["caspar", "caspar", "caspar"])
+    announce_magi_rs_telemetry(dup)
+    assert "nobody measured" not in capsys.readouterr().err.lower()
+    assert build_report_block(dup)["magi_rs"]["gate_ran_on_unverified_context"] is False
+
+
+def test_the_announcer_survives_telemetry_that_raises_on_access(capsys):
+    # The wrapper's own catch branch, executed rather than asserted.
+    from run_magi import announce_magi_rs_telemetry
+
+    class _Hostile(dict):
+        def get(self, *args, **kwargs):
+            raise RuntimeError("telemetry exploded")
+
+    hostile = ConsultResult(agents=[], telemetry=_Hostile(), report="", degraded=False, run_id=None)
+    announce_magi_rs_telemetry(hostile)
+    assert "could not render" in capsys.readouterr().err
+
+
+def test_the_extraction_failure_count_is_the_number_of_records_not_an_attempt_index(capsys):
+    _announce(
+        _result(
+            extraction_failures={
+                "balthasar": [{"attempt": 7, "cause": "invalid-json", "model": "m"}],
+                "caspar": [{"attempt": 9, "cause": "unterminated", "model": "m"}],
+                "melchior": [],
+            }
+        )
+    )
+    assert "2 verdict extraction failure(s)" in capsys.readouterr().err

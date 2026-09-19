@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.7.0
+# Version: 2.9.1
 # Date: 2026-09-19
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -31,7 +31,7 @@ import urllib.error
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import IO, Any, Callable, Mapping
 
 # Bootstrap: make sibling modules importable under invocations that do NOT
 # auto-inject this directory into sys.path (e.g. ``python -m
@@ -73,6 +73,7 @@ from claude_backend import ClaudeBackend  # noqa: E402
 from trio_executor import ClaudeTrio, TrioExecutor  # noqa: E402
 from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
 from magi_rs_pin import Pin  # noqa: E402
+from magi_rs_result import ConsultResult  # noqa: E402
 from magi_rs_trio import (  # noqa: E402
     FAIL_CLOSED_ERRORS,
     MagiRsContractError,
@@ -1588,6 +1589,209 @@ def check_prompts(agents_dir: str) -> None:
     sys.exit(0)
 
 
+#: D3: the remedy for an unmeasured context window lives in the USER's file, which the
+#: plugin never opens (R7) -- so the warning names it instead.
+_UNMEASURED_REMEDY = "set `strict_context_guard = true` in .magi/magi.toml"
+
+
+#: R20: the open-weight path exposes no usage per mage, so the cost is NOT
+#: TARIFFED -- which is not zero. ``null`` fails a consumer that sums it loudly;
+#: ``0.0`` sums in silence and lies; an absent key breaks each consumer differently.
+COST_SOURCE_UNPRICED = "unpriced"
+
+
+def unpriced_cost() -> dict[str, Any]:
+    """The ``cost`` block of a run whose backend reports no usage (R20).
+
+    Returns:
+        ``{"total_usd": None, "per_agent": {}, "cost_source": "unpriced"}`` --
+        the same shape the Claude path writes, with the unconfirmable fields
+        explicitly null, never absent (the ``model`` block's rule).
+    """
+    return {"total_usd": None, "per_agent": {}, "cost_source": COST_SOURCE_UNPRICED}
+
+
+def build_report_block(result: ConsultResult) -> dict[str, Any]:
+    """Build the ``magi_rs`` block for ``magi-report.json``.
+
+    ADDITIVE and fail-soft, exactly like v5.4.0's ``model`` block: ``consensus``
+    and ``reporting`` ignore it, and a report without it is still valid --
+    which is what the Claude path produces.
+
+    Args:
+        result: The parsed consult result.
+
+    Returns:
+        ``{"magi_rs": {...}}`` carrying the telemetry VERBATIM (every field of
+        ``ConsultResult.telemetry``, empty values included: an empty
+        ``rotations`` is the positive certificate that nobody rotated) plus:
+        ``capped_agents`` (D2); ``model_used`` -- the tag each seat's accepted
+        attempt ran on, under a name that says what it is and never the
+        ``model`` block's ``served`` (D8); ``run_id`` -- the pointer into
+        magi-rs's daily log, ``None`` when not emitted (R15); and
+        ``gate_ran_on_unverified_context`` -- ``True`` only when EVERY seat ran
+        unmeasured (D11 / BDD-34), the marker a reader of the report needs
+        because stderr does not survive the run.
+
+    Raises:
+        Nothing -- see :func:`announce_magi_rs_telemetry`.
+    """
+    block: dict[str, Any] = dict(result.telemetry)
+    block["capped_agents"] = result.capped_agents
+    block["model_used"] = _model_used(result.telemetry.get("completions"))
+    block["run_id"] = result.run_id
+    block["gate_ran_on_unverified_context"] = _every_seat_unmeasured(
+        result.telemetry.get("ran_unmeasured")
+    )
+    return {"magi_rs": block}
+
+
+def _model_used(completions: Any) -> dict[str, Any]:
+    """The tag of each seat's LAST attempt, from the measured ``completions`` shape.
+
+    Args:
+        completions: ``{mage: [{model, cap, finish, ...}, ...]}`` or anything
+            else (telemetry is fail-soft).
+
+    Returns:
+        ``{mage: tag}`` for every seat with at least one attempt; empty when
+        the telemetry is absent or malformed.
+    """
+    if not isinstance(completions, dict):
+        return {}
+    used: dict[str, Any] = {}
+    for mage, attempts in completions.items():
+        if isinstance(attempts, list) and attempts and isinstance(attempts[-1], dict):
+            used[str(mage)] = attempts[-1].get("model")
+    return used
+
+
+def _every_seat_unmeasured(unmeasured: Any) -> bool:
+    """Whether EVERY seat of the trio ran with an unmeasured context window.
+
+    The ONE predicate behind both the report marker
+    (``gate_ran_on_unverified_context``) and the raised tone of the stderr
+    warning: two definitions would let the message and the artefact disagree.
+
+    Args:
+        unmeasured: The ``ran_unmeasured`` telemetry value, or anything else
+            (fail-soft).
+
+    Returns:
+        True only when the set of names covers all of ``AGENTS``; duplicates
+        do not count twice, an unknown name does not count at all.
+    """
+    if not isinstance(unmeasured, list):
+        return False
+    return set(AGENTS) <= {str(name) for name in unmeasured}
+
+
+def announce_magi_rs_telemetry(
+    result: ConsultResult, stream: IO[str] | None = None, *, degraded_locally: bool = False
+) -> None:
+    """Warn about anything that degrades a gate, on a channel a human reads.
+
+    Emits at most four warnings, and NONE of them on a clean run -- a channel
+    that speaks every time is a channel nobody reads, and then the run that
+    mattered scrolls past unread. Sibling of :func:`announce_extraction_failures`
+    and of the ``$0.00`` / unattributed warnings of v5.4.0, for the same reason:
+    a field in a file nobody opens is found too late.
+
+    Args:
+        result: The parsed consult result.
+        stream: Where to write; ``sys.stderr`` when None, resolved at CALL
+            time (a default bound at definition time would outlive a
+            redirected stderr). Injected so a test can capture it.
+        degraded_locally: The orchestrator's own ``degraded`` flag. magi-rs
+            reports ITS degradation (a seat that delivered nothing); a verdict
+            that reached us and then failed the seven-key contract degrades the
+            run on THIS side with magi-rs none the wiser (D6/BDD-28) -- the
+            "gate is INVALID" warning must fire for either.
+
+    Returns:
+        None.
+
+    Raises:
+        Nothing. Telemetry must not be able to destroy the artifact it
+        annotates -- the same fail-soft contract ``read_served_models`` has,
+        and for the same reason: this runs immediately before ``json.dump``.
+
+    Side effects:
+        Writes to ``stream``.
+    """
+    out = sys.stderr if stream is None else stream
+    try:
+        _announce_magi_rs_telemetry(result, out, degraded_locally)
+    except Exception as exc:  # noqa: BLE001 -- fail-soft by contract (see the docstring)
+        print(f"[!] WARNING: could not render the magi-rs telemetry warnings ({exc})", file=out)
+
+
+def _announce_magi_rs_telemetry(
+    result: ConsultResult, stream: IO[str], degraded_locally: bool
+) -> None:
+    """The four warnings of :func:`announce_magi_rs_telemetry`, without the fail-soft wrap."""
+    telemetry = result.telemetry
+    if result.degraded or degraded_locally:
+        cause = (
+            "a seat delivered no verdict"
+            if result.degraded
+            else "a delivered verdict failed the seven-key contract here"
+        )
+        print(
+            f"[!] WARNING: the run is DEGRADED ({cause}). "
+            "The gate is INVALID whatever the verdict says -- resolve the cause and re-run.",
+            file=stream,
+        )
+    capped = result.capped_agents
+    if capped:
+        completions = telemetry.get("completions") or {}
+        detail = ", ".join(
+            f"{mage} ({completions[mage][-1].get('model')}, cap {completions[mage][-1].get('cap')})"
+            for mage in capped
+        )
+        print(
+            f"[!] WARNING: the accepted attempt hit the completion cap for {detail}. The verdict "
+            "counts (D2: the cut fell after the closing marker), but trailing prose was lost.",
+            file=stream,
+        )
+    unmeasured = telemetry.get("ran_unmeasured")
+    if isinstance(unmeasured, list) and unmeasured:
+        seats = ", ".join(str(name) for name in sorted(unmeasured))
+        if _every_seat_unmeasured(unmeasured):
+            print(
+                f"[!] WARNING: NOBODY MEASURED the context window: {seats} all ran unmeasured, "
+                "so the input may have been silently truncated for every seat. "
+                f"To fail closed instead, {_UNMEASURED_REMEDY}.",
+                file=stream,
+            )
+        else:
+            print(
+                f"[!] WARNING: the context window was not measured for {seats}; the guard "
+                f"estimated it and ran. To fail closed instead, {_UNMEASURED_REMEDY}.",
+                file=stream,
+            )
+    failures = telemetry.get("extraction_failures")
+    if isinstance(failures, dict):
+        records = [
+            (mage, rec)
+            for mage, recs in sorted(failures.items())
+            if isinstance(recs, list)
+            for rec in recs
+            if isinstance(rec, dict)
+        ]
+        if records:
+            detail = "; ".join(
+                f"{mage}: attempt {rec.get('attempt')} {rec.get('cause')} ({rec.get('model')})"
+                for mage, rec in records
+            )
+            print(
+                f"[!] WARNING: {len(records)} verdict extraction failure(s) upstream -- {detail}. "
+                "magi-rs retried (and may have rotated); a seat that keeps doing this is a "
+                "model drifting away from the marker contract.",
+                file=stream,
+            )
+
+
 def announce_extraction_failures(failures: Mapping[str, Mapping[str, int]]) -> None:
     """Say out loud that a mage failed to deliver its verdict on some attempt (R18).
 
@@ -2647,7 +2851,9 @@ def main() -> None:
     # canonical agent names (AGENTS), not just report["agents"], so a failed or
     # timed-out agent that wrote its raw envelope still contributes to the total.
     # Fail-safe: a missing or corrupt envelope contributes 0 for that agent.
-    report["cost"] = aggregate_cost(output_dir, list(AGENTS))
+    # R20: the open-weight path has no usage to aggregate -- NOT tariffed, which
+    # is not zero. The Claude path keeps its per-envelope aggregation.
+    report["cost"] = unpriced_cost() if args.ollama else aggregate_cost(output_dir, list(AGENTS))
     # FIX 4: if the aggregated cost is $0.00 despite having at least one agent,
     # the CLI may have renamed or relocated ``total_cost_usd`` — emit a single
     # warning so the silent mis-reporting is visible in operator logs.
@@ -2694,16 +2900,32 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    # MS4: the magi-rs telemetry travels VERBATIM into the report (R15/R16),
+    # from the executor's last parsed envelope -- same set-before-json.dump
+    # discipline as the blocks above. Absent on the Claude path (additive).
+    magi_rs_result: ConsultResult | None = getattr(executor, "last_result", None)
+    if magi_rs_result is not None:
+        report.update(build_report_block(magi_rs_result))
+
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+
+    # And what degrades a gate is SHOUTED, after the report exists so the message
+    # and the file it points to always agree (D2, D3, D11, R17).
+    if magi_rs_result is not None:
+        announce_magi_rs_telemetry(
+            magi_rs_result, degraded_locally=bool(report.get("degraded", False))
+        )
 
     # R18 made ACTIVE: filing the counts was not enough (MAGI gate, Caspar). Announced here,
     # after the report exists, so the message and the file it points to always agree.
     announce_extraction_failures(report.get("extraction_failures", {}))
 
     print(f"\nFull report saved to: {report_path}")
-    print(f"Cost: ${report['cost']['total_usd']:.4f} ({len(report['agents'])} agents)")
+    total_usd = report["cost"]["total_usd"]
+    cost_label = "unpriced (magi-rs exposes no usage)" if total_usd is None else f"${total_usd:.4f}"
+    print(f"Cost: {cost_label} ({len(report['agents'])} agents)")
     print(f"Input size: ~{est_tokens} tokens ({raw_input_chars} chars)")
     if oversize:
         print(

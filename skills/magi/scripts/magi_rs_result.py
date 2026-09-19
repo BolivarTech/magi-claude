@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
+# Version: 1.2.1
 # Date: 2026-09-19
 """Read the result of one ``magi-rs consult`` invocation.
 
@@ -46,6 +46,11 @@ _TELEMETRY_FIELDS = (
 about whether anybody did -- so nothing here is dropped for being falsy."""
 
 
+#: The one finish reason that means "the model chose to stop". Everything
+#: else -- ``length``, a future variant -- is a cap or an interruption (D2).
+_FINISH_CLEAN = "stop"
+
+
 class MagiRsContractError(Exception):
     """``magi-rs`` ran, but its output does not satisfy the contract.
 
@@ -82,6 +87,46 @@ class ConsultResult:
     report: str
     degraded: bool
     run_id: str | None
+
+    @property
+    def capped_agents(self) -> list[str]:
+        """Agents whose LAST attempt did not finish cleanly.
+
+        Per D2: a verdict whose accepted attempt carries ``finish: length`` is
+        counted as VALID -- the cut fell after the closing marker, so the
+        verdict is whole and only trailing prose was lost -- but it is never
+        counted silently. The damaging case (a cut that breaks extraction) is
+        already handled upstream by magi-rs, which retries.
+
+        The test is ``finish != "stop"``, not ``== "length"``: magi-core's
+        finish reasons are non-exhaustive, and an unknown one is exactly where
+        silence costs most. A ``null`` finish is different from an unknown one:
+        it is an attempt that produced no output (a timeout, measured in MS0c)
+        and is skipped, never counted as capped.
+
+        Returns:
+            Sorted agent names, empty when every agent finished cleanly or when
+            no ``completions`` telemetry was emitted at all. Never raises --
+            telemetry must not be able to destroy the artifact it annotates.
+            ``completions`` is a mapping of mage -> attempts (measured shape);
+            the LAST attempt of each mage is the one that decides.
+
+        Complexity:
+            O(m) in the number of seats in ``completions`` -- only each seat's
+            LAST attempt is examined -- once per run.
+        """
+        completions = self.telemetry.get("completions")
+        if not isinstance(completions, dict):
+            return []
+        capped: list[str] = []
+        for mage, attempts in completions.items():
+            if not isinstance(attempts, list) or not attempts:
+                continue
+            last = attempts[-1]
+            finish = last.get("finish") if isinstance(last, dict) else None
+            if finish is not None and finish != _FINISH_CLEAN:
+                capped.append(str(mage))
+        return sorted(capped)
 
     @classmethod
     def from_json(cls, raw: str) -> ConsultResult:
