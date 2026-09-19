@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.3.0
+# Version: 1.4.0
 # Date: 2026-09-19
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
@@ -405,23 +405,37 @@ class MagiRsTrio(TrioExecutor):
             process.kill()
             await process.wait()
             _emit(on_state, _TRIO_NODE, "timeout")
+            # A withheld proxy variable makes the child HANG on connect rather
+            # than exit non-zero, so the allowlist diagnosis belongs here too.
             raise MagiRsProcessError(
                 f"magi-rs did not finish within --timeout {timeout}s; nothing is recovered "
-                "from its partial output"
+                f"from its partial output. {self._allowlist_hint()}"
             ) from exc
         self._persist_raw(output_dir, stdout)
         if process.returncode != 0:
             _emit(on_state, _TRIO_NODE, "failed")
-            withheld = EnvironmentPolicy.withheld(os.environ)
             raise MagiRsProcessError(
                 f"magi-rs exited {process.returncode}; stderr: "
                 f"{stderr.decode('utf-8', errors='replace')[:_STDERR_EXCERPT_CHARS]!r}. "
-                "The child ran with an allowlisted environment (see magi_rs_env.py); if the "
-                "failure looks like a missing certificate, proxy or host, the allowlist is "
-                f"a suspect -- it withheld: {withheld}"
+                f"{self._allowlist_hint()}"
             )
         _emit(on_state, _TRIO_NODE, "success")
         return stdout.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _allowlist_hint() -> str:
+        """The diagnosis every process failure carries: what the allowlist withheld.
+
+        Returns:
+            One sentence naming the allowlist as a suspect and listing the
+            parent variables (names only, never values) that did not travel.
+        """
+        withheld = EnvironmentPolicy.withheld(os.environ)
+        return (
+            "The child ran with an allowlisted environment (see magi_rs_env.py); if the "
+            "failure looks like a missing certificate, proxy or host, the allowlist is "
+            f"a suspect -- it withheld: {withheld}"
+        )
 
     @staticmethod
     def _persist_raw(output_dir: str, stdout: bytes) -> None:
@@ -486,6 +500,9 @@ class MagiRsTrio(TrioExecutor):
                 with open(path, "w", encoding="utf-8") as handle:
                     json.dump(verdict, handle, ensure_ascii=False, indent=2)
                 verdicts[mage] = load_agent_output(path)
-            except (ValidationError, json.JSONDecodeError, OSError) as exc:
+            except (ValidationError, json.JSONDecodeError, OSError, UnicodeEncodeError) as exc:
+                # UnicodeEncodeError: json.loads yields a lone surrogate from a
+                # JSON escape that the UTF-8 file write cannot take -- that
+                # seat's failure, never the run's.
                 verdicts[mage] = exc
         return verdicts

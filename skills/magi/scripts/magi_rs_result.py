@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 1.1.0
+# Date: 2026-09-19
 """Read the result of one ``magi-rs consult`` invocation.
 
 The JSON is NESTED: the telemetry fields plus ``agents``, ``consensus`` and
@@ -130,7 +130,7 @@ class ConsultResult:
         return cls(
             agents=list(agents),
             telemetry={field: consult.get(field) for field in _TELEMETRY_FIELDS},
-            report=str(consult.get("report", "")),
+            report=str(consult.get("report") or ""),  # a null report is empty, not "None"
             degraded=bool(consult.get("degraded", False)),
             run_id=str(run_id) if run_id is not None else None,
         )
