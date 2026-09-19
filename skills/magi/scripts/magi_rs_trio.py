@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
+# Version: 1.2.0
 # Date: 2026-09-19
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
@@ -82,6 +82,10 @@ _TRIO_NODE = "magi-rs consult · 3 mages"
 observe individual mages, so three nodes would invent progress."""
 
 _RAW_ARTIFACT = "magi-rs-raw.json"
+#: The three seats. A mage magi-rs leaves out of ``agents`` (it is in
+#: ``failed_agents`` instead) still gets an entry: its failure.
+_MAGES = ("melchior", "balthasar", "caspar")
+_NO_VERDICT_CAUSE = "absent from agents and from failed_agents"
 _DEFAULT_OLLAMA_TIMEOUT_SECONDS = 1800
 """Measured-healthy: MS0 saw 149 s per mage attempt at this value. The plugin's
 historical 900 would roughly halve it, back to the 72 s ceiling that made E-B
@@ -445,15 +449,25 @@ class MagiRsTrio(TrioExecutor):
             output_dir: Where the per-mage files are written.
 
         Returns:
-            One entry per mage present in ``agents``: the validated dict, or the
-            ``ValidationError`` it failed with. A verdict that breaks the
-            seven-key contract is rejected EXACTLY as today (BDD-14c) -- no new
-            validation code, and no relaxing of the contract.
+            One entry per mage of the trio: the validated dict, the
+            ``ValidationError`` it failed with, or -- for a mage magi-rs did not
+            deliver at all -- a ``RuntimeError`` carrying magi-rs's own cause
+            from ``failed_agents`` (the shape the orchestrator's degraded path
+            already handles, BDD-15/D7). A verdict that breaks the seven-key
+            contract is rejected EXACTLY as today (BDD-14c) -- no new validation
+            code, and no relaxing of the contract.
 
         Side effects:
             Writes one ``{mage}.json`` per verdict.
         """
-        verdicts: dict[str, dict[str, Any] | BaseException] = {}
+        failed = result.telemetry.get("failed_agents") or {}
+        verdicts: dict[str, dict[str, Any] | BaseException] = {
+            mage: RuntimeError(
+                f"magi-rs delivered no verdict for {mage}: "
+                f"{failed.get(mage, _NO_VERDICT_CAUSE) if isinstance(failed, dict) else failed}"
+            )
+            for mage in _MAGES
+        }
         for index, verdict in enumerate(result.agents):
             name = verdict.get("agent") if isinstance(verdict, dict) else None
             mage = str(name) if name else f"agent-{index}"
