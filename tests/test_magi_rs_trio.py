@@ -902,3 +902,50 @@ async def test_run_trio_launches_with_the_constructor_timeout_not_its_argument(
         prompt="p", agents_dir="a", output_dir=str(tmp_path), timeout=1, models={}, max_attempts=1
     )
     assert seen["argv"][-1] == "4242"
+
+
+# MS4 Task 4 -- the wiring: the report gets the magi_rs block, the unpriced cost,
+# and the warnings, from the executor's last result.
+
+
+def test_main_writes_the_magi_rs_block_the_unpriced_cost_and_warns(monkeypatch, tmp_path, capsys):
+    import sys
+
+    import run_magi
+    from magi_rs_result import ConsultResult
+
+    envelope = json.loads(_ok_payload().decode("utf-8"))
+    envelope["consult"]["ran_unmeasured"] = ["balthasar", "caspar", "melchior"]
+    result = ConsultResult.from_json(json.dumps(envelope))
+
+    class _Executor:
+        last_result = result
+
+        def preflight(self):
+            return "magi-rs"
+
+    monkeypatch.setattr(run_magi, "_select_executor", lambda args, timeout: _Executor())
+    verdicts = {v["agent"]: v for v in result.agents}
+
+    async def _orch(*args, **kwargs):
+        from synthesize import determine_consensus
+
+        agents = [verdicts[n] for n in ("caspar", "melchior", "balthasar")]
+        return {"agents": agents, "consensus": determine_consensus(agents)}
+
+    monkeypatch.setattr(run_magi, "run_orchestrator", _orch)
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_magi.py", "design", "hello", "--ollama", "--no-status", "--output-dir", str(out)],
+    )
+    run_magi.main()
+    report = json.loads((out / "magi-report.json").read_text(encoding="utf-8"))
+    assert report["cost"] == {"total_usd": None, "per_agent": {}, "cost_source": "unpriced"}
+    assert report["magi_rs"]["run_id"] == result.run_id
+    assert report["magi_rs"]["gate_ran_on_unverified_context"] is True
+    assert report["model"]["served"] is None  # D8, never the tag used
+    err = capsys.readouterr().err
+    assert "NOBODY MEASURED" in err

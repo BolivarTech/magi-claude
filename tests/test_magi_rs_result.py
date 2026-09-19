@@ -443,3 +443,108 @@ def test_a_malformed_telemetry_value_never_takes_the_announcer_down(capsys):
     # Fail-soft by contract: it runs right before json.dump.
     _announce(_result(ran_unmeasured=None, extraction_failures="?", completions=42))
     capsys.readouterr()
+
+
+# --------------------------------------------------------------------------
+# MS4 Task 4 -- artefacts and the `magi_rs` block of magi-report.json
+# --------------------------------------------------------------------------
+
+_CLEAN_REPORT = os.path.join(_FIXTURES, "clean-magi-report.json")
+"""A magi-report.json from a healthy Claude-path run (the MS1 SMOKE #2 opus
+certification), captured not authored: the test that uses it proves the REAL
+shape stays valid without the magi_rs block."""
+
+
+def _report_without(key):
+    """A magi-report payload with one block absent, to prove it is optional."""
+    report = json.loads(open(_CLEAN_REPORT, encoding="utf-8").read())
+    report.pop(key, None)
+    return report
+
+
+def test_the_raw_output_is_persisted_verbatim_under_its_own_name(tmp_path):
+    # R16: two producers, two names.
+    from magi_rs_trio import write_raw_artifact
+
+    raw = _fixture("three-agents.json")
+    write_raw_artifact(str(tmp_path), raw)
+    assert (tmp_path / "magi-rs-raw.json").read_text(encoding="utf-8") == raw
+    assert not (tmp_path / "magi-report.json").exists()
+
+
+def test_a_raw_artifact_that_cannot_be_written_raises_not_swallows(tmp_path):
+    from magi_rs_trio import write_raw_artifact
+
+    with pytest.raises(OSError):
+        write_raw_artifact(str(tmp_path / "missing" / "dir"), "{}")
+
+
+def test_the_report_carries_a_magi_rs_block_with_the_telemetry_verbatim():
+    from run_magi import build_report_block
+
+    report = build_report_block(_result(rotations=[]))
+    assert report["magi_rs"]["rotations"] == []  # the POSITIVE certificate
+    assert "capped_agents" in report["magi_rs"]
+    assert "run_id" in report["magi_rs"] and report["magi_rs"]["run_id"] is None
+    assert set(report["magi_rs"]) >= {
+        "degraded",
+        "mode",
+        "mode_source",
+        "extraction_failures",
+        "input_size",
+        "report_truncated",
+        "endpoint_divergence",
+        "timeout_below_formula",
+        "failed_agents",
+        "rotations",
+        "ran_unmeasured",
+        "completions",
+        "pool_eligibility",
+    }
+
+
+def test_the_block_carries_the_tag_each_seat_actually_used_as_model_used():
+    # D8: the tag magi-rs USED is telemetry under a name that says so -- never
+    # the `served` of the `model` block, which means server-confirmed.
+    from run_magi import build_report_block
+
+    result = _result(
+        completions={
+            "caspar": [
+                _attempt("length", model="deepseek-v4-pro:cloud"),
+                _attempt("stop", model="glm-5.2:cloud"),
+            ],
+            "melchior": [_attempt("stop", model="qwen3.5:397b-cloud")],
+        }
+    )
+    assert build_report_block(result)["magi_rs"]["model_used"] == {
+        "caspar": "glm-5.2:cloud",
+        "melchior": "qwen3.5:397b-cloud",
+    }
+
+
+def test_three_unmeasured_seats_leave_the_marker_in_the_report_and_two_do_not():
+    # D11 / BDD-34: who consumes the gate reads the report, not the terminal.
+    from run_magi import build_report_block
+
+    every = build_report_block(_result(ran_unmeasured=["balthasar", "caspar", "melchior"]))
+    some = build_report_block(_result(ran_unmeasured=["caspar", "melchior"]))
+    assert every["magi_rs"]["gate_ran_on_unverified_context"] is True
+    assert some["magi_rs"]["gate_ran_on_unverified_context"] is False
+
+
+def test_a_report_without_the_magi_rs_block_is_still_valid():
+    # Additive and fail-soft, exactly like v5.4.0's `model` block.
+    from synthesize import format_report
+
+    report = _report_without("magi_rs")
+    format_report(report["agents"], report["consensus"])  # raises if it were required
+
+
+def test_the_open_weight_cost_is_unpriced_never_zero():
+    # R20: magi-rs exposes no usage per mage. `null` fails a consumer that sums
+    # it LOUDLY; `0.0` sums in silence and lies; an absent key breaks each
+    # consumer differently.
+    from run_magi import unpriced_cost
+
+    assert unpriced_cost() == {"total_usd": None, "per_agent": {}, "cost_source": "unpriced"}

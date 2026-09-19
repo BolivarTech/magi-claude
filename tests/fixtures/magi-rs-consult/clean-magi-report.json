@@ -1,0 +1,368 @@
+{
+  "agents": [
+    {
+      "agent": "caspar",
+      "verdict": "conditional",
+      "confidence": 0.82,
+      "summary": "The sweep's boundary is sound only if bin/ itself is a real directory and the sweep runs AFTER install \u2014 the text under review guarantees neither, and 'warn and continue' hides a two-executable state from whoever consumes the gate.",
+      "reasoning": "No implementation exists in the tree yet (MS2 not started), so this reviews the design text as the artifact. Three of its four safety claims hold only under preconditions the text does not state.\n\nQ1 \u2014 escape from bin/. The text says the sweep never follows symlinks *inside* bin/ and never leaves bin/, but says nothing about bin/ itself. If bin/ is a symlink, or on Windows a junction/reparse point \u2014 the very link form this project recommends for local development \u2014 then 'inside bin/' resolves to inside ~/.cargo/bin or /usr/local/bin and the sweep deletes the user's own magi-rs while honouring every stated rule to the letter. os.path.islink() returns False for junctions on several Python versions, so a naive check passes. Likelihood: possible; impact: destroys a user-owned install \u2014 retained as critical under the critic's override. Secondary: a name-pattern match on a *directory* entry (a leftover nested extraction dir) handled with shutil.rmtree follows junctions on older Pythons \u2014 a second route out.\n\nQ2 \u2014 a temp another process is writing. The pattern that recognises 'a bootstrap temporary' matches the live temp of a concurrent instance by construction. On Unix the unlink succeeds silently; the other instance's rename then fails and, per its own rules, aborts \u2014 a healthy run kills another. On Windows the open handle makes the delete fail, which the 'warn and continue' rule then papers over, so the bug is platform-asymmetric and invisible on the CI platform. Likelihood: likely. The fix is own-token-or-older-than-k\u00b7T, which is only sound if download and extraction are actually bounded by T.\n\nQ3 \u2014 warn-and-continue. Two ambiguities. First, ordering: the text sweeps *before* installing. A download failure after the sweep leaves zero executables, and the justification 'the correct one is present and verified' is false at that moment \u2014 the user loses a working binary to a network blip. Second, the rule does not distinguish a failed delete of a *discard* (tolerable: two files, next run retries) from a failed rename of the *final name* (must abort: install cannot complete). And the only record of the two-executable state is a stderr line; the report a gate consumer actually reads says nothing, so the 'exactly one' invariant is unverifiable after the fact.",
+      "findings": [
+        {
+          "severity": "critical",
+          "title": "bin/ itself may be a symlink or Windows junction \u2014 sweep then deletes outside the plugin while obeying every stated rule",
+          "detail": "Scenario: developer links .claude/skills/magi via junction (the project's own recommendation) and bin/ ends up a reparse point to ~/.cargo/bin. Sweep lists 'bin/', sees magi-rs.exe matching the pattern, unlinks it \u2014 the user's own install is gone. The text's 'never follows symlinks' covers entries inside bin/, not the container. os.path.islink() is False for junctions on several Python versions; the check must inspect st_file_attributes for FILE_ATTRIBUTE_REPARSE_POINT and treat any non-real-directory bin/ (including a regular file) as abort-before-touching-anything. Labelled unlikely-to-be-hit in normal installs but catastrophic and irreversible, hence retained at critical.",
+          "category": "logic-error",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "warning",
+          "title": "Sweep runs BEFORE install: a failed download leaves zero executables",
+          "detail": "'Antes de instalar la versi\u00f3n nueva, barre' contradicts the later justification 'si el ejecutable correcto est\u00e1 presente y verificado'. Sequence: sweep deletes the old (working) binary \u2192 download fails (offline, 404, digest mismatch) \u2192 bin/ is empty \u2192 next gate run cannot self-heal because it is the same network that failed. Order must be: download to temp \u2192 verify \u2192 extract \u2192 rename into place \u2192 THEN sweep everything that is not the pinned file. Also decide whether the sweep pattern excludes the file whose digest already matches the pin; otherwise a sweep-first design re-downloads on every run.",
+          "category": "logic-error",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "warning",
+          "title": "Concurrent bootstrap's in-flight temp matches the sweep pattern \u2014 Unix deletes it, Windows hides it",
+          "detail": "Two plugin instances bootstrap the same bin/. Instance A's temp (unique token, mid-write) matches instance B's 'bootstrap temporary' pattern. On Linux/macOS unlink succeeds; A's subsequent rename fails and A aborts fail-closed \u2014 B's healthy run broke A. On Windows the open handle makes the delete raise PermissionError, which 'warn and continue' swallows, so CI on windows-latest never sees the defect. Required rule: delete a temp only if it carries THIS process's token, or is older than k\u00b7T where T is the bootstrap's enforced total timeout (download + extraction, checked per chunk/member). Never query the OS for the owning PID \u2014 TOCTOU plus PID reuse.",
+          "category": "race-condition",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "warning",
+          "title": "'Warn and continue' conflates a failed discard-delete with a failed final-name replacement, and the two-executable state never reaches the report",
+          "detail": "Case A: old binary renamed to a discard name, new binary at final name, discard delete fails (in use) \u2192 tolerable, next run retries. Case B: rename of old \u2192 discard itself fails, so the new binary cannot take the final name \u2192 install is incomplete and must ABORT, not warn. The text's single rule cannot express the difference. Additionally, the warning lives only on stderr; magi-report.json carries no marker that bin/ held two magi-rs executables during this gate, so the 'exactly one' invariant is unobservable to the consumer \u2014 same failure shape this project already fixed for capped_agents. Recommend a report field (e.g. sweep_leftovers: [names]) alongside the stderr line.",
+          "category": "error-handling",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "info",
+          "title": "Name-pattern edge cases: case-insensitive filesystems and directory entries",
+          "detail": "On Windows/macOS 'MAGI-RS.EXE' is the same runnable file as 'magi-rs.exe' but survives a case-sensitive pattern; and an interrupted extraction can leave a nested versioned directory containing a binary that a files-only sweep ignores. Both leave a second runnable magi-rs in bin/ after a sweep that reports success. Match case-insensitively on those platforms and decide explicitly (in prose) what happens to matching directory entries \u2014 os.rmdir on a junction removes only the link, shutil.rmtree may not.",
+          "category": "logic-error",
+          "file": null,
+          "line": null
+        }
+      ],
+      "recommendation": "Conditional approve. Before this becomes code: (1) add the bin/-is-a-real-directory precondition as the FIRST operation, with reparse-point detection, aborting before any download or delete; (2) invert the order \u2014 install and verify first, sweep last; (3) restrict temp deletion to own-token or older-than-k\u00b7T with T actually enforced per chunk/member; (4) split 'warn and continue' into discard-delete-failed (warn) vs final-rename-failed (abort), and surface leftovers in magi-report.json, not only stderr. Each of these needs the test that constructs the breaking input \u2014 a junction bin/, a Linux concurrent temp, a download that fails after the sweep \u2014 not a mocked assertion that the guard was called."
+    },
+    {
+      "agent": "melchior",
+      "verdict": "conditional",
+      "confidence": 0.82,
+      "summary": "The sweep's three stated guarantees each have one unstated precondition; without them the design deletes a user's binary through a linked bin/, destroys a concurrent bootstrap's in-flight temp on POSIX, and leaves the canonical-name case of a failed delete undefined.",
+      "reasoning": "Q1 - escape from bin/. The text guards symlinks INSIDE bin/ (delete the entry, never the target) but says nothing about bin/ ITSELF being a real directory. Pattern-matching deletion is performed relative to the container: if bin/ is a symlink, a Windows junction, or a mount point onto ~/.cargo/bin or /usr/local/bin, then 'inside the plugin's bin/' resolves to the user's binary directory and the sweep deletes the user's own magi-rs while complying with every stated rule. Likelihood: likely - the junction is the very link form this project recommends for local development, and os.path.islink() returns False for junctions on several Python versions, so a symlink-only check does not close it; st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT is required. A second escape: if the bin/ path is derived from an env var and the code falls back to cwd or PATH when it is absent, the sweep runs in an arbitrary directory. Both must abort before any I/O.\n\nQ2 - a temp another process is writing. The sweep deletes 'todo otro ejecutable' by name pattern, and a bootstrap's own temporaries necessarily match that pattern (they differ only by a per-process token). The outcome is platform-dependent, which is what makes it dangerous: on Windows, Python's open() does not set FILE_SHARE_DELETE, so the delete fails with PermissionError and the warn-and-continue rule accidentally saves the other run; on Linux/macOS unlink() succeeds on an open file, the writer keeps writing to an unlinked inode, and its final rename fails with ENOENT - so a healthy run aborts another healthy run, and only on the platforms with the thinnest CI coverage. Likelihood: certain as described. The fix is a rule, not liveness probing: delete a temp only if it carries this process's token OR is older than k*T where T is the bootstrap's own total bound (download + extraction, each enforced per chunk/member), k > 1. Do not consult PIDs - that is a TOCTOU and PIDs recycle.\n\nQ3 - warn-and-continue. The condition 'correct executable present and verified' is sound, but the description sequences the sweep BEFORE install. If the delete that fails is the old binary sitting at the CANONICAL name (the only name the launcher will exec), install cannot proceed by overwrite on Windows; that failure must abort (or route through rename-to-discard + rename-in), not warn. So the rule needs a scope: non-fatal only for non-canonical leftovers, and only after the R4 digest/version check has run on the canonical path post-sweep. Residual state after a warned failure is two executables in bin/; that is unambiguous only if the exec path is the fixed canonical name and never a glob, and the warning must also land in the report, not stderr alone, or the violated invariant is invisible to the gate's consumer. Likelihood: likely.",
+      "findings": [
+        {
+          "severity": "critical",
+          "title": "bin/ container link is unguarded: sweep can delete the user's own magi-rs",
+          "detail": "Symlink handling covers entries inside bin/ only. If bin/ is itself a symlink, junction, or mount point onto a user directory, the name-pattern delete runs there and removes the user's installation while satisfying every stated rule. Requires a fail-closed precondition (real directory, not a reparse point via st_file_attributes, not a regular file) evaluated once before any download, extraction, rename or delete; and an abort, never a cwd/PATH fallback, if the plugin-root variable is absent.",
+          "category": "logic-error",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "critical",
+          "title": "Sweep deletes a concurrent bootstrap's in-flight temp; fatal on POSIX, masked on Windows",
+          "detail": "Temporaries match the executable name pattern. On Linux/macOS unlink() succeeds on an open file, so the other process's rename fails ENOENT and its run aborts. On Windows the delete fails (no FILE_SHARE_DELETE) and warn-and-continue hides the defect. Rule needed: delete a temp only if own-token or older than k*T (T = bootstrap's enforced total bound, k>1); never probe process liveness (TOCTOU, PID reuse). This depends on download and extraction each being bounded by T per chunk/member, otherwise the age proof does not hold.",
+          "category": "race-condition",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "warning",
+          "title": "Warn-and-continue is unscoped: failed delete of the canonical name must abort",
+          "detail": "The sweep runs before install. If the un-deletable file occupies the canonical name, install cannot overwrite it on Windows; treating that as a warning leaves the old binary as what gets executed. Scope the non-fatal rule to non-canonical leftovers, perform the pinned digest/version verification on the canonical path after the sweep, and use rename-to-discard for the canonical case with abort if even that fails.",
+          "category": "error-handling",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "warning",
+          "title": "Violated 'exactly one executable' invariant is only visible on stderr",
+          "detail": "After a warned failure two executables coexist until the next start. The launcher must resolve the binary by fixed canonical name (never a directory listing or glob), and the warning should also be recorded in the run report so a gate consumer can see the invariant was not met in that run.",
+          "category": "documentation",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "info",
+          "title": "Sweep must unlink entries, never resolve paths first",
+          "detail": "Implement with os.unlink/Path.unlink on the directory entry as listed; any Path.resolve() or realpath() before deletion turns 'delete the link' into 'delete the target'. Hard links need no special handling: unlinking one entry leaves the content reachable via the others.",
+          "category": "other",
+          "file": null,
+          "line": null
+        }
+      ],
+      "recommendation": "Approve once three preconditions are made explicit and tested with the breaking input: (1) bin/ must be a real directory checked via reparse-point attributes before any I/O, with abort on a missing plugin root; (2) temp deletion restricted to own-token-or-older-than-k*T with T enforced per chunk/member, tested with a live foreign temp on a POSIX leg; (3) warn-and-continue scoped to non-canonical leftovers, canonical-name conflicts handled by rename-to-discard or abort, and the warning persisted in the report. Without these the stated guarantees are claims the code would not actually have."
+    },
+    {
+      "agent": "balthasar",
+      "verdict": "conditional",
+      "confidence": 0.82,
+      "summary": "Sound intent, but three gaps make the described sweep either unsafe (container link, foreign temps) or not actually 'valid anyway' on Windows without rename-to-discard.",
+      "reasoning": "The proposal gets the two hard lessons right: never follow a symlink entry, and never abort a gate over a delete that Windows refuses. What it leaves unsaid is where the real risk lives, and each of the three questions has a concrete answer the text does not yet give.\n\nQ1, escape from bin/ \u2014 likely defect as described. The sweep protects against links *inside* bin/ but says nothing about bin/ itself being a symlink or a Windows junction. 'Stay inside bin/' is then satisfied to the letter while deleting inside ~/.cargo/bin or /usr/local/bin. A junction is exactly what this repo recommends for local development, and os.path.islink() returns False for one on several Python versions, so this is not hypothetical. The same door is open for how bin/ is resolved: if CLAUDE_PLUGIN_ROOT is absent and the code falls back to cwd or a guess, 'own bin/' means whatever directory the operator happened to be in. Both belong to a single precondition evaluated once, before any write or delete \u2014 cheaper than a guard repeated in five places.\n\nQ2, foreign temp in flight \u2014 certain defect as described. 'Deletes by name pattern' matches, by construction, the temporary another bootstrap instance is writing right now; deleting it makes that instance's rename fail and abort. A perfectly healthy run breaks a neighbour. The boring fix is the correct one: delete a temp only if it carries this process's token or is older than a bound derived from the bootstrap's own timeout (k\u00b7T, k>1) \u2014 never by asking the OS whether the owner is alive (TOCTOU, recycled PIDs). This does require download and extraction to actually be bounded by T, per chunk, or the age proof is a guarantee nobody ran.\n\nQ3, warn-and-continue \u2014 likely ambiguity. The claim 'if the correct executable is present and verified the result is valid' is only true if the old, in-use binary is first *renamed* to a discard name so the new one can take the canonical path. Windows refuses delete but allows rename. As written \u2014 sweep runs before install, delete fails, continue \u2014 the old binary still owns magi-rs.exe, the new one has nowhere to land, and R4 fails closed at the canonical path. So 'valid anyway' silently depends on a step the text omits. Two smaller ambiguities: the 'exactly one executable' invariant is knowingly violated until the next --ollama run (which may be weeks away), and that should be said; and the warning should name the file it could not remove so the next operator is not guessing. Ownership of bin/ must also be documented: deletion by name cannot tell an old binary from a user's file that happens to match.\n\nNone of this is over-engineering \u2014 it is the difference between the sweep being the one destructive operation in the plan and it being a liability. Effort is small; each item is a precondition, a naming rule, or a rename.",
+      "findings": [
+        {
+          "severity": "warning",
+          "title": "Sweep never checks that bin/ itself is a real directory",
+          "detail": "The text forbids following symlink entries but not a symlinked or junctioned bin/. Deleting 'inside bin/' through a link deletes inside ~/.cargo/bin or /usr/local/bin \u2014 the exact harm the 'never touch the user's install' rule exists to prevent. Make it one precondition before any I/O: bin/ missing \u2192 create; real directory \u2192 proceed; symlink, reparse point, or regular file \u2192 abort naming the path and target. Check st_file_attributes for FILE_ATTRIBUTE_REPARSE_POINT; islink() misses junctions. Also state that a missing/empty CLAUDE_PLUGIN_ROOT aborts rather than falling back to cwd.",
+          "category": "logic-error",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "warning",
+          "title": "Pattern-based delete will remove a concurrent bootstrap's in-flight temp",
+          "detail": "A temp written by another instance matches the same name pattern. Deleting it makes that instance's staging rename fail and abort \u2014 a healthy run kills a neighbour. Rule: delete a temp only if it carries this process's unique token, or is older than an age bound derived from the bootstrap timeout (k\u00b7T, k>1). Do not consult process liveness (TOCTOU, PID reuse). This only holds if download and extraction are genuinely capped at T per chunk/member, so that cap is a requirement, not a hope.",
+          "category": "race-condition",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "warning",
+          "title": "'Warn and continue' is only valid if the in-use binary is renamed aside first",
+          "detail": "On Windows an in-use executable cannot be deleted but can be renamed. The proposal runs the sweep before install and continues on delete failure \u2014 but then the old file still holds the canonical name, the new binary cannot take its place, and fail-closed verification rejects the run. The claimed 'valid anyway' outcome requires: stage new \u2192 rename old to a discard name \u2192 rename new into place \u2192 try to delete discard; warn-and-continue applies only to that last step. If even the rename-aside fails, abort naming the locked file rather than leave bin/ half-updated.",
+          "category": "logic-error",
+          "file": null,
+          "line": null
+        },
+        {
+          "severity": "info",
+          "title": "The 'exactly one executable' invariant is knowingly deferred; say so",
+          "detail": "After a failed discard-delete, bin/ holds two executables until the next --ollama run, which may be far off since the bootstrap runs only on that path. That is acceptable, but the warning must name the leftover file, and docs must state that bin/ is owned exclusively by the bootstrap because deletion is by name and cannot distinguish an old binary from a user's file.",
+          "category": "documentation",
+          "file": null,
+          "line": null
+        }
+      ],
+      "recommendation": "Approve the direction, but before implementation: (1) add a single bin/ real-directory precondition (junction-aware) plus abort on missing CLAUDE_PLUGIN_ROOT; (2) replace 'delete by pattern' with own-token-or-older-than-k\u00b7T for temps, and make the per-chunk timeout a stated requirement; (3) reorder to stage \u2192 rename-aside \u2192 rename-in \u2192 best-effort delete, so warn-and-continue only ever applies to the discard. Write a test for each with the input that breaks it \u2014 a foreign fresh temp, a junctioned bin/, a locked old exe \u2014 and confirm the test fails without the fix."
+    }
+  ],
+  "consensus": {
+    "consensus": "GO WITH CAVEATS (3-0)",
+    "consensus_verdict": "conditional",
+    "confidence": 0.61,
+    "votes": {
+      "caspar": "conditional",
+      "melchior": "conditional",
+      "balthasar": "conditional"
+    },
+    "majority_summary": "Caspar: The sweep's boundary is sound only if bin/ itself is a real directory and the sweep runs AFTER install \u2014 the text under review guarantees neither, and 'warn and continue' hides a two-executable state from whoever consumes the gate. | Melchior: The sweep's three stated guarantees each have one unstated precondition; without them the design deletes a user's binary through a linked bin/, destroys a concurrent bootstrap's in-flight temp on POSIX, and leaves the canonical-name case of a failed delete undefined. | Balthasar: Sound intent, but three gaps make the described sweep either unsafe (container link, foreign temps) or not actually 'valid anyway' on Windows without rename-to-discard.",
+    "dissent": [],
+    "findings": [
+      {
+        "severity": "critical",
+        "title": "bin/ itself may be a symlink or Windows junction \u2014 sweep then deletes outside the plugin while obeying every stated rule",
+        "detail": "Scenario: developer links .claude/skills/magi via junction (the project's own recommendation) and bin/ ends up a reparse point to ~/.cargo/bin. Sweep lists 'bin/', sees magi-rs.exe matching the pattern, unlinks it \u2014 the user's own install is gone. The text's 'never follows symlinks' covers entries inside bin/, not the container. os.path.islink() is False for junctions on several Python versions; the check must inspect st_file_attributes for FILE_ATTRIBUTE_REPARSE_POINT and treat any non-real-directory bin/ (including a regular file) as abort-before-touching-anything. Labelled unlikely-to-be-hit in normal installs but catastrophic and irreversible, hence retained at critical.",
+        "category": "logic-error",
+        "file": null,
+        "line": null,
+        "sources": [
+          "caspar"
+        ]
+      },
+      {
+        "severity": "critical",
+        "title": "bin/ container link is unguarded: sweep can delete the user's own magi-rs",
+        "detail": "Symlink handling covers entries inside bin/ only. If bin/ is itself a symlink, junction, or mount point onto a user directory, the name-pattern delete runs there and removes the user's installation while satisfying every stated rule. Requires a fail-closed precondition (real directory, not a reparse point via st_file_attributes, not a regular file) evaluated once before any download, extraction, rename or delete; and an abort, never a cwd/PATH fallback, if the plugin-root variable is absent.",
+        "category": "logic-error",
+        "file": null,
+        "line": null,
+        "sources": [
+          "melchior"
+        ]
+      },
+      {
+        "severity": "critical",
+        "title": "Sweep deletes a concurrent bootstrap's in-flight temp; fatal on POSIX, masked on Windows",
+        "detail": "Temporaries match the executable name pattern. On Linux/macOS unlink() succeeds on an open file, so the other process's rename fails ENOENT and its run aborts. On Windows the delete fails (no FILE_SHARE_DELETE) and warn-and-continue hides the defect. Rule needed: delete a temp only if own-token or older than k*T (T = bootstrap's enforced total bound, k>1); never probe process liveness (TOCTOU, PID reuse). This depends on download and extraction each being bounded by T per chunk/member, otherwise the age proof does not hold.",
+        "category": "race-condition",
+        "file": null,
+        "line": null,
+        "sources": [
+          "melchior"
+        ]
+      },
+      {
+        "severity": "warning",
+        "title": "Sweep runs BEFORE install: a failed download leaves zero executables",
+        "detail": "'Antes de instalar la versi\u00f3n nueva, barre' contradicts the later justification 'si el ejecutable correcto est\u00e1 presente y verificado'. Sequence: sweep deletes the old (working) binary \u2192 download fails (offline, 404, digest mismatch) \u2192 bin/ is empty \u2192 next gate run cannot self-heal because it is the same network that failed. Order must be: download to temp \u2192 verify \u2192 extract \u2192 rename into place \u2192 THEN sweep everything that is not the pinned file. Also decide whether the sweep pattern excludes the file whose digest already matches the pin; otherwise a sweep-first design re-downloads on every run.",
+        "category": "logic-error",
+        "file": null,
+        "line": null,
+        "sources": [
+          "caspar"
+        ]
+      },
+      {
+        "severity": "warning",
+        "title": "Concurrent bootstrap's in-flight temp matches the sweep pattern \u2014 Unix deletes it, Windows hides it",
+        "detail": "Two plugin instances bootstrap the same bin/. Instance A's temp (unique token, mid-write) matches instance B's 'bootstrap temporary' pattern. On Linux/macOS unlink succeeds; A's subsequent rename fails and A aborts fail-closed \u2014 B's healthy run broke A. On Windows the open handle makes the delete raise PermissionError, which 'warn and continue' swallows, so CI on windows-latest never sees the defect. Required rule: delete a temp only if it carries THIS process's token, or is older than k\u00b7T where T is the bootstrap's enforced total timeout (download + extraction, checked per chunk/member). Never query the OS for the owning PID \u2014 TOCTOU plus PID reuse.",
+        "category": "race-condition",
+        "file": null,
+        "line": null,
+        "sources": [
+          "caspar"
+        ]
+      },
+      {
+        "severity": "warning",
+        "title": "'Warn and continue' conflates a failed discard-delete with a failed final-name replacement, and the two-executable state never reaches the report",
+        "detail": "Case A: old binary renamed to a discard name, new binary at final name, discard delete fails (in use) \u2192 tolerable, next run retries. Case B: rename of old \u2192 discard itself fails, so the new binary cannot take the final name \u2192 install is incomplete and must ABORT, not warn. The text's single rule cannot express the difference. Additionally, the warning lives only on stderr; magi-report.json carries no marker that bin/ held two magi-rs executables during this gate, so the 'exactly one' invariant is unobservable to the consumer \u2014 same failure shape this project already fixed for capped_agents. Recommend a report field (e.g. sweep_leftovers: [names]) alongside the stderr line.",
+        "category": "error-handling",
+        "file": null,
+        "line": null,
+        "sources": [
+          "caspar"
+        ]
+      },
+      {
+        "severity": "warning",
+        "title": "Warn-and-continue is unscoped: failed delete of the canonical name must abort",
+        "detail": "The sweep runs before install. If the un-deletable file occupies the canonical name, install cannot overwrite it on Windows; treating that as a warning leaves the old binary as what gets executed. Scope the non-fatal rule to non-canonical leftovers, perform the pinned digest/version verification on the canonical path after the sweep, and use rename-to-discard for the canonical case with abort if even that fails.",
+        "category": "error-handling",
+        "file": null,
+        "line": null,
+        "sources": [
+          "melchior"
+        ]
+      },
+      {
+        "severity": "warning",
+        "title": "Violated 'exactly one executable' invariant is only visible on stderr",
+        "detail": "After a warned failure two executables coexist until the next start. The launcher must resolve the binary by fixed canonical name (never a directory listing or glob), and the warning should also be recorded in the run report so a gate consumer can see the invariant was not met in that run.",
+        "category": "documentation",
+        "file": null,
+        "line": null,
+        "sources": [
+          "melchior"
+        ]
+      },
+      {
+        "severity": "warning",
+        "title": "Sweep never checks that bin/ itself is a real directory",
+        "detail": "The text forbids following symlink entries but not a symlinked or junctioned bin/. Deleting 'inside bin/' through a link deletes inside ~/.cargo/bin or /usr/local/bin \u2014 the exact harm the 'never touch the user's install' rule exists to prevent. Make it one precondition before any I/O: bin/ missing \u2192 create; real directory \u2192 proceed; symlink, reparse point, or regular file \u2192 abort naming the path and target. Check st_file_attributes for FILE_ATTRIBUTE_REPARSE_POINT; islink() misses junctions. Also state that a missing/empty CLAUDE_PLUGIN_ROOT aborts rather than falling back to cwd.",
+        "category": "logic-error",
+        "file": null,
+        "line": null,
+        "sources": [
+          "balthasar"
+        ]
+      },
+      {
+        "severity": "warning",
+        "title": "Pattern-based delete will remove a concurrent bootstrap's in-flight temp",
+        "detail": "A temp written by another instance matches the same name pattern. Deleting it makes that instance's staging rename fail and abort \u2014 a healthy run kills a neighbour. Rule: delete a temp only if it carries this process's unique token, or is older than an age bound derived from the bootstrap timeout (k\u00b7T, k>1). Do not consult process liveness (TOCTOU, PID reuse). This only holds if download and extraction are genuinely capped at T per chunk/member, so that cap is a requirement, not a hope.",
+        "category": "race-condition",
+        "file": null,
+        "line": null,
+        "sources": [
+          "balthasar"
+        ]
+      },
+      {
+        "severity": "warning",
+        "title": "'Warn and continue' is only valid if the in-use binary is renamed aside first",
+        "detail": "On Windows an in-use executable cannot be deleted but can be renamed. The proposal runs the sweep before install and continues on delete failure \u2014 but then the old file still holds the canonical name, the new binary cannot take its place, and fail-closed verification rejects the run. The claimed 'valid anyway' outcome requires: stage new \u2192 rename old to a discard name \u2192 rename new into place \u2192 try to delete discard; warn-and-continue applies only to that last step. If even the rename-aside fails, abort naming the locked file rather than leave bin/ half-updated.",
+        "category": "logic-error",
+        "file": null,
+        "line": null,
+        "sources": [
+          "balthasar"
+        ]
+      },
+      {
+        "severity": "info",
+        "title": "Name-pattern edge cases: case-insensitive filesystems and directory entries",
+        "detail": "On Windows/macOS 'MAGI-RS.EXE' is the same runnable file as 'magi-rs.exe' but survives a case-sensitive pattern; and an interrupted extraction can leave a nested versioned directory containing a binary that a files-only sweep ignores. Both leave a second runnable magi-rs in bin/ after a sweep that reports success. Match case-insensitively on those platforms and decide explicitly (in prose) what happens to matching directory entries \u2014 os.rmdir on a junction removes only the link, shutil.rmtree may not.",
+        "category": "logic-error",
+        "file": null,
+        "line": null,
+        "sources": [
+          "caspar"
+        ]
+      },
+      {
+        "severity": "info",
+        "title": "Sweep must unlink entries, never resolve paths first",
+        "detail": "Implement with os.unlink/Path.unlink on the directory entry as listed; any Path.resolve() or realpath() before deletion turns 'delete the link' into 'delete the target'. Hard links need no special handling: unlinking one entry leaves the content reachable via the others.",
+        "category": "other",
+        "file": null,
+        "line": null,
+        "sources": [
+          "melchior"
+        ]
+      },
+      {
+        "severity": "info",
+        "title": "The 'exactly one executable' invariant is knowingly deferred; say so",
+        "detail": "After a failed discard-delete, bin/ holds two executables until the next --ollama run, which may be far off since the bootstrap runs only on that path. That is acceptable, but the warning must name the leftover file, and docs must state that bin/ is owned exclusively by the bootstrap because deletion is by name and cannot distinguish an old binary from a user's file.",
+        "category": "documentation",
+        "file": null,
+        "line": null,
+        "sources": [
+          "balthasar"
+        ]
+      }
+    ],
+    "conditions": [
+      {
+        "agent": "caspar",
+        "condition": "The sweep's boundary is sound only if bin/ itself is a real directory and the sweep runs AFTER install \u2014 the text under review guarantees neither, and 'warn and continue' hides a two-executable state from whoever consumes the gate."
+      },
+      {
+        "agent": "melchior",
+        "condition": "The sweep's three stated guarantees each have one unstated precondition; without them the design deletes a user's binary through a linked bin/, destroys a concurrent bootstrap's in-flight temp on POSIX, and leaves the canonical-name case of a failed delete undefined."
+      },
+      {
+        "agent": "balthasar",
+        "condition": "Sound intent, but three gaps make the described sweep either unsafe (container link, foreign temps) or not actually 'valid anyway' on Windows without rename-to-discard."
+      }
+    ],
+    "recommendations": {
+      "caspar": "Conditional approve. Before this becomes code: (1) add the bin/-is-a-real-directory precondition as the FIRST operation, with reparse-point detection, aborting before any download or delete; (2) invert the order \u2014 install and verify first, sweep last; (3) restrict temp deletion to own-token or older-than-k\u00b7T with T actually enforced per chunk/member; (4) split 'warn and continue' into discard-delete-failed (warn) vs final-rename-failed (abort), and surface leftovers in magi-report.json, not only stderr. Each of these needs the test that constructs the breaking input \u2014 a junction bin/, a Linux concurrent temp, a download that fails after the sweep \u2014 not a mocked assertion that the guard was called.",
+      "melchior": "Approve once three preconditions are made explicit and tested with the breaking input: (1) bin/ must be a real directory checked via reparse-point attributes before any I/O, with abort on a missing plugin root; (2) temp deletion restricted to own-token-or-older-than-k*T with T enforced per chunk/member, tested with a live foreign temp on a POSIX leg; (3) warn-and-continue scoped to non-canonical leftovers, canonical-name conflicts handled by rename-to-discard or abort, and the warning persisted in the report. Without these the stated guarantees are claims the code would not actually have.",
+      "balthasar": "Approve the direction, but before implementation: (1) add a single bin/ real-directory precondition (junction-aware) plus abort on missing CLAUDE_PLUGIN_ROOT; (2) replace 'delete by pattern' with own-token-or-older-than-k\u00b7T for temps, and make the per-chunk timeout a stated requirement; (3) reorder to stage \u2192 rename-aside \u2192 rename-in \u2192 best-effort delete, so warn-and-continue only ever applies to the discard. Write a test for each with the input that breaks it \u2014 a foreign fresh temp, a junctioned bin/, a locked old exe \u2014 and confirm the test fails without the fix."
+    }
+  },
+  "guard": {
+    "active": false
+  },
+  "cost": {
+    "per_agent": {
+      "caspar": 2.2148214999999998,
+      "melchior": 2.082435,
+      "balthasar": 2.07558
+    },
+    "total_usd": 6.372837
+  },
+  "input_size": {
+    "chars": 1147,
+    "est_tokens": 286,
+    "oversize": false,
+    "warn_threshold_tokens": 150000
+  },
+  "model": {
+    "backend": "claude",
+    "short_name": "opus",
+    "source": "flag",
+    "resolved": "claude-opus-5",
+    "served": {
+      "caspar": [
+        "claude-opus-5"
+      ],
+      "melchior": [
+        "claude-opus-5"
+      ],
+      "balthasar": [
+        "claude-opus-5"
+      ]
+    },
+    "unattributed": []
+  }
+}
