@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 1.1.0
+# Date: 2026-09-19
 """Tests for MagiRsTrio, the second TrioExecutor (MS3 Task 3).
 
 Every child process is faked: nothing here launches a binary, reaches the

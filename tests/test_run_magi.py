@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-04-01
+# Version: 1.1.0
+# Date: 2026-09-19
 """Tests for run_magi.py — async Python orchestrator."""
 
 from __future__ import annotations
