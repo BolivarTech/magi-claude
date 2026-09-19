@@ -349,3 +349,97 @@ def test_a_malformed_completions_record_is_skipped_not_fatal():
         {"caspar": [], "melchior": [{"model": "m"}], "balthasar": "?", "x": [_attempt(None)]}
     )
     assert result.capped_agents == []
+
+
+# --------------------------------------------------------------------------
+# MS4 Task 3 -- the warnings: what degrades a gate is shouted (stderr, verbatim)
+# --------------------------------------------------------------------------
+
+
+def _announce(result):
+    from run_magi import announce_magi_rs_telemetry
+
+    announce_magi_rs_telemetry(result)
+
+
+def test_the_capped_warning_names_the_mage_the_model_and_the_cap(capsys):
+    _announce(
+        _result(
+            completions={"caspar": [_attempt("length", model="deepseek-v4-pro:cloud", cap=16384)]}
+        )
+    )
+    err = capsys.readouterr().err
+    assert "caspar" in err and "deepseek-v4-pro:cloud" in err and "16384" in err
+
+
+def test_the_unmeasured_warning_names_every_mage_that_ran_unmeasured(capsys):
+    # Measured in §2.4: ran_unmeasured hit ALL THREE main models.
+    _announce(_result(ran_unmeasured=["balthasar", "caspar", "melchior"]))
+    err = capsys.readouterr().err
+    assert all(name in err for name in ("balthasar", "caspar", "melchior"))
+
+
+def test_the_unmeasured_warning_names_the_remedy_without_opening_the_toml(capsys):
+    # D3: half a warning is no warning -- it says what to set and where, and the
+    # plugin never reads the file it points at (R7).
+    _announce(_result(ran_unmeasured=["caspar"]))
+    err = capsys.readouterr().err
+    assert "strict_context_guard = true" in err and ".magi/magi.toml" in err
+
+
+def test_all_three_unmeasured_raises_the_tone_over_one_or_two(capsys):
+    # D11: with one or two seats unmeasured the guard still bounded the others;
+    # with all three nobody measured anything, and the message says so.
+    _announce(_result(ran_unmeasured=["caspar"]))
+    partial = capsys.readouterr().err
+    _announce(_result(ran_unmeasured=["balthasar", "caspar", "melchior"]))
+    total = capsys.readouterr().err
+    assert "nobody measured" in total.lower() and "nobody measured" not in partial.lower()
+
+
+def test_the_extraction_failure_warning_names_the_count(capsys):
+    _announce(
+        _result(
+            extraction_failures={
+                "balthasar": [
+                    {"attempt": 1, "cause": "invalid-json", "model": "m"},
+                    {"attempt": 2, "cause": "unterminated", "model": "m"},
+                ],
+                "caspar": [],
+                "melchior": [],
+            }
+        )
+    )
+    assert "2" in capsys.readouterr().err
+
+
+def test_an_extraction_failure_cause_nobody_has_seen_is_relayed_verbatim(capsys):
+    # `cause` is an OPEN set on magi-core's side. Never matched against a list.
+    _announce(
+        _result(
+            extraction_failures={
+                "caspar": [{"attempt": 1, "cause": "some-cause-added-upstream", "model": "m"}],
+                "balthasar": [],
+                "melchior": [],
+            }
+        )
+    )
+    assert "some-cause-added-upstream" in capsys.readouterr().err
+
+
+def test_the_degraded_warning_fires_and_says_the_gate_is_invalid(capsys):
+    _announce(_result(degraded=True))
+    err = capsys.readouterr().err.lower()
+    assert "degraded" in err
+    assert "invalid" in err
+
+
+def test_a_clean_run_emits_no_warning_at_all(capsys):
+    _announce(_result())
+    assert capsys.readouterr().err == ""
+
+
+def test_a_malformed_telemetry_value_never_takes_the_announcer_down(capsys):
+    # Fail-soft by contract: it runs right before json.dump.
+    _announce(_result(ran_unmeasured=None, extraction_failures="?", completions=42))
+    capsys.readouterr()
