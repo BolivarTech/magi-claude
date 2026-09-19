@@ -949,3 +949,29 @@ def test_main_writes_the_magi_rs_block_the_unpriced_cost_and_warns(monkeypatch, 
     assert report["model"]["served"] is None  # D8, never the tag used
     err = capsys.readouterr().err
     assert "NOBODY MEASURED" in err
+
+
+def test_main_shouts_invalid_when_a_verdict_fails_the_contract_locally(
+    monkeypatch, tmp_path, capsys
+):
+    # Loop 1 (MS4): the D6/BDD-28 path -- magi-rs says degraded: false, one
+    # verdict breaks the seven-key contract here -> 2 valid seats -> the run is
+    # degraded on THIS side and the gate-INVALID warning must still fire.
+    import sys
+
+    import run_magi
+
+    payload = _payload_with_broken_verdict("caspar")
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(payload)))
+    _hermetic_project(monkeypatch, tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_magi.py", "design", "hello", "--ollama", "--no-status", "--output-dir", str(out)],
+    )
+    run_magi.main()
+    report = json.loads((out / "magi-report.json").read_text(encoding="utf-8"))
+    assert report["degraded"] is True and report["magi_rs"]["degraded"] is False
+    err = capsys.readouterr().err.lower()
+    assert "the gate is invalid" in err

@@ -548,3 +548,54 @@ def test_the_open_weight_cost_is_unpriced_never_zero():
     from run_magi import unpriced_cost
 
     assert unpriced_cost() == {"total_usd": None, "per_agent": {}, "cost_source": "unpriced"}
+
+
+# Loop 1 (MS4) findings.
+
+
+def test_a_run_degraded_locally_by_a_broken_verdict_is_shouted_invalid_too(capsys):
+    # magi-rs delivered three verdicts (its own degraded: false) but one failed
+    # OUR seven-key contract in _validate: the run is degraded on this side,
+    # and the "gate is INVALID" warning must fire for that path as well.
+    from run_magi import announce_magi_rs_telemetry
+
+    announce_magi_rs_telemetry(_result(degraded=False), degraded_locally=True)
+    err = capsys.readouterr().err.lower()
+    assert "degraded" in err and "the gate is invalid" in err
+
+
+def test_the_unmeasured_marker_and_the_tone_share_one_definition(capsys):
+    # A duplicated seat name must not make stderr say "nobody measured" while
+    # the report's marker stays False: one predicate, both sides.
+    from run_magi import announce_magi_rs_telemetry, build_report_block
+
+    dup = _result(ran_unmeasured=["caspar", "caspar", "caspar"])
+    announce_magi_rs_telemetry(dup)
+    assert "nobody measured" not in capsys.readouterr().err.lower()
+    assert build_report_block(dup)["magi_rs"]["gate_ran_on_unverified_context"] is False
+
+
+def test_the_announcer_survives_telemetry_that_raises_on_access(capsys):
+    # The wrapper's own catch branch, executed rather than asserted.
+    from run_magi import announce_magi_rs_telemetry
+
+    class _Hostile(dict):
+        def get(self, *args, **kwargs):
+            raise RuntimeError("telemetry exploded")
+
+    hostile = ConsultResult(agents=[], telemetry=_Hostile(), report="", degraded=False, run_id=None)
+    announce_magi_rs_telemetry(hostile)
+    assert "could not render" in capsys.readouterr().err
+
+
+def test_the_extraction_failure_count_is_the_number_of_records_not_an_attempt_index(capsys):
+    _announce(
+        _result(
+            extraction_failures={
+                "balthasar": [{"attempt": 7, "cause": "invalid-json", "model": "m"}],
+                "caspar": [{"attempt": 9, "cause": "unterminated", "model": "m"}],
+                "melchior": [],
+            }
+        )
+    )
+    assert "2 verdict extraction failure(s)" in capsys.readouterr().err
