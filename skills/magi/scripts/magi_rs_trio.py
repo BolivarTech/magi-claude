@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 1.1.0
+# Date: 2026-09-19
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
 This is the second implementer of :class:`TrioExecutor` -- the one that
@@ -279,13 +279,37 @@ class MagiRsTrio(TrioExecutor):
             ``magi-rs-raw.json`` and the per-mage verdict files.
         """
         del agents_dir, models, max_attempts, timeout  # accepted, unused: see the docstring
-        bootstrap = BinaryBootstrap(self._pin, self._bin_dir)
-        bootstrap.ensure()
-        executable = bootstrap.verify()  # R4: every run, not only on install
-        ProjectPreflight.require_initialised(self._workdir)
+        executable = self.preflight()
         argv = build_argv(executable, self._workdir, self._mode, self._timeout)
         stdout = await self._launch(argv, prompt, self._timeout, on_state, output_dir)
         return self._validate(ConsultResult.from_json(stdout), output_dir)
+
+    def preflight(self) -> str:
+        """Verify the binary and the project, spending nothing.
+
+        Idempotent and cheap, so ``main()`` calls it BEFORE building the
+        payload (the spec's own order: a bundle built for a run that cannot
+        start is pure waste) and :meth:`run_trio` calls it again right before
+        launching (R4: every run, not only on install).
+
+        Returns:
+            The verified executable's path.
+
+        Raises:
+            UnsafeBinDirectoryError, DigestMismatchError, VersionMismatchError,
+            DownloadError, UnsupportedPlatformError: The binary could not be
+                obtained or did not verify. It is NOT executed.
+            ProjectNotInitialisedError: No ``.magi/magi.toml`` under the
+                workdir. Names ``/magi --ollama-init``; never initialises.
+
+        Side effects:
+            May download and install the binary into ``bin_dir``.
+        """
+        bootstrap = BinaryBootstrap(self._pin, self._bin_dir)
+        bootstrap.ensure()
+        executable = bootstrap.verify()
+        ProjectPreflight.require_initialised(self._workdir)
+        return executable
 
     async def _launch(
         self,

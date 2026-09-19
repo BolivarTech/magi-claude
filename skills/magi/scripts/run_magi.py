@@ -73,7 +73,7 @@ from claude_backend import ClaudeBackend  # noqa: E402
 from trio_executor import ClaudeTrio, TrioExecutor  # noqa: E402
 from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
 from magi_rs_pin import Pin  # noqa: E402
-from magi_rs_trio import MagiRsContractError, MagiRsTrio  # noqa: E402
+from magi_rs_trio import MagiRsContractError, MagiRsProcessError, MagiRsTrio  # noqa: E402
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
 from ollama_backend import (  # noqa: E402
     TRANSPORT_CONNECTION_MARKERS,
@@ -2372,6 +2372,39 @@ def main() -> None:
     if args.check_prompts:
         check_prompts(_default_agents_dir())
 
+    # v6: the open-weight executor is chosen and verified HERE, before any input is
+    # read -- see _select_executor. ``executor`` stays None on the Claude path.
+    executor: TrioExecutor | None = None
+    if args.ollama:
+        # v6: the open-weight path is executed by magi-rs (R18). Nothing of the
+        # v5 subsystem runs -- no plugin TOML, no preflight of our own: the trio,
+        # its rotation and its context guard are declared in .magi/magi.toml and
+        # owned by magi-rs (R7). ``select_backend`` is the Claude path's only.
+        backend, agent_models, rotation = None, None, None
+        # R12: --timeout is BOTH the wall ceiling and the source magi-rs derives
+        # each mage's attempt budget from; the default is the measured 1800 and
+        # a low explicit value is honoured with a warning, never silently.
+        try:
+            resolved_timeout, timeout_warning = resolve_magi_rs_timeout(args.timeout)
+        except MagiRsContractError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if timeout_warning is not None:
+            print(f"[!] WARNING: {timeout_warning}", file=sys.stderr)
+        try:
+            executor = _select_executor(args, resolved_timeout)
+            # Bootstrap + project preflight BEFORE the payload is built (spec
+            # §3.2): both are fail-closed and free; a bundle built for a run
+            # that cannot start is pure waste.
+            executor.preflight()
+        except Exception as exc:  # noqa: BLE001 -- every bootstrap/preflight error is fatal here
+            # Fail-closed siblings of Exception (PluginRootError, PinFormatError,
+            # the bootstrap's, ProjectNotInitialisedError): at the CLI boundary
+            # each is a [FATAL] with its own message, never a traceback, exactly
+            # like --ollama-init.
+            print(f"[FATAL] {exc}", file=sys.stderr)
+            sys.exit(1)
+
     try:
         input_content, input_label = _load_input_content(args.input)
     except ValueError as exc:
@@ -2438,32 +2471,7 @@ def main() -> None:
         print(f"[FATAL] {exc}", file=sys.stderr)
         sys.exit(1)
 
-    if args.ollama:
-        # v6: the open-weight path is executed by magi-rs (R18). Nothing of the
-        # v5 subsystem runs -- no plugin TOML, no preflight of our own: the trio,
-        # its rotation and its context guard are declared in .magi/magi.toml and
-        # owned by magi-rs (R7). ``select_backend`` is the Claude path's only.
-        backend, agent_models, rotation = None, None, None
-        # R12: --timeout is BOTH the wall ceiling and the source magi-rs derives
-        # each mage's attempt budget from; the default is the measured 1800 and
-        # a low explicit value is honoured with a warning, never silently.
-        try:
-            resolved_timeout, timeout_warning = resolve_magi_rs_timeout(args.timeout)
-        except MagiRsContractError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(1)
-        if timeout_warning is not None:
-            print(f"[!] WARNING: {timeout_warning}", file=sys.stderr)
-        try:
-            executor = _select_executor(args, resolved_timeout)
-        except Exception as exc:  # noqa: BLE001 -- every plugin-root/pin error is fatal here
-            # Fail-closed siblings of Exception (PluginRootError, PinFormatError):
-            # at the CLI boundary each is a [FATAL] with its own message, never a
-            # traceback, exactly like --ollama-init.
-            print(f"[FATAL] {exc}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        executor = None
+    if not args.ollama:
         try:
             # select_backend is async now (T9): the Ollama preflight MEASURES the
             # payload. Its own asyncio.run runs here, BEFORE the output dir is created,
@@ -2539,7 +2547,7 @@ def main() -> None:
                 max_attempts=args.max_attempts,
             )
         )
-    except BaseException:
+    except BaseException as exc:
         if is_temp_dir:
             try:
                 shutil.rmtree(output_dir)
@@ -2548,6 +2556,12 @@ def main() -> None:
                     f"WARNING: Failed to clean up {output_dir}: {cleanup_exc}",
                     file=sys.stderr,
                 )
+        if isinstance(exc, (MagiRsProcessError, MagiRsContractError)):
+            # BDD-14a/14b/14d: the trio never formed (the child died, timed out,
+            # or answered off-contract). No report, the cause relayed, exit 1 --
+            # and no traceback, so the operator can tell this from a plugin bug.
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
         raise
 
     # A2 + R8: apply the diff-grounded finding guard to each agent BEFORE the
