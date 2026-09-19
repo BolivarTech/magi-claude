@@ -595,10 +595,23 @@ def _main_with_ollama(monkeypatch, tmp_path, *extra_argv):
     return exc.value.code
 
 
+def _hermetic_project(monkeypatch, tmp_path):
+    """An initialised project under tmp_path with the bootstrap stubbed.
+
+    Loop 1 caught two tests reaching the REAL bin/ and .magi/ of this checkout
+    (they passed only because SMOKE #1 had left both behind): every main()-level
+    test that must get past the preflight goes through here instead.
+    """
+    _stub_bootstrap(monkeypatch)
+    _initialise(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+
 def test_a_low_timeout_under_ollama_reaches_the_run_with_a_stderr_warning(
     monkeypatch, tmp_path, capsys
 ):
     # R12: honoured, never silently -- the warning names the measured-healthy floor.
+    _hermetic_project(monkeypatch, tmp_path)
     assert _main_with_ollama(monkeypatch, tmp_path, "--timeout", "600") == 0
     err = capsys.readouterr().err
     assert "[!] WARNING:" in err and "--timeout 600" in err
@@ -690,9 +703,7 @@ def test_a_failed_magi_rs_run_is_an_ERROR_line_not_a_traceback(
     # operator can tell "the trio never formed" from "the plugin broke".
     import run_magi
 
-    _stub_bootstrap(monkeypatch)
-    _initialise(tmp_path)
-    monkeypatch.chdir(tmp_path)
+    _hermetic_project(monkeypatch, tmp_path)
 
     async def _dies(*args, **kwargs):
         raise failure
@@ -709,3 +720,34 @@ def test_a_failed_magi_rs_run_is_an_ERROR_line_not_a_traceback(
     err = capsys.readouterr().err
     assert f"ERROR: {failure}" in err and "Traceback" not in err
     assert not list(tmp_path.glob("**/magi-report.json"))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [DigestMismatchError("digest differs"), ProjectNotInitialisedError("gone")],
+    ids=["digest", "deinitialised"],
+)
+def test_a_preflight_failure_inside_the_run_is_FATAL_not_a_traceback(
+    monkeypatch, tmp_path, capsys, failure
+):
+    # Loop 1: run_trio re-runs the preflight right before launching (R4). If
+    # the binary or the project changed between the two checks, that failure
+    # must reach the operator the same way the first one does.
+    import sys
+
+    import run_magi
+
+    _hermetic_project(monkeypatch, tmp_path)
+
+    async def _dies(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(run_magi, "run_orchestrator", _dies)
+    monkeypatch.setattr(run_magi, "_resolve_project_root", lambda: str(tmp_path))
+    monkeypatch.setattr(run_magi, "project_run_root", lambda root: str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert f"[FATAL] {failure}" in err and "Traceback" not in err

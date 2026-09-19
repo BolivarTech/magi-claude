@@ -5298,6 +5298,9 @@ def test_ollama_skips_claude_which_gate(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
     monkeypatch.setattr(run_magi.shutil, "which", lambda _: None)  # claude absent
+    # Hermetic: never the real bin/ nor this checkout's .magi/ (Loop 1 finding).
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(MagiRsTrio, "preflight", lambda self: "magi-rs")
 
     captured: dict[str, object] = {}
 
