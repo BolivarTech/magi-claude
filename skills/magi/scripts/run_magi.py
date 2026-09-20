@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.10.2
+# Version: 2.10.3
 # Date: 2026-09-19
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -291,7 +291,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # 900s default (MS3, R6); collapsing this to a hardcoded 900 would make
         # `flag is not None` always true and the TOML value dead on arrival.
         default=None,
-        help="Per-agent timeout in seconds, >= 1 (flag > TOML timeout > 900)",
+        help=(
+            "Per-agent timeout in seconds, >= 1. Claude path: default 900. With --ollama: "
+            "default 1800, and magi-rs also derives each mage's per-attempt budget from it."
+        ),
     )
     parser.add_argument("--output-dir", help="Directory for agent outputs")
     parser.add_argument(
@@ -392,12 +395,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ollama",
         action="store_true",
-        help="Use the OpenAI-compatible Ollama backend instead of `claude -p`.",
+        help=(
+            "Run the open-weight trio through magi-rs (one model per mage, from "
+            ".magi/magi.toml) instead of `claude -p`. Mutually exclusive with --model."
+        ),
     )
     parser.add_argument(
         "--ollama-init",
         action="store_true",
-        help="Scaffold ./.claude/magi-ollama.toml from defaults and exit.",
+        help="Initialise this project for magi-rs (`magi-rs init -w <cwd>`, creates .magi/) and exit.",
     )
     # ``model_source`` is declared here with its siblings, not only assigned in
     # the body below: a hand-built Namespace (tests, embedders) would otherwise
@@ -422,8 +428,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("the following arguments are required: mode, input")
     if args.ollama and args.model is not None:
         parser.error(
-            "--model does not apply with --ollama; per-mage models are "
-            "configured in magi-ollama.toml / MAGI_OLLAMA_MODEL_*."
+            "--model does not apply with --ollama; the trio is declared in .magi/magi.toml "
+            "(run --ollama-init once per project)."
         )
     if args.ollama and args.max_attempts is not None:
         # R13: with --ollama the TOML wins. It used to win SILENTLY, which is a polite
