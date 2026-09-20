@@ -179,3 +179,154 @@ def test_a_heading_inside_a_code_fence_does_not_open_a_section():
     sections = split_sections(text)
     assert [s["name"] for s in sections] == ["file.py", "other.py"]
     assert "# Author: someone" in sections[0]["body"]
+
+
+# Loop 1 (MS4b) findings.
+
+
+def test_a_third_level_heading_opens_a_section_because_the_enrichment_uses_it():
+    # review_context.py nests every touched file at `### path` under two `##`
+    # wrappers: with `##` only, a real code-review bundle was at most three
+    # sections, each far larger than the headroom -> refused, never split.
+    from run_magi import split_sections
+
+    text = "## Touched files (full content)\n\n### a.py\n```\ncode a\n```\n### b.py\n```\ncode b\n```\n"
+    names = [s["name"] for s in split_sections(text)]
+    assert names == ["Touched files (full content)", "a.py", "b.py"]
+
+
+def test_a_raw_diff_is_split_at_file_boundaries():
+    # The code-review payload before enrichment is a git diff: no headings at
+    # all. Each `diff --git` line opens a section named after the file.
+    from run_magi import split_sections
+
+    text = (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-# old\n+# new\n"
+        "diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n+line\n"
+    )
+    sections = split_sections(text)
+    assert [s["name"] for s in sections] == ["diff: x.py", "diff: y.py"]
+    assert "".join(s["body"] for s in sections) == text
+
+
+def test_a_diff_inside_a_diff_fence_is_split_per_file_with_the_fence_reopened():
+    # The project's own gate bundles embed `git diff` in a ```diff fence. A
+    # fence is opaque to headings, but a per-file split INSIDE it is safe when
+    # each piece closes and reopens the fence, so every segment still parses.
+    from run_magi import split_sections
+
+    text = (
+        "## The diff\n\n```diff\ndiff --git a/x.py b/x.py\n+x\ndiff --git a/y.py b/y.py\n+y\n```\n"
+        "## After\n\ntext\n"
+    )
+    sections = split_sections(text)
+    assert [s["name"] for s in sections] == ["The diff", "diff: x.py", "diff: y.py", "After"]
+    assert sections[1]["body"].startswith("```diff\n")
+    assert sections[1]["body"].rstrip().endswith("```")
+    assert sections[2]["body"].startswith("```diff\ndiff --git a/y.py")
+    assert sections[0]["body"] == "## The diff\n\n"
+
+
+def test_duplicate_section_names_are_made_unique_instead_of_collapsing():
+    from run_magi import split_sections
+
+    text = "## same\n\na\n\n## same\n\nb\n"
+    sections = split_sections(text)
+    assert [s["name"] for s in sections] == ["same", "same (2)"]
+    assert "b" in sections[1]["body"]
+
+
+def test_the_defines_line_is_honoured_only_right_under_the_heading():
+    from run_magi import split_sections
+
+    text = "## s\nbody\n<!-- defines: Late -->\n\n## t\n<!-- defines: Early -->\nbody\n"
+    sections = split_sections(text)
+    assert sections[0]["defines"] == []
+    assert sections[1]["defines"] == ["Early"]
+
+
+def test_a_reference_matches_whole_words_only():
+    # `Pin` must not match `Pinout` or `opinion`: a false reference buys a
+    # real, paid integration run for nothing.
+    from bundle_segmenter import BundleSegmenter
+
+    sections = [
+        {"name": "owner", "body": "x" * 100_000 + " class Pin", "defines": ["Pin"]},
+        {"name": "near", "body": "x" * 100_000 + " opinion Pinout", "defines": []},
+        {"name": "user", "body": "x" * 100_000 + " uses Pin here", "defines": []},
+    ]
+    plan = BundleSegmenter.plan(sections, _CEILING)
+    by_name = {name: seg for seg in plan.segments for name in seg.section_names}
+    assert by_name["near"].references == []
+    assert by_name["user"].references == ["Pin"]
+
+
+def test_a_segment_whose_run_raises_is_tabled_and_the_rest_still_run(monkeypatch, tmp_path):
+    # §6.2.5: one failure does not abort the run -- it is tabled as it came
+    # back and the next segment runs, so the report is complete, not partial.
+    import run_magi
+    from magi_rs_trio import MagiRsProcessError
+
+    seen = []
+
+    def _segment(order, *a, **k):
+        seen.append(order)
+        if order == 2:
+            raise MagiRsProcessError("magi-rs exited 2: boom")
+        return _report()
+
+    monkeypatch.setattr(run_magi, "_evaluate_segment", _segment)
+    report = run_magi.run_segmented(_plan_with(3), _sections(3), _args(), str(tmp_path), "a", 1)
+    assert seen == [1, 2, 3]
+    results = report["segmentation"]["results"]
+    assert results[1]["consensus"].startswith("FAILED") and "boom" in results[1]["consensus"]
+    assert report["segmentation"]["approved"] is False
+    assert results[1]["consensus"] in report["segmentation"]["failing"]
+
+
+def test_a_fail_closed_error_in_a_segment_aborts_the_whole_run(monkeypatch, tmp_path):
+    # A digest that does not verify fails identically for every later segment:
+    # this one is a genuine whole-run abort, not a segment's verdict.
+    import run_magi
+    from magi_rs_bootstrap import DigestMismatchError
+
+    def _segment(order, *a, **k):
+        raise DigestMismatchError("digest differs")
+
+    monkeypatch.setattr(run_magi, "_evaluate_segment", _segment)
+    with pytest.raises(DigestMismatchError):
+        run_magi.run_segmented(_plan_with(2), _sections(2), _args(), str(tmp_path), "a", 1)
+
+
+def test_the_integration_segment_is_planned_against_the_ceiling_too(monkeypatch, tmp_path):
+    # The extra segment gets the same size guarantee as every other one: too
+    # large to fit, it is tabled as not run and sinks the gate -- never sent
+    # to be rejected by the transport.
+    import run_magi
+
+    big_line = "uses Name0 " + "y" * 200_000
+    sections = [
+        {"name": "s0", "body": "class Name0", "defines": ["Name0"]},
+        {"name": "s1", "body": big_line, "defines": []},
+    ]
+    plan = _plan_with(2, references=["Name0"])
+    monkeypatch.setattr(run_magi, "_evaluate_segment", lambda *a, **k: _report())
+    report = run_magi.run_segmented(plan, sections, _args(), str(tmp_path), "a", 1)
+    results = report["segmentation"]["results"]
+    assert results[-1]["section_names"] == ["(integration)"]
+    assert results[-1]["consensus"].startswith("NOT RUN")
+    assert report["segmentation"]["approved"] is False
+
+
+def test_the_map_records_both_ceilings_and_the_wrapper(monkeypatch, tmp_path):
+    # Two numbers both called "the ceiling" confused a reader: the map names
+    # the transport ceiling, the wrapper charged against it, and what is left.
+    import run_magi
+
+    monkeypatch.setattr(run_magi, "_evaluate_segment", lambda *a, **k: _report())
+    report = run_magi.run_segmented(
+        _plan_with(2), _sections(2), _args(), str(tmp_path), "a", 1, wrapper_bytes=127
+    )
+    seg = report["segmentation"]
+    assert seg["transport_ceiling_bytes"] == _CEILING and seg["wrapper_bytes"] == 127
+    assert seg["ceiling_bytes"] == _CEILING  # what the plan itself was computed against
