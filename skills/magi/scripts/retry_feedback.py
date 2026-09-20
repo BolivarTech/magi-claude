@@ -1,18 +1,17 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-07-13
+# Version: 1.1.0
+# Date: 2026-09-20
 """The retry's corrective feedback, and its BOUND -- the SINGLE source (MS2, R12).
 
-This module exists for one very concrete reason: the feedback block's bound is needed by
-**two** consumers that cannot import each other.
+This module exists for one very concrete reason: the feedback block's bound must have
+exactly ONE home. ``run_magi`` uses the templates to **build** the retry prompt, and until
+6.1.0 the plugin's own context guard imported the derived bound to **reserve window** for
+it (R5b of MS1). That guard now lives on the magi-rs side; the bound stays here as the
+documented ceiling of the block, and the suite pins every template under it.
 
-* ``run_magi`` uses it to **build** the retry prompt.
-* ``model_context`` uses it to **reserve window** in the context guard (R5b of MS1).
-
-Holding it twice --hardcoded in one, derived in the other-- is a time bomb: if someone
-lengthens a template, the derived value rises and the guard **keeps reserving the old one**
--> under-reservation -> **silent truncation**, which is exactly the failure R5b exists to
-prevent. A single source makes that **impossible**.
+Holding it twice --hardcoded in one place, derived in another-- is a time bomb: if someone
+lengthens a template, the derived value rises and a copied one **keeps the old value**
+-> under-reservation -> **silent truncation**. A single source makes that **impossible**.
 
 The bound is **DERIVED** from the real templates. In MS1 this constant was **wrong three
 times** (1024, 1536, 2048), always by assuming a comfortable conversion factor or a fixed
@@ -133,8 +132,8 @@ FEEDBACK_TEMPLATES: dict[str, str] = {
 
 #: An emoji is 4 UTF-8 bytes, and a byte-level BPE that fails to merge them emits
 #: one token per byte -- 4 tokens/char is the TRUE worst case, not 1 and not 3. This
-#: exact ratio was guessed wrong twice in MS1 (see ``model_context.MAX_ERROR_CHARS``'s
-#: docstring) by assuming a comfortable ratio instead of the worst one that exists.
+#: exact ratio was guessed wrong twice in MS1 by assuming a comfortable ratio instead
+#: of the worst one that exists.
 WORST_TOKENS_PER_CHAR = 4
 
 #: DERIVED, not hardcoded: the largest fixed portion across all seven retry-feedback
