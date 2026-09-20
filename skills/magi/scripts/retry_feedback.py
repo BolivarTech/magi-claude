@@ -1,17 +1,13 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
+# Version: 2.0.0
 # Date: 2026-09-20
 """The retry's corrective feedback, and its BOUND -- the SINGLE source (MS2, R12).
 
-This module exists for one very concrete reason: the feedback block's bound must have
-exactly ONE home. ``run_magi`` uses the templates to **build** the retry prompt, and until
-6.1.0 the plugin's own context guard imported the derived bound to **reserve window** for
-it (R5b of MS1). That guard now lives on the magi-rs side; the bound stays here as the
-documented ceiling of the block, and the suite pins every template under it.
-
-Holding it twice --hardcoded in one place, derived in another-- is a time bomb: if someone
-lengthens a template, the derived value rises and a copied one **keeps the old value**
--> under-reservation -> **silent truncation**. A single source makes that **impossible**.
+This module is the single home of the seven corrective templates and of the one bound the
+plugin still enforces on them, ``MAX_ERROR_CHARS`` (the truncated error detail). ``run_magi``
+and ``trio_executor.ClaudeTrio`` build the retry prompt from here; nothing else reads it.
+Until 6.1.0 the plugin's own context guard also derived a token ceiling from these templates
+to reserve window for the block; that guard, and the ceiling, went to the magi-rs side.
 
 The bound is **DERIVED** from the real templates. In MS1 this constant was **wrong three
 times** (1024, 1536, 2048), always by assuming a comfortable conversion factor or a fixed
@@ -129,23 +125,6 @@ FEEDBACK_TEMPLATES: dict[str, str] = {
         "any key, do not truncate, do not emit anything outside the JSON object.",
     ),
 }
-
-#: An emoji is 4 UTF-8 bytes, and a byte-level BPE that fails to merge them emits
-#: one token per byte -- 4 tokens/char is the TRUE worst case, not 1 and not 3. This
-#: exact ratio was guessed wrong twice in MS1 by assuming a comfortable ratio instead
-#: of the worst one that exists.
-WORST_TOKENS_PER_CHAR = 4
-
-#: DERIVED, not hardcoded: the largest fixed portion across all seven retry-feedback
-#: templates, plus the worst-case cost of the truncated error detail. A bound that
-#: must be updated by hand every time a template is added or edited is a bound that
-#: WILL be forgotten -- this exact constant was wrong three times in MS1 for exactly
-#: that reason. Deriving it from ``FEEDBACK_TEMPLATES`` makes drift impossible: add
-#: an eighth cause and this recomputes on its own.
-MAX_RETRY_FEEDBACK_TOKENS = (
-    max(len(t.encode("utf-8")) for t in FEEDBACK_TEMPLATES.values())
-    + MAX_ERROR_CHARS * WORST_TOKENS_PER_CHAR
-)
 
 
 def retry_feedback_cause(error: ValidationError | json.JSONDecodeError) -> str:

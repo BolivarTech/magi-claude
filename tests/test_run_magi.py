@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-09-19
+# Version: 2.0.0
+# Date: 2026-09-20
 """Tests for run_magi.py — async Python orchestrator."""
 
 from __future__ import annotations
@@ -1192,93 +1192,8 @@ class TestTrackedLaunchStatusUpdates:
         assert "caspar" in result.get("failed_agents", [])
 
 
-class _FakeTimeoutProc:
-    """Fake asyncio subprocess for timeout-path testing.
-
-    ``communicate()`` hangs indefinitely so ``asyncio.wait_for`` fires a
-    ``TimeoutError``. ``kill()`` and ``wait()`` record call order so tests
-    can verify zombie reaping. ``proc.stderr`` is a prefilled
-    :class:`asyncio.StreamReader` so the production code can drain buffered
-    diagnostics after killing the process.
-    """
-
-    def __init__(
-        self,
-        stdout_bytes: bytes = b"",
-        stderr_bytes: bytes = b"",
-    ) -> None:
-        self.returncode: int | None = None
-        self.kill_called = False
-        self.wait_called = False
-        self.call_order: list[str] = []
-        self.stdout = asyncio.StreamReader()
-        self.stdout.feed_data(stdout_bytes)
-        self.stdout.feed_eof()
-        self.stderr = asyncio.StreamReader()
-        self.stderr.feed_data(stderr_bytes)
-        self.stderr.feed_eof()
-        self.stdin = None
-        # Fake pid so the Windows tree-kill path in ``_reap_and_drain_stderr``
-        # has something to pass to ``taskkill``. Test fixtures monkeypatch
-        # ``subprocess.run`` so the call is inert.
-        self.pid = 999_000
-
-    async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
-        # Hang so wait_for raises TimeoutError.
-        await asyncio.sleep(3600)
-        return b"", b""
-
-    def kill(self) -> None:
-        self.kill_called = True
-        self.call_order.append("kill")
-        self.returncode = -9
-
-    async def wait(self) -> int | None:
-        self.wait_called = True
-        self.call_order.append("wait")
-        return self.returncode
-
-
-# MS2: the verdict goes between line-anchored markers. A mock with NO markers no longer
-# gets past the parser -- which is exactly the point (R15): a bare verdict is not accepted.
-_FAKE_VERDICT_OBJECT = (
-    '{"agent": "melchior", "verdict": "approve", "confidence": 0.8, '
-    '"summary": "ok", "reasoning": "looks fine", "findings": [], '
-    '"recommendation": "merge"}'
-)
-_FAKE_AGENT_JSON = f"<MAGI_VERDICT>\n{_FAKE_VERDICT_OBJECT}\n</MAGI_VERDICT>"
-
 # The ``claude -p --output-format json`` envelope wraps the agent's TEXT as a string
 # under ``result`` -- and that text, since MS2, is the delimited block.
-_FAKE_CLAUDE_ENVELOPE = json.dumps({"result": _FAKE_AGENT_JSON}).encode("utf-8")
-
-
-class _FakeSuccessProc:
-    """Fake asyncio subprocess that simulates a successful agent run.
-
-    Used by regression tests that need the full happy path through
-    ``launch_agent`` without spawning the real ``claude`` CLI.
-    """
-
-    def __init__(
-        self,
-        stdout_bytes: bytes = _FAKE_CLAUDE_ENVELOPE,
-        stderr_bytes: bytes = b"some stderr",
-    ) -> None:
-        self._stdout = stdout_bytes
-        self._stderr = stderr_bytes
-        self.returncode: int | None = None
-        self.stdin = None
-
-    async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
-        self.returncode = 0
-        return self._stdout, self._stderr
-
-    def kill(self) -> None:  # pragma: no cover — never called on success path
-        pass
-
-    async def wait(self) -> int | None:  # pragma: no cover
-        return self.returncode
 
 
 class TestTaskkillTimeoutBudget:
@@ -1872,7 +1787,6 @@ class TestSingleShotRetry:
         with a full 3-agent consensus, no ``degraded`` flag set.
         """
         from run_magi import run_orchestrator
-        from validate import ValidationError
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
@@ -1903,7 +1817,6 @@ class TestSingleShotRetry:
     async def test_retry_also_fails_degraded_mode(self, tmp_path):
         """Both attempts raise ValidationError → agent dropped, degraded=True."""
         from run_magi import run_orchestrator
-        from validate import ValidationError
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
@@ -1939,7 +1852,6 @@ class TestSingleShotRetry:
         consensus floor.
         """
         from run_magi import run_orchestrator
-        from validate import ValidationError
 
         async def mock_launch(
             agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
@@ -2020,7 +1932,6 @@ class TestSingleShotRetry:
         the docs do not promise.
         """
         from run_magi import run_orchestrator
-        from validate import ValidationError
 
         captured_timeouts: dict[str, list[int]] = {
             "melchior": [],
@@ -2060,7 +1971,6 @@ class TestSingleShotRetry:
         text must be substring-present.
         """
         from run_magi import run_orchestrator
-        from validate import ValidationError
 
         error_msg = "Agent output missing keys: ['recommendation']"
         captured_prompts: dict[str, list[str]] = {
@@ -2108,7 +2018,6 @@ class TestSingleShotRetry:
         Other agents must not see a ``retrying`` update.
         """
         from run_magi import run_orchestrator
-        from validate import ValidationError
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
         display_events: list[tuple[str, str]] = []
@@ -2355,7 +2264,6 @@ class TestRetryTelemetry:
     async def test_report_lists_retried_agent_when_retry_succeeds(self, tmp_path):
         """Retry-recovered: agent in ``agents`` and in ``retried_agents``."""
         from run_magi import run_orchestrator
-        from validate import ValidationError
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
@@ -2386,7 +2294,6 @@ class TestRetryTelemetry:
     async def test_report_lists_retried_agent_when_retry_also_fails(self, tmp_path):
         """Retry-also-failed: agent in retried_agents AND failed_agents."""
         from run_magi import run_orchestrator
-        from validate import ValidationError
 
         async def mock_launch(
             agent_name, agents_dir, prompt, output_dir, timeout, model="opus", backend=None
@@ -2442,7 +2349,6 @@ class TestRetryTelemetry:
     async def test_report_lists_multiple_retried_agents_sorted(self, tmp_path):
         """Two retries (one recovers, one fails) → both listed, sorted."""
         from run_magi import run_orchestrator
-        from validate import ValidationError
 
         call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
 
@@ -4749,11 +4655,6 @@ def test_non_ollama_still_resolves_default_model():
     assert args.model == "opus"  # unchanged behavior
 
 
-# ---------------------------------------------------------------------------
-# Task 9: select_backend factory + back-compat run_orchestrator (BDD-1,2,3)
-# ---------------------------------------------------------------------------
-
-
 def test_orchestrator_passes_per_agent_model(monkeypatch, tmp_path):
     """run_orchestrator threads per-agent models through to the EXECUTOR.
 
@@ -4900,44 +4801,11 @@ def test_retry_feedback_truncates_a_huge_error():
     # BDD-45: the error is bounded so the retry prompt cannot grow without limit.
     from retry_feedback import MAX_ERROR_CHARS
     from run_magi import _build_retry_prompt
-    from validate import ValidationError
 
     err = ValidationError("x" * 10_000)
     out = _build_retry_prompt("PROMPT", err)
     assert len(out) < len("PROMPT") + MAX_ERROR_CHARS + 600
     assert "..." in out
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        MissingVerdictMarkers("\U0001f525" * 10_000),
-        UnterminatedVerdictBlock("\U0001f525" * 10_000),
-        AmbiguousVerdictMarkers("\U0001f525" * 10_000),
-        EchoedExampleRejected("\U0001f525" * 10_000),
-        AgentIdentityError("\U0001f525" * 10_000),
-        ValidationError("\U0001f525" * 10_000),
-        json.JSONDecodeError("\U0001f525" * 10_000, "{", 0),
-    ],
-    ids=["missing", "unterminated", "ambiguous", "echoed", "identity", "schema", "invalid_json"],
-)
-def test_the_feedback_bound_holds_for_EVERY_cause(error):
-    """A bound the code does not impose is not a bound -- and it must hold for ALL SEVEN.
-
-    Truncating CHARS does not bound TOKENS: an emoji is 4 UTF-8 bytes, and a byte-level BPE
-    emits up to one token per byte. This was pinned for one template only (the schema one) while
-    the bound is DERIVED from the longest of seven -- so the six that were never exercised were
-    trusted, not tested (MAGI gate, Melchior). Each cause selects a different template, and each
-    template is a different length: the one that is longest today is not the one that will be
-    longest tomorrow.
-    """
-    from retry_feedback import MAX_RETRY_FEEDBACK_TOKENS
-    from run_magi import _build_retry_prompt
-
-    block = _build_retry_prompt("", error)
-
-    # UTF-8 byte count is a strict upper bound on tokens for any byte-level BPE.
-    assert len(block.encode("utf-8")) <= MAX_RETRY_FEEDBACK_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -4976,26 +4844,6 @@ class TestAttemptsPerModel:
         assert calls["caspar"] == 1, "v4 contract: transport failures are NOT retried"
         assert result["degraded"] is True
         assert len(result["agents"]) == 2
-
-
-# ---------------------------------------------------------------------------
-# Task 10: rotation propose-verify-commit (R5/R8/R24) + failure routing (R13)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Task 11: failure semantics (R5a) + fast-fail on a dead endpoint (R15)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Task 12: fault injection on the async paths (the paths a happy test never walks)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Task 5b: model-digest uniqueness enforced at the rotation COMMIT (R5a/R5b/R5c)
-# ---------------------------------------------------------------------------
 
 
 def test_parse_args_recognizes_the_out_flag():
@@ -5045,11 +4893,6 @@ def test_write_report_file_cleans_temp_and_raises_on_failure(tmp_path, monkeypat
 
 
 # ---------------------------------------------------------------------------
-# MS2 -- anti-echo canary (R6), agent identity (R10), classification (R14)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Task 7 (MS2): cause-specific retry feedback + a DERIVED token bound.
 # ---------------------------------------------------------------------------
 
@@ -5082,7 +4925,7 @@ def test_missing_markers_feedback_names_the_markers_not_the_ambiguity_wording():
     :class:`AmbiguousVerdictMarkers`. Telling it the wrong thing wastes the one
     retry it gets on a diagnosis that does not apply, and the mage dies.
     """
-    from verdict_markers import AmbiguousVerdictMarkers, MissingVerdictMarkers
+    from verdict_markers import MissingVerdictMarkers
 
     from run_magi import _build_retry_prompt
 
@@ -5099,47 +4942,12 @@ def test_missing_markers_feedback_names_the_markers_not_the_ambiguity_wording():
 
 def test_ambiguous_markers_feedback_asks_for_exactly_one_block():
     """AmbiguousVerdictMarkers must not be answered with the missing-markers wording."""
-    from verdict_markers import AmbiguousVerdictMarkers
 
     from run_magi import _build_retry_prompt
 
     out = _build_retry_prompt("PROMPT", AmbiguousVerdictMarkers("found 2 open and 1 close markers"))
     assert "exactly one" in out.lower()
     assert "did not include the required verdict markers" not in out
-
-
-@pytest.mark.parametrize(
-    "cause",
-    [
-        "missing_markers",
-        "unterminated_block",
-        "ambiguous_markers",
-        "echoed_example",
-        "agent_identity",
-        "invalid_json",
-        "schema",
-    ],
-)
-def test_retry_feedback_bound_holds_for_every_template_under_NON_ASCII_errors(cause):
-    """A cota the CODE does not enforce is not a cota (MS1, three wrong guesses).
-
-    Exercises the TRUE worst case for every one of the seven templates: a
-    10,000-char error made entirely of an emoji (4 UTF-8 bytes each, and a
-    byte-level BPE can emit up to one token per byte). The UTF-8 byte count of
-    the resulting block is a strict upper bound on tokens for any such BPE, so
-    it must never exceed the DERIVED ``MAX_RETRY_FEEDBACK_TOKENS``.
-    """
-    from retry_feedback import (
-        FEEDBACK_TEMPLATES,
-        MAX_ERROR_CHARS,
-        MAX_RETRY_FEEDBACK_TOKENS,
-    )
-
-    huge_non_ascii_error = "\U0001f525" * 10_000
-    detail = huge_non_ascii_error[:MAX_ERROR_CHARS] + "..."
-    block = FEEDBACK_TEMPLATES[cause].format(error=detail)
-    worst_case_tokens = len(block.encode("utf-8"))
-    assert worst_case_tokens <= MAX_RETRY_FEEDBACK_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -5166,7 +4974,7 @@ class TestMaxAttemptsFlag:
     def test_out_of_range_is_rejected_fail_closed(self, bad):
         """With no upper bound, a ``--max-attempts 1000`` (one zero too many) is **a
         thousand calls**: expensive on Ollama (`:cloud` is paid) and **hundreds of dollars
-        on Claude**. The project already validates the TOML's integers this way."""
+        on Claude**. The bounds live in ``validate`` so no caller can disagree."""
         import run_magi
 
         with pytest.raises(SystemExit):
@@ -5311,11 +5119,7 @@ class TestAdherenceTelemetry:
 
         import run_magi
         from verdict_markers import (
-            AgentIdentityError,
-            AmbiguousVerdictMarkers,
-            EchoedExampleRejected,
             MissingVerdictMarkers,
-            UnterminatedVerdictBlock,
         )
 
         tally: dict[str, Counter[str]] = defaultdict(Counter)
@@ -5440,9 +5244,9 @@ def test_timeout_precedence_flag_over_default():
     assert _resolve_timeout(None) == 900.0
 
 
-def test_timeout_flag_defaults_to_none_so_toml_is_consulted():
-    """argparse must NOT hardcode 900, or the TOML timeout is dead (the flag would
-    never be None). Parse WITHOUT --timeout (gate CP2 plan loop 3, Balthasar)."""
+def test_timeout_flag_defaults_to_none_so_the_open_weight_default_applies():
+    """argparse must NOT hardcode 900: magi-rs's 1800 default and its low-value warning
+    both need to tell *not passed* from *passed*. Parse WITHOUT --timeout."""
     from run_magi import parse_args
 
     args = parse_args(["design", "in.md", "--ollama"])
@@ -5450,8 +5254,7 @@ def test_timeout_flag_defaults_to_none_so_toml_is_consulted():
 
 
 def test_timeout_flag_zero_or_negative_is_rejected_at_parse():
-    """The FLAG must be floored too, not just the TOML (gate CP2 plan loop 5,
-    Caspar)."""
+    """The FLAG is floored at the input boundary (gate CP2 plan loop 5, Caspar)."""
     from run_magi import parse_args
 
     for bad in ("0", "-1"):

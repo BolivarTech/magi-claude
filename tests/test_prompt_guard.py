@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-07-13
+# Version: 1.1.0
+# Date: 2026-09-20
 """Suite for the start-up guard of the prompt contract (R9, MS2).
 
 It covers what the anchoring test **cannot see**: the **user's installation**. The

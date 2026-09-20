@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.3.0
+# Version: 1.3.1
 # Date: 2026-09-20
 """MAGI model registry.
 
@@ -75,10 +75,11 @@ MODE_DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(_MODE_DEFAULTS_MUTABLE
 class ModelSpec:
     """A model tag plus the lineage (originating lab) it belongs to.
 
-    The lineage is DECLARED by the caller, never inferred from the tag: prefix
-    inference is fragile for custom/self-hosted tags, and a silently wrong
-    lineage would break a "one lineage, one mage" invariant with no error
-    signal. On the Claude path every seat carries ``"anthropic"``.
+    The lineage is DECLARED by the caller, never inferred from the tag. On the
+    Claude path, the only one that builds these since 6.1.0, every seat carries
+    ``"anthropic"`` and nothing consults the field: the "one lineage, one mage"
+    invariant it once fed is enforced on the magi-rs side now. It is carried,
+    not read.
 
     Attributes:
         model: Model identifier, e.g. a short name such as ``"opus"``.

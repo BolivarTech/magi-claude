@@ -33,8 +33,9 @@ verified like any download.
 
 One build is not in the pin: `linux-x86_64-compat`, the variant `magi-rs` publishes for
 older glibc. On such a host the bootstrap downloads the regular `linux-x86_64` asset. The
-escape hatch does not help either: the digest the plugin expects is the regular build's. If the regular build does not start on your machine, that is the limit of 6.x as
-shipped; say so in an issue and it can be pinned.
+escape hatch does not help either: the digest the plugin expects is the regular build's.
+If the regular build does not start on your machine, that is the limit of 6.x as shipped;
+say so in an issue and it can be pinned.
 
 Run both commands **from the project root**. `--ollama-init` and the gate pass the current
 directory to `magi-rs` as `-w`, so they always agree with each other. A gate run from a

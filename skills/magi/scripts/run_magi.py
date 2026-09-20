@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 3.0.0
+# Version: 3.0.1
 # Date: 2026-09-20
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -141,8 +141,8 @@ DEFAULT_MAX_ATTEMPTS = 2
 #: this flag and any direct ``run_orchestrator`` caller -- cannot disagree.
 #: **This is not paranoia:** ``--max-attempts 1000`` (one zero too many)
 #: turns a stubborn mage into a thousand calls -- expensive on Ollama, where `:cloud` is a paid
-#: tier, and hundreds of dollars on Claude. The comment that used to sit here claimed the TOML
-#: "already validates this way". It did not: it accepted 1000 (MAGI gate, Balthasar).
+#: tier, and hundreds of dollars on Claude. The comment that used to sit here claimed the 5.x
+#: TOML "already validates this way". It did not: it accepted 1000 (MAGI gate, Balthasar).
 
 
 def _max_attempts(raw: str) -> int:
@@ -241,9 +241,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=_positive_timeout,
-        # None = "the user did not pass it" -> lets the TOML `timeout` win over the
-        # 900s default (MS3, R6); collapsing this to a hardcoded 900 would make
-        # `flag is not None` always true and the TOML value dead on arrival.
+        # None = "the user did not pass it": the open-weight path resolves its own
+        # default (1800, in ``magi_rs_trio.resolve_timeout``) and warns on a low explicit
+        # value, so it has to be able to tell *not passed* from *passed*. A hardcoded 900
+        # here would make every run look explicit.
         default=None,
         help=(
             "Per-agent timeout in seconds, >= 1. Claude path: default 900. With --ollama: "
@@ -308,9 +309,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=_max_attempts,
         # A None sentinel, not the default value: "was it passed?" and "what is it worth?"
         # are different questions, and answering the first with ``!= DEFAULT`` gets it wrong
-        # for exactly one value -- the default -- so ``--ollama --max-attempts 2`` would be
-        # overridden by the TOML in silence, which is the polite lie the warning exists to
-        # kill. Resolved to DEFAULT_MAX_ATTEMPTS below, so callers still read an int.
+        # for exactly one value -- the default -- so ``--ollama --max-attempts 2`` would go
+        # unwarned although the flag has no effect there, which is the polite lie the warning
+        # exists to kill. Resolved to DEFAULT_MAX_ATTEMPTS below, so callers still read an int.
         default=None,
         help=(
             f"Attempts per model, {MIN_ATTEMPTS}..{MAX_ATTEMPTS_CAP} "
@@ -1516,9 +1517,8 @@ def announce_extraction_failures(failures: Mapping[str, Mapping[str, int]]) -> N
     )
     print(
         f"[!] WARNING: verdict extraction failed on some attempts -- {detail}. "
-        "The retry (and rotation) may have recovered it, but a seat that keeps doing this is "
-        "a model drifting away from the marker contract. See docs/ollama-backend.md "
-        "(what each cause means and what to do about it).",
+        "The retry may have recovered it, but a seat that keeps doing this is a model "
+        "drifting away from the marker contract (see docs/ollama-backend.md, section 5).",
         file=sys.stderr,
     )
 
@@ -1597,7 +1597,7 @@ async def run_orchestrator(
     # cannot produce this -- ``_max_attempts`` enforces the range -- but ``run_orchestrator``
     # is a public entry point with many direct callers.
     if not MIN_ATTEMPTS <= max_attempts <= MAX_ATTEMPTS_CAP:
-        # BOTH ends. The CLI flag and the Ollama TOML are both bounded above; a direct Python
+        # BOTH ends. The CLI flag is bounded above by ``_max_attempts``; a direct Python
         # caller was the last unbounded door, and the budget is spent on PAID calls (MAGI gate,
         # Balthasar). NOT an assert: ``python -O`` strips those, and the loop below would then
         # fall through to an UnboundLocalError on ``result``.
@@ -1674,8 +1674,8 @@ async def run_orchestrator(
         contract: the v5 ``retried.add(name)`` lived inside
         ``_legacy_tracked_launch``, which moved into ``ClaudeTrio``. The callback
         already fires exactly when a retry happens, so no extra parameter is
-        needed -- but the recording has to be HERE, in code. Lines 1683-1684
-        derive two cohorts from this set, and ``test_run_magi.py`` checks them in
+        needed -- but the recording has to be HERE, in code. The ``retried_agents``
+        field below is derived from this set, and ``test_run_magi.py`` checks it in
         a file BDD-31 forbids editing.
 
         Args:
@@ -2063,7 +2063,7 @@ def main() -> None:
         # v6: the open-weight path is executed by magi-rs (R18). Nothing of the
         # v5 subsystem runs -- no plugin TOML, no preflight of our own: the trio,
         # its rotation and its context guard are declared in .magi/magi.toml and
-        # owned by magi-rs (R7). The v5 backend factory is the Claude path's only.
+        # owned by magi-rs (R7).
         agent_models = None  # MagiRsTrio ignores it: the trio lives in .magi/magi.toml
         # R12: --timeout is BOTH the wall ceiling and the source magi-rs derives
         # each mage's attempt budget from; the default is the measured 1800 and
@@ -2150,7 +2150,7 @@ def main() -> None:
     #
     # ``PromptContractError`` is a SIBLING of ``ValidationError``, not a child: a stale
     # prompt is NOT fixed by retrying, so the retry guard must not swallow it. Here it is
-    # caught and the run aborts -- exactly like ``OllamaConfigError``.
+    # caught and the run aborts -- exactly like the bootstrap's fail-closed errors.
     try:
         AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
     except PromptContractError as exc:
@@ -2328,12 +2328,7 @@ def main() -> None:
     if len(report["agents"]) >= 2:
         report["consensus"] = determine_consensus(report["agents"])
 
-    report_text = format_report(
-        report["agents"],
-        report["consensus"],
-        context_guard=report.get("context_guard"),
-        lineage_warnings=report.get("lineage_warnings"),
-    )
+    report_text = format_report(report["agents"], report["consensus"])
     # -o/--out REDIRECTS the report to a file and SUPPRESSES it on stdout. A write
     # failure is not allowed to lose the verdict: it warns LOUDLY on stderr and falls
     # back to printing the report on stdout.

@@ -108,7 +108,7 @@ tests/
   test_verdict_markers.py     -- the sentinel: extraction, both marker predicates, hypothesis
   test_parse_agent_output.py  -- transport envelopes, the delimited block, fail-closed paths
   test_prompt_guard.py        -- the installation-time guard and its dry run
-  test_run_magi.py            -- args, orchestration, retry feedback, telemetry, segmentation
+  test_run_magi.py            -- args, orchestration, retry feedback, telemetry
 docs/
   MAGI-System-Documentation.md  -- This document
 pyproject.toml                -- Python >= 3.12, dual license, dev deps, tool config
