@@ -658,18 +658,25 @@ class TestCleanupOldRuns:
         """Symlinks resolving outside temp root should be skipped."""
         from run_magi import cleanup_old_runs
 
+        # The temp root is a SUBDIRECTORY of tmp_path, so "outside" is genuinely
+        # outside it. The first CI run (a runner with the symlink privilege, which
+        # this project's development machine lacks) showed the earlier layout put
+        # the target inside the root: the realpath check then rightly allowed the
+        # removal, deleted the target, and the test failed on its own dangling link.
+        temp_root = tmp_path / "root"
+        temp_root.mkdir()
         outside_dir = tmp_path / "outside"
         outside_dir.mkdir()
-        symlink_path = tmp_path / "magi-run-evil"
+        symlink_path = temp_root / "magi-run-evil"
         try:
             symlink_path.symlink_to(outside_dir, target_is_directory=True)
         except OSError:
             pytest.skip("Symlinks not supported on this platform")
 
-        with patch("temp_dirs.tempfile.gettempdir", return_value=str(tmp_path)):
+        with patch("temp_dirs.tempfile.gettempdir", return_value=str(temp_root)):
             cleanup_old_runs(0)
-            # keep=0 disables, use keep=1 with 2 dirs to trigger cleanup
-            real_dir = tmp_path / "magi-run-real"
+            # keep=0 removes every non-live dir; the link must be skipped, not followed
+            real_dir = temp_root / "magi-run-real"
             real_dir.mkdir()
             os.utime(real_dir, (2000, 2000))
             os.utime(symlink_path, (1000, 1000))
@@ -4140,6 +4147,11 @@ class TestFindingGuardWiring:
             return ollama_backend, dict(cfg.models), None, cfg.timeout
 
         monkeypatch.setattr(run_magi, "select_backend", fake_select)
+        # v6: --ollama runs the magi-rs preflight before any input is read. Hermetic
+        # here, so the test does not depend on this checkout's .magi/ or bin/.
+        from magi_rs_trio import MagiRsTrio
+
+        monkeypatch.setattr(MagiRsTrio, "preflight", lambda self: "magi-rs")
 
         def fake_create(output_dir: object, run_root: object = None) -> str:
             d = tmp_path / "magi-run-ollama-cost"
