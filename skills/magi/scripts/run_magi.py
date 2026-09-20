@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.10.0
+# Version: 2.10.1
 # Date: 2026-09-19
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -76,6 +76,7 @@ from bundle_segmenter import (  # noqa: E402
     BundleSegmenter,
     SegmentPlan,
     SegmentTooLargeError,
+    mentions,
 )
 from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
 from magi_rs_pin import Pin  # noqa: E402
@@ -1562,8 +1563,18 @@ def _select_executor(args: argparse.Namespace, timeout: int) -> MagiRsTrio | Non
 # evaluated as its own run, ONE AT A TIME (an Ollama invocation takes all three slots),
 # and the gate is approved only when EVERY segment is (CLAUDE.local.md §6.2).
 
-#: A top-level markdown heading opens a section: ``# `` or ``## `` at column zero.
-_SECTION_HEADING = re.compile(r"^(#{1,2}) (.+?)\s*$")
+#: A markdown heading of depth 1-3 at column zero opens a section. Depth 3 is
+#: included because the code-review enrichment nests every touched file at
+#: ``### path`` under two ``##`` wrappers -- with ``##`` only, a real bundle was
+#: at most three sections, each far larger than the headroom.
+_SECTION_HEADING = re.compile(r"^(#{1,3}) (.+?)\s*$")
+#: A per-file boundary of a git diff, the shape of a raw code-review payload
+#: (no headings at all) and of the ```diff fences the project's own bundles carry.
+_DIFF_FILE_BOUNDARY = re.compile(r"^diff --git a/(\S+) b/(\S+)\s*$")
+#: The fence info string under which per-file diff boundaries split a fence.
+_DIFF_FENCE_INFO = "diff"
+#: Section name of one file's diff.
+_DIFF_SECTION_NAME = "diff: {path}"
 #: An optional ownership declaration right under a heading: ``<!-- defines: A, B -->``.
 _SECTION_DEFINES = re.compile(r"^<!--\s*defines:\s*(.+?)\s*-->\s*$")
 #: A markdown code fence, at column zero: headings inside it are not sections.
@@ -1581,52 +1592,99 @@ _SEGMENT_DIR = "segment-{order}"
 _PASSING_LABEL_PREFIXES = ("STRONG GO", "GO")
 #: The label a degraded segment is tabled under: a degraded run approves nothing.
 _INVALID_SEGMENT_LABEL = "INVALID (degraded)"
+#: The label a segment whose run raised is tabled under (§6.2.5: tabled, not aborted).
+_FAILED_SEGMENT_LABEL = "FAILED ({reason})"
+#: The label of an integration segment that could not be run because it does not fit.
+_NOT_RUN_SEGMENT_LABEL = "NOT RUN ({reason})"
+#: What one segment's run may raise without aborting the others: the seat died,
+#: answered off-contract, or fewer than two seats survived. The bootstrap's
+#: fail-closed errors are NOT here -- a digest that does not verify fails
+#: identically for every later segment, so they abort the whole run.
+_SEGMENT_RUN_FAILURES = (MagiRsProcessError, MagiRsContractError, RuntimeError)
 
 
 def split_sections(text: str) -> list[dict[str, Any]]:
     """Split a bundle into the sections the segmenter plans over.
 
-    A section is opened by a top-level markdown heading (``#`` or ``##`` at
-    column zero); its name is the heading text. Text before the first heading
-    is the ``(preamble)`` section. A section may declare the shared interfaces
-    it OWNS with one ``<!-- defines: A, B -->`` line right under its heading
-    (§6.2.3: the segmenter never infers ownership). Deeper headings (``###``)
-    stay inside their section.
+    A section is opened by a markdown heading of depth 1-3 at column zero (its
+    name is the heading text) or by a ``diff --git`` file boundary (named
+    ``diff: <path>``). Text before the first boundary is the ``(preamble)``
+    section. A section may declare the shared interfaces it OWNS with one
+    ``<!-- defines: A, B -->`` line RIGHT UNDER its heading (§6.2.3: the
+    segmenter never infers ownership). Deeper headings stay inside their
+    section. Names are made unique (``name (2)``) so two sections can never
+    collapse into one.
+
+    Code fences are opaque to headings (a ``# Author:`` line inside a pasted
+    source is not a heading). The one split allowed INSIDE a fence is the
+    per-file boundary of a ```` ```diff ```` fence: each piece closes and
+    reopens the fence, so every segment's markdown still parses.
 
     Args:
         text: The bundle, exactly as the run would send it.
 
     Returns:
         ``[{"name": str, "body": str, "defines": [str]}, ...]`` in bundle order.
-        The bodies concatenate back to the input (headings included in their
-        section's body), so nothing is lost or duplicated.
+        Outside a diff fence the bodies concatenate back to the input; inside
+        one, only the reopened fence markers are added.
 
     Complexity:
         O(n) in the number of lines, once per run.
     """
     sections: list[dict[str, Any]] = []
+    seen: dict[str, int] = {}
     name = _PREAMBLE_SECTION
     lines: list[str] = []
     defines: list[str] = []
-    in_fence = False
+    fence_info: str | None = None  # None outside a fence, else the info string
+    expect_defines = False
+
+    def close() -> None:
+        if not lines:
+            return
+        count = seen.get(name, 0) + 1
+        seen[name] = count
+        unique = name if count == 1 else f"{name} ({count})"
+        sections.append({"name": unique, "body": "".join(lines), "defines": list(defines)})
+
     for line in text.splitlines(keepends=True):
         if line.startswith(_CODE_FENCE):
-            # A fenced block is opaque: a `# Author:` line inside a pasted
-            # source is not a heading, and cutting a fence in half would
-            # hand a mage a segment whose markdown no longer parses.
-            in_fence = not in_fence
-        heading = None if in_fence else _SECTION_HEADING.match(line)
-        if heading:
-            if lines:
-                sections.append({"name": name, "body": "".join(lines), "defines": defines})
-            name, lines, defines = heading.group(2), [line], []
+            fence_info = None if fence_info is not None else line[len(_CODE_FENCE) :].strip()
+            lines.append(line)
+            expect_defines = False
             continue
-        declared = _SECTION_DEFINES.match(line)
-        if declared and lines and not defines:
-            defines = [n.strip() for n in declared.group(1).split(",") if n.strip()]
+        if fence_info is None:
+            heading = _SECTION_HEADING.match(line)
+            boundary = _DIFF_FILE_BOUNDARY.match(line)
+            if heading is not None:
+                close()
+                name, lines, defines = heading.group(2), [line], []
+                expect_defines = True
+                continue
+            if boundary is not None:
+                close()
+                name = _DIFF_SECTION_NAME.format(path=boundary.group(2))
+                lines, defines = [line], []
+                expect_defines = False
+                continue
+            if expect_defines:
+                declared = _SECTION_DEFINES.match(line)
+                if declared:
+                    defines = [n.strip() for n in declared.group(1).split(",") if n.strip()]
+                expect_defines = False
+        elif fence_info == _DIFF_FENCE_INFO:
+            boundary = _DIFF_FILE_BOUNDARY.match(line)
+            if boundary:
+                if lines and lines[-1].startswith(_CODE_FENCE):
+                    lines.pop()  # the fence had nothing in it yet: no empty fence left behind
+                else:
+                    lines.append(f"{_CODE_FENCE}\n")  # close the fence in the piece that ends
+                close()
+                name = _DIFF_SECTION_NAME.format(path=boundary.group(2))
+                lines, defines = [f"{_CODE_FENCE}{_DIFF_FENCE_INFO}\n", line], []
+                continue
         lines.append(line)
-    if lines:
-        sections.append({"name": name, "body": "".join(lines), "defines": defines})
+    close()
     return sections
 
 
@@ -1724,7 +1782,11 @@ def _integration_text(sections: list[dict[str, Any]], plan: SegmentPlan) -> str:
         f"Shared interfaces: {', '.join(names)}. Only the lines that mention them, per section.\n"
     ]
     for section in sections:
-        hits = [line for line in str(section["body"]).splitlines() if any(n in line for n in names)]
+        hits = [
+            line
+            for line in str(section["body"]).splitlines()
+            if any(mentions(n, line) for n in names)
+        ]
         if hits:
             parts.append(f"\n## {section['name']}\n\n" + "\n".join(hits) + "\n")
     return "".join(parts)
@@ -1809,15 +1871,19 @@ def run_segmented(
     output_dir: str,
     agents_dir: str,
     timeout: int,
+    wrapper_bytes: int = 0,
 ) -> dict[str, Any]:
     """Evaluate a split bundle: the map first, then one segment at a time, then the gate.
 
     Segments run IN SERIES and in plan order (§Concurrencia: one Ollama
-    invocation holds all three slots). A segment that fails does not abort the
-    run -- it is tabled as it came back and the next one runs, so the report is
-    complete, not partial (§6.2.5); the gate is approved only when every
-    segment passed (§6.2.6). When the split cut through a shared interface, an
-    extra integration segment re-reads those contracts and must pass too.
+    invocation holds all three slots). A segment whose run raises does not
+    abort the run -- it is tabled as ``FAILED (<reason>)`` and the next one
+    runs, so the report is complete, not partial (§6.2.5); only the bootstrap's
+    fail-closed errors abort, because they would recur identically. The gate is
+    approved only when every segment passed (§6.2.6). When the split cut
+    through a shared interface, an extra integration segment re-reads those
+    contracts, planned against the same ceiling; if it does not fit it is
+    tabled as ``NOT RUN`` and sinks the gate.
 
     Args:
         plan: The segmentation plan.
@@ -1826,50 +1892,79 @@ def run_segmented(
         output_dir: The run's output directory.
         agents_dir: The shipped agent prompts.
         timeout: The resolved wall timeout.
+        wrapper_bytes: What the sanitize wrapper adds to every segment, charged
+            against the transport ceiling (recorded in the map).
 
     Returns:
         The top-level report: ``{"segmented": True, "segmentation": {map...,
-        "results": [{order, section_names, consensus, degraded, agents}],
+        "transport_ceiling_bytes", "wrapper_bytes", "results": [{order,
+        section_names, consensus, degraded, agents, output_dir}],
         "integration_pass": bool, "approved": bool, "failing": [str]}}``.
+
+    Raises:
+        The bootstrap's fail-closed errors (``FAIL_CLOSED_ERRORS``), unchanged.
 
     Side effects:
         Writes ``magi-report.json`` before the first segment and after each;
         prints each segment's report and a final table on stdout.
     """
     by_name = {section["name"]: section for section in sections}
-    jobs: list[tuple[int, list[str], str]] = [
-        (seg.order, seg.section_names, "".join(str(by_name[n]["body"]) for n in seg.section_names))
+    jobs: list[tuple[int, list[str], str | None, str]] = [
+        (
+            seg.order,
+            seg.section_names,
+            "".join(str(by_name[n]["body"]) for n in seg.section_names),
+            "",
+        )
         for seg in plan.segments
     ]
     integration = needs_integration_pass(plan)
     if integration:
-        jobs.append((len(jobs) + 1, [_INTEGRATION_SECTION], _integration_text(sections, plan)))
+        jobs.extend(_integration_jobs(sections, plan, len(jobs), wrapper_bytes))
 
     segmentation: dict[str, Any] = dict(plan.as_map())
-    segmentation.update(results=[], integration_pass=integration, approved=None, failing=[])
+    segmentation.update(
+        transport_ceiling_bytes=CONSULT_INPUT_CEILING_BYTES,
+        wrapper_bytes=wrapper_bytes,
+        results=[],
+        integration_pass=integration,
+        approved=None,
+        failing=[],
+    )
     report: dict[str, Any] = {"segmented": True, "segmentation": segmentation}
     _write_segmentation_map(output_dir, report)  # the decision, before anything runs
 
-    for order, names, text in jobs:
+    for order, names, text, not_run_reason in jobs:
         print(f"\n=== segment-{order}: {', '.join(names)} ===")
-        segment_report = _evaluate_segment(order, text, args, output_dir, agents_dir, timeout)
-        degraded = bool(segment_report.get("degraded", False))
-        label = (
-            _INVALID_SEGMENT_LABEL
-            if degraded
-            else str(segment_report.get("consensus", {}).get("consensus", ""))
-        )
-        print(format_report(segment_report["agents"], segment_report["consensus"]))
-        segmentation["results"].append(
-            {
-                "order": order,
-                "section_names": names,
-                "consensus": label,
-                "degraded": degraded,
-                "agents": len(segment_report.get("agents", [])),
-                "output_dir": os.path.join(output_dir, _SEGMENT_DIR.format(order=order)),
-            }
-        )
+        entry: dict[str, Any] = {
+            "order": order,
+            "section_names": names,
+            "degraded": False,
+            "agents": 0,
+            "output_dir": os.path.join(output_dir, _SEGMENT_DIR.format(order=order)),
+        }
+        if text is None:
+            entry["consensus"] = _NOT_RUN_SEGMENT_LABEL.format(reason=not_run_reason)
+        else:
+            try:
+                segment_report = _evaluate_segment(
+                    order, text, args, output_dir, agents_dir, timeout
+                )
+            except _SEGMENT_RUN_FAILURES as exc:
+                # Tabled, not fatal: the next segment still runs (§6.2.5).
+                print(f"[!] WARNING: segment-{order} failed: {exc}", file=sys.stderr)
+                entry["consensus"] = _FAILED_SEGMENT_LABEL.format(reason=exc)
+            else:
+                degraded = bool(segment_report.get("degraded", False))
+                entry["degraded"] = degraded
+                entry["agents"] = len(segment_report.get("agents", []))
+                entry["consensus"] = (
+                    _INVALID_SEGMENT_LABEL
+                    if degraded
+                    else str(segment_report.get("consensus", {}).get("consensus", ""))
+                )
+                print(format_report(segment_report["agents"], segment_report["consensus"]))
+        segmentation["results"].append(entry)
         _write_segmentation_map(output_dir, report)  # every result lands as it comes
 
     verdict = segmentation_verdict([r["consensus"] for r in segmentation["results"]])
@@ -1878,6 +1973,44 @@ def run_segmented(
     _write_segmentation_map(output_dir, report)
     print(_format_segmentation_table(segmentation))
     return report
+
+
+def _integration_jobs(
+    sections: list[dict[str, Any]], plan: SegmentPlan, first_order: int, wrapper_bytes: int
+) -> list[tuple[int, list[str], str | None, str]]:
+    """Plan the integration pass against the same ceiling as every other segment.
+
+    Args:
+        sections: All sections.
+        plan: The segmentation plan.
+        first_order: The number of ordinary segments (the integration jobs follow).
+        wrapper_bytes: The per-segment wrapper cost.
+
+    Returns:
+        ``(order, names, text, not_run_reason)`` jobs: one or more integration
+        segments when the contract lines fit, or ONE ``text=None`` job carrying
+        the reason when even a single piece does not.
+    """
+    text = _integration_text(sections, plan)
+    try:
+        pieces = BundleSegmenter.plan(
+            split_sections(text),
+            CONSULT_INPUT_CEILING_BYTES - wrapper_bytes,
+            overhead_bytes=_SECTION_RENDER_OVERHEAD_BYTES,
+        )
+    except SegmentTooLargeError as exc:
+        return [(first_order + 1, [_INTEGRATION_SECTION], None, str(exc))]
+    parts = split_sections(text)
+    by_name = {part["name"]: part for part in parts}
+    return [
+        (
+            first_order + index,
+            [_INTEGRATION_SECTION],
+            "".join(str(by_name[n]["body"]) for n in piece.section_names),
+            "",
+        )
+        for index, piece in enumerate(pieces.segments, start=1)
+    ]
 
 
 def _format_segmentation_table(segmentation: dict[str, Any]) -> str:
@@ -3131,9 +3264,17 @@ def main() -> None:
             )
             try:
                 run_segmented(
-                    segment_plan, sections, args, output_dir, agents_dir, resolved_timeout
+                    segment_plan,
+                    sections,
+                    args,
+                    output_dir,
+                    agents_dir,
+                    resolved_timeout,
+                    wrapper_bytes=wrapper_bytes,
                 )
             except BaseException as exc:
+                if is_temp_dir:
+                    shutil.rmtree(output_dir, ignore_errors=True)
                 if isinstance(exc, FAIL_CLOSED_ERRORS):
                     print(f"[FATAL] {exc}", file=sys.stderr)
                     sys.exit(1)

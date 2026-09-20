@@ -134,13 +134,13 @@ def test_the_input_is_split_into_sections_at_top_level_headings():
 
     text = (
         "preamble line\n\n# Alpha\n<!-- defines: TrioExecutor, Pin -->\nbody a\n\n"
-        "## Beta\nbody b\n### not a section\nmore b\n"
+        "## Beta\nbody b\n#### not a section\nmore b\n"
     )
     sections = split_sections(text)
     assert [s["name"] for s in sections] == ["(preamble)", "Alpha", "Beta"]
     assert sections[1]["defines"] == ["TrioExecutor", "Pin"]
     assert sections[2]["defines"] == []
-    assert "### not a section" in sections[2]["body"]
+    assert "#### not a section" in sections[2]["body"]  # depth 4 stays inside (1-3 open)
     assert "".join(s["body"] for s in sections).count("body") == 2
 
 

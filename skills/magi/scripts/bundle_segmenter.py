@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
+# Version: 1.1.0
 # Date: 2026-09-19
 """Plan how a bundle that does not fit magi-rs's input ceiling is split (MS4b).
 
@@ -28,6 +28,7 @@ Example:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -211,4 +212,22 @@ def _references(
     """
     inside = {sections[i]["name"] for i in group}
     bodies = "\n".join(str(sections[i]["body"]) for i in group)
-    return [name for name, owner in owners.items() if owner not in inside and name in bodies]
+    return [
+        name for name, owner in owners.items() if owner not in inside and mentions(name, bodies)
+    ]
+
+
+def mentions(name: str, text: str) -> bool:
+    """Whether ``text`` names ``name`` as a whole word.
+
+    Plain containment would let ``Pin`` match ``Pinout`` or ``opinion`` -- and
+    a false reference buys a real, paid integration run for nothing.
+
+    Args:
+        name: A declared interface name.
+        text: The text to search.
+
+    Returns:
+        True when the name appears delimited by word boundaries.
+    """
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text) is not None
