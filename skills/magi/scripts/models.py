@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.2.0
-# Date: 2026-07-30
+# Version: 1.3.1
+# Date: 2026-09-20
 """MAGI model registry.
 
 Single source of truth for the Claude model short names accepted on the
@@ -13,10 +13,15 @@ without needing to change.
 Every ID is an **alias without a date suffix** — the supported, stable
 form. ``haiku`` was pinned to the dated ``claude-haiku-4-5-20251001``
 until 5.4.0; a dated snapshot buys nothing here and silently ages out.
+
+The module also owns :class:`ModelSpec`, the (tag, lineage) pair every
+seat is launched with. It lived in the open-weight config module until
+6.1.0; the Claude path is its only remaining consumer.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
@@ -64,6 +69,29 @@ _MODE_DEFAULTS_MUTABLE: dict[str, str] = {
     "analysis": "opus",
 }
 MODE_DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(_MODE_DEFAULTS_MUTABLE)
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """A model tag plus the lineage (originating lab) it belongs to.
+
+    The lineage is DECLARED by the caller, never inferred from the tag. On the
+    Claude path, the only one that builds these since 6.1.0, every seat carries
+    ``"anthropic"`` and nothing consults the field: the "one lineage, one mage"
+    invariant it once fed is enforced on the magi-rs side now. It is carried,
+    not read.
+
+    Attributes:
+        model: Model identifier, e.g. a short name such as ``"opus"``.
+        lineage: Originating lab, e.g. ``"anthropic"``. Non-empty.
+
+    Example:
+        >>> ModelSpec("opus", "anthropic").model
+        'opus'
+    """
+
+    model: str
+    lineage: str
 
 
 def resolve_model(short_name: str) -> str:

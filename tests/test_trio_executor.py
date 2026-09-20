@@ -1,3 +1,6 @@
+# Author: Julian Bolivar
+# Version: 1.1.0
+# Date: 2026-09-20
 """TrioExecutor is an abstract contract at the TRIO level, not per mage."""
 
 import asyncio
@@ -1123,3 +1126,107 @@ def test_a_failed_stderr_log_write_on_the_timeout_path_still_tells_the_operator(
     err = capsys.readouterr().err
     assert "WARNING: Failed to persist melchior.stderr.log on timeout" in err
     assert "No space left on device" in err
+
+
+# ---------------------------------------------------------------------------
+# 6.1.0: three guarantees that ``launch_agent`` used to witness, migrated with it
+# (the transport is ClaudeTrio's now; the assertions moved, they were not lost).
+# ---------------------------------------------------------------------------
+
+
+def test_an_unknown_model_short_name_is_a_ValueError_not_a_retry(monkeypatch, tmp_path):
+    """``resolve_model`` rejects the name BEFORE any subprocess: a config error, never retried."""
+    launched = []
+    states = []
+
+    async def fake_exec(*args, **kwargs):
+        launched.append(args)
+        return _FakeProc(_envelope("melchior"))
+
+    monkeypatch.setattr("trio_executor.asyncio.create_subprocess_exec", fake_exec)
+    _write_prompts(tmp_path)
+
+    out = asyncio.run(
+        ClaudeTrio().run_trio(
+            "P",
+            str(tmp_path),
+            str(tmp_path),
+            5,
+            {"melchior": "gpt4"},
+            2,
+            on_state=lambda name, state: states.append(state),
+        )
+    )
+
+    assert isinstance(out["melchior"], ValueError)
+    assert "Unknown model" in str(out["melchior"])
+    assert launched == [], "nothing may be launched for a model name the registry rejects"
+    # The "not a retry" half: a loop that caught ValueError would emit "retrying" and try
+    # again with the same bad name. One failed state, no retrying state, is the witness.
+    assert "retrying" not in states
+    assert states.count("failed") == 1
+
+
+def test_empty_stderr_on_timeout_does_not_create_a_log(monkeypatch, tmp_path):
+    """No stderr data => no empty ``.stderr.log`` file (the writer returns early on empty)."""
+
+    class _SilentStderr:
+        async def read(self, n=-1):
+            return b""
+
+    class _SilentHangingProc:
+        pid = 4242
+        returncode = None
+
+        def __init__(self):
+            self.stderr = _SilentStderr()
+
+        async def communicate(self, input=None):
+            await asyncio.sleep(3600)
+
+        def kill(self):
+            pass
+
+        async def wait(self):
+            return None
+
+    async def fake_exec(*args, **kwargs):
+        return _SilentHangingProc()
+
+    monkeypatch.setattr("trio_executor.asyncio.create_subprocess_exec", fake_exec)
+    _write_prompts(tmp_path)
+
+    out = asyncio.run(
+        ClaudeTrio().run_trio("P", str(tmp_path), str(tmp_path), 0, {"melchior": "opus"}, 1)
+    )
+
+    assert isinstance(out["melchior"], TimeoutError)
+    assert not (tmp_path / "melchior.stderr.log").exists()
+
+
+def test_success_path_stderr_log_oserror_does_not_mask_the_verdict(monkeypatch, tmp_path, capsys):
+    """An OSError persisting stderr AFTER a valid verdict is logged, never propagated.
+
+    The verdict is already valid at that point; a disk-full or antivirus lock on
+    the log write must not turn a successful mage into a failed one.
+    """
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc(_envelope("melchior"), stderr=b"diagnostic line")
+
+    def failing_write(output_dir, agent_name, data):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr("trio_executor.asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("trio_executor._write_stderr_log", failing_write)
+    _write_prompts(tmp_path)
+
+    out = asyncio.run(
+        ClaudeTrio().run_trio("P", str(tmp_path), str(tmp_path), 5, {"melchior": "opus"}, 1)
+    )
+
+    assert out["melchior"]["agent"] == "melchior"
+    assert out["melchior"]["verdict"] == "approve"
+    err = capsys.readouterr().err
+    assert "Failed to persist" in err
+    assert "melchior.stderr.log" in err

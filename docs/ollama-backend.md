@@ -1,8 +1,8 @@
 # MAGI open-weight path (`--ollama`), executed by `magi-rs`
 
 - **Author:** Julian Bolivar
-- **Version:** 6.0.0
-- **Date:** 2026-09-19
+- **Version:** 6.1.0
+- **Date:** 2026-09-20
 
 Since 6.0.0, `--ollama` no longer talks to Ollama itself. The plugin builds the payload
 exactly as before and hands it to **`magi-rs`**, a pinned, digest-verified Rust binary that
@@ -31,6 +31,12 @@ nothing is executed. There is no fallback to another architecture or to an unver
 The one escape hatch is to place the pinned executable in `bin/` by hand, where it is
 verified like any download.
 
+One build is not in the pin: `linux-x86_64-compat`, the variant `magi-rs` publishes for
+older glibc. On such a host the bootstrap downloads the regular `linux-x86_64` asset. The
+escape hatch does not help either: the digest the plugin expects is the regular build's.
+If the regular build does not start on your machine, that is the limit of 6.x as shipped;
+say so in an issue and it can be pinned.
+
 Run both commands **from the project root**. `--ollama-init` and the gate pass the current
 directory to `magi-rs` as `-w`, so they always agree with each other. A gate run from a
 directory without `.magi/magi.toml` fails and names the command to run; it never
@@ -52,7 +58,19 @@ it used to declare has exactly one owner now:
 You edit that file directly. Before a run the plugin only checks that it **exists**; its
 contents are `magi-rs`'s business, and a file that does not parse is reported by `magi-rs`
 in its own words. The environment chain of 5.x (`MAGI_OLLAMA_*`, repo, global, built-in)
-went away with the file.
+went away with the file, and since 6.1.0 so did the plugin's own Ollama client: rotation,
+context guard, backoff and redaction are all `magi-rs`'s, and there is no second validator
+of `magi.toml` on this side.
+
+A `magi.toml` written by a `magi-rs` older than 0.18.0 is one case where that matters. Its
+`[headless]` keys `log_retention`, `log_max_bytes` and `log_level` are fatal (`unknown
+field`) from 0.18.0 on, and nothing migrates them for you. Their replacements live under
+`[logging]`: `log_dir`, `file_filter`, `compress`, `compress_after_days`, `retain_days`,
+`max_total_bytes`. Retention is counted in days there, not runs. The plugin relays
+`magi-rs`'s error as it is, so this paragraph is the migration guide. Since 0.18.1 the
+diagnostics that used to reach stderr (the per-mage ceiling, the probe notices) go to
+`.magi/logs/magi-<date>.log`, one line per event tagged with the `run_id` the report
+persists; stderr carries only `ERROR` and `WARN`.
 
 `magi-rs` reads credentials from an encrypted vault only when given a passphrase, and this
 plugin never passes one. The provider is Ollama, which needs no key, so the vault would have

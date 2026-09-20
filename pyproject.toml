@@ -1,6 +1,6 @@
 [project]
 name = "magi"
-version = "6.0.0"
+version = "6.1.0"
 requires-python = ">= 3.12"
 description = "MAGI multi-perspective analysis plugin for Claude Code"
 license = "MIT OR Apache-2.0"
@@ -21,13 +21,12 @@ mypy_path = "skills/magi/scripts,tools"
 explicit_package_bases = true
 # Local developer tooling (gitignored, from BolivarTech/AI_Tools) is not held to
 # the plugin's strict typecheck. Harmless in the public repo (the dir is absent).
-# ``scripts/`` and the release-tooling smoke test are gitignored dev tooling
-# (from BolivarTech/AI_Tools); they import the network-bound scripts and are not
-# part of the shipped, type-checked plugin. ``magi-corpus/`` is the gitignored
+# ``scripts/`` is gitignored dev tooling (from BolivarTech/AI_Tools): network-bound
+# scripts that are not part of the shipped, type-checked plugin. ``magi-corpus/`` is the gitignored
 # local MAGI-run analysis corpus + its collector (proto-corpus for MS6).
 # ``planning/`` holds gitignored process artifacts; a verification run may leave
 # a one-off comparison script there, which is evidence, not shipped code.
-exclude = ['^scripts/', '^magi-corpus/', '^planning/', 'tests/test_release_tooling\.py$']
+exclude = ['^scripts/', '^magi-corpus/', '^planning/']
 
 [[tool.mypy.overrides]]
 module = "_pytest.*"
@@ -57,7 +56,7 @@ disable_error_code = ["type-arg", "misc", "unused-ignore"]
 # as an extra, the toolchain was never governed by uv.lock at all -- `uv run mypy` just
 # found whatever happened to be in the venv. Two machines drifted to two toolchains and
 # the gate answered differently on the same code (mypy 1.20 reports a no-any-return in
-# model_context.py that 2.x does not: 1.x fails to narrow Any -> int when the value comes
+# model_context.py, a module since deleted, that 2.x does not: 1.x fails to narrow Any -> int when the value comes
 # from a for-loop unpack, so the isinstance guard is invisible to it).
 #
 # Floors say which versions the gate was ever green on; uv.lock pins the exact ones.

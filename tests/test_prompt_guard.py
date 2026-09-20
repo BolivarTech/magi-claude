@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-07-13
+# Version: 1.1.0
+# Date: 2026-09-20
 """Suite for the start-up guard of the prompt contract (R9, MS2).
 
 It covers what the anchoring test **cannot see**: the **user's installation**. The
@@ -145,14 +145,14 @@ class TestTheGuardIsACTUALLYWired:
         assert "AgentPromptGuard" in source, "the guard is NOT invoked from main(): it is dead code"
         assert ".check()" in source
 
-    def test_the_guard_runs_BEFORE_the_backend_is_selected(self):
-        """It must abort **before spending a token**, not after the preflight."""
+    def test_the_guard_runs_BEFORE_the_run_dir_is_created(self):
+        """It must abort **before spending a token** -- before the run leaves any trace."""
         import inspect
 
         import run_magi
 
         source = inspect.getsource(run_magi.main)
-        assert source.index("AgentPromptGuard") < source.index("select_backend")
+        assert source.index("AgentPromptGuard") < source.index("create_output_dir")
 
     def test_PromptContractError_is_caught_and_exits_nonzero(self):
         import inspect
