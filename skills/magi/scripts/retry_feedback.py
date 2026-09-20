@@ -8,11 +8,9 @@ plugin still enforces on them, ``MAX_ERROR_CHARS`` (the truncated error detail).
 and ``trio_executor.ClaudeTrio`` build the retry prompt from here; nothing else reads it.
 Until 6.1.0 the plugin's own context guard also derived a token ceiling from these templates
 to reserve window for the block; that guard, and the ceiling, went to the magi-rs side.
-
-The bound is **DERIVED** from the real templates. In MS1 this constant was **wrong three
-times** (1024, 1536, 2048), always by assuming a comfortable conversion factor or a fixed
-text that later changed. **A bound you have to remember to update is a bound that WILL be
-forgotten.**
+(That ceiling was wrong three times in MS1 -- 1024, 1536, 2048 -- each time by assuming a
+comfortable conversion factor or a fixed text that later changed, which is why it was
+derived rather than typed for as long as it lived here.)
 """
 
 from __future__ import annotations
