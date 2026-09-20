@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # The per-commit gates of CLAUDE.local.md §0.1, in one job. They are cheap and
+  # they share a warm uv cache, so splitting them into parallel jobs would cost
+  # more in setup than it saves in wall-clock.
+  #
+  # Windows because that is where this plugin is developed and where its known
+  # hazards live: the ~32K argv limit, cp1252 consoles, and `mklink /D`
+  # degrading to a stale copy. A green Linux run would not have exercised any
+  # of them.
+  #
+  # WINDOWS ONLY, and the cost of that is declared rather than hidden: any
+  # assertion that only exists on POSIX -- an execute bit, a symlink -- SKIPS
+  # here instead of failing, so it runs on no machine at all. See the "POSIX
+  # assertions" row in MS2's risk table for which ones and what they protect.
+  # Adding a Linux leg was considered and deferred (user decision, 2026-08-28):
+  # it would not close the macOS half either, and no smoke can reach that one.
+  gates:
+    name: Gates (§0.1 per-commit)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # `uv lock --check` first: every other gate runs through `uv run`, so a
+      # lock that does not resolve makes their results meaningless rather than
+      # red. Fail on the real cause, not on its symptom three steps later.
+      - name: Lock is in sync with pyproject.toml
+        run: uv lock --check
+
+      - run: uv run python -m pytest tests/ -v
+
+      - run: uv run ruff check .
+
+      # Runs ALONE, never piped and never chained after another command whose
+      # exit code could mask it: a pipe returns the LAST command's status, which
+      # is how two commits landed here with `ruff format --check` red.
+      - run: uv run ruff format --check .
+
+      - run: uv run mypy .
+
+  # §0.1 "por ronda": its input only changes with the manifest/lockfile, so on a
+  # normal commit it could not have produced a different answer. It runs here
+  # anyway because CI is not commit-paced — this job IS the round.
+  audit:
+    name: Dependency audit (§0.1 per-round)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - run: uvx pip-audit

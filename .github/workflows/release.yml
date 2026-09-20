@@ -1,0 +1,220 @@
+name: Release
+
+# Adapted from BolivarTech/Magi (magi-rs) .github/workflows/release.yml, 2026-08-13.
+#
+# What carried over: the release GATE as a cheap first job that everything hangs
+# off, rollback protection ordered against the highest tag ever cut, and release
+# notes extracted from a tracked CHANGELOG.
+#
+# What did NOT carry over, and why: magi-rs builds five platform binaries,
+# packages them, generates SHA256SUMS.txt and publishes to crates.io. This
+# plugin ships as a git repo consumed by the Claude Code marketplace — there is
+# nothing to compile, package, checksum or publish. The tag IS the artifact.
+#
+# What this project needed that magi-rs did not: the version lives in FIVE
+# places, and keeping them in sync is a manual checklist item today. That is the
+# single most valuable check here, because a marketplace that reads a stale
+# marketplace.json serves the wrong version to every user.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Release gate ───────────────────────────────────────────────────────────
+  # Answers one question: "should this push cut a release, and is it safe to?"
+  # A bad bump costs ~15 s here instead of a full suite run.
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      tag: ${{ steps.gate.outputs.tag }}
+      is_new_version: ${{ steps.gate.outputs.is_new_version }}
+      should_release: ${{ steps.gate.outputs.should_release }}
+    steps:
+      # fetch-depth: 0 because the rollback check needs the FULL tag list; a
+      # shallow clone fetches no tags and would silently conclude that nothing
+      # has ever been released.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # THE check this project actually needs. The release procedure lists five
+      # version sites and asks a human to bump all five; nothing has ever
+      # verified it. marketplace.json carries the version TWICE (the marketplace
+      # object and the plugin entry), and those two are the easiest to miss
+      # precisely because they sit in one file.
+      - id: sites
+        name: All five version sites agree
+        run: |
+          set -euo pipefail
+          PLUGIN=$(jq -r '.version' .claude-plugin/plugin.json)
+          MKT_TOP=$(jq -r '.version' .claude-plugin/marketplace.json)
+          MKT_ENTRY=$(jq -r '[.. | objects | select(has("version") and has("source")) | .version] | first' .claude-plugin/marketplace.json)
+          PYPROJ=$(grep -m1 '^version = ' pyproject.toml | sed 's/^version = "\(.*\)"/\1/')
+          # The `magi` package block in uv.lock: take the version line that
+          # immediately follows `name = "magi"`, not the first one in the file.
+          LOCK=$(awk '/^name = "magi"$/{getline; if ($0 ~ /^version = /) {gsub(/version = "|"/,""); print; exit}}' uv.lock)
+
+          echo "plugin.json            : $PLUGIN"
+          echo "marketplace.json (top) : $MKT_TOP"
+          echo "marketplace.json (entry): $MKT_ENTRY"
+          echo "pyproject.toml         : $PYPROJ"
+          echo "uv.lock                : $LOCK"
+
+          for v in "$MKT_TOP" "$MKT_ENTRY" "$PYPROJ" "$LOCK"; do
+            if [ "$v" != "$PLUGIN" ]; then
+              echo "::error::version sites disagree — plugin.json says '$PLUGIN' but another site says '$v'. All five must be bumped together (plugin.json, marketplace.json ×2, pyproject.toml, uv.lock)."
+              exit 1
+            fi
+          done
+          echo "version=$PLUGIN" >> "$GITHUB_OUTPUT"
+          echo "OK: all five sites declare $PLUGIN."
+
+      - id: gate
+        name: Block rollbacks and decide whether to release
+        run: |
+          set -euo pipefail
+          V="${{ steps.sites.outputs.version }}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V"    >> "$GITHUB_OUTPUT"
+
+          # Reject anything that is not a plain X.Y.Z before it becomes a tag.
+          if ! printf '%s' "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version '$V' is not a plain X.Y.Z — refusing to derive a tag from it."
+            exit 1
+          fi
+
+          NEWVER=true
+
+          # ROLLBACK PROTECTION, ordered against the MAX version ever tagged and
+          # NOT against "does tag vX.Y.Z exist". Asking only whether the tag
+          # exists has a hole: rolling the version back to an old but already
+          # released value finds the tag present and looks like a harmless
+          # no-op, so main would silently sit on a stale version. `sort -V`
+          # orders numerically (5.10 > 5.9), which a lexical sort gets wrong.
+          MAX="$(git tag -l 'v*' | sed 's/^v//' \
+                 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+          echo "highest version released so far: ${MAX:-<none>}"
+
+          if [ -z "$MAX" ]; then
+            echo "No release tags yet — $V will be the first."
+          elif [ "$V" = "$MAX" ]; then
+            # The overwhelmingly common case: most pushes to main do not touch
+            # the version. A NO-OP, never a failure.
+            echo "Version $V is already released as v$MAX — this ref does not bump it. Nothing to release."
+            NEWVER=false
+          elif [ "$(printf '%s\n%s\n' "$V" "$MAX" | sort -V | head -1)" = "$V" ]; then
+            # Fails on a PR too — that is the point of running on pull_request:
+            # the rollback is caught at review time, not after merge.
+            echo "::error::ROLLBACK BLOCKED — the tree declares $V but v$MAX is already released. Bump past $MAX or restore the correct version."
+            exit 1
+          else
+            echo "New version $V > $MAX."
+          fi
+
+          if [ "$NEWVER" = "true" ] && git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+            echo "::error::tag v$V already exists but is not the highest release — refusing to overwrite it."
+            exit 1
+          fi
+
+          echo "is_new_version=$NEWVER" >> "$GITHUB_OUTPUT"
+
+          SHOULD="$NEWVER"
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "Event is '${{ github.event_name }}', not a push to main — validation only, nothing will be tagged or released."
+            SHOULD=false
+          fi
+          echo "should_release=$SHOULD" >> "$GITHUB_OUTPUT"
+          echo "--> is_new_version=$NEWVER  should_release=$SHOULD"
+
+      # Keyed on is_new_version, NOT should_release, so a PR that bumps the
+      # version is told about the missing entry at review time. An ordinary push
+      # that does not touch the version is never blocked for lacking an entry it
+      # does not need.
+      - name: CHANGELOG has an entry for this version
+        if: steps.gate.outputs.is_new_version == 'true'
+        run: |
+          set -euo pipefail
+          V="${{ steps.gate.outputs.version }}"
+          if ! grep -q "^## \[$V\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$V]' section. Add one (Keep a Changelog format, e.g. '## [$V] - YYYY-MM-DD') before releasing — the release notes are extracted from it, so without it the release ships with no notes."
+            exit 1
+          fi
+          echo "OK: CHANGELOG.md documents $V."
+
+  # ── Full verification ──────────────────────────────────────────────────────
+  # The §0.1 gates again, from a clean tree, at the exact commit that is about
+  # to become a tag. CI already ran them on this SHA; that is not a reason to
+  # skip them, because a release is the one moment where "it passed on some
+  # earlier push" is not the same claim as "it passes here".
+  verify:
+    name: Verify
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv lock --check
+      - run: uv run python -m pytest tests/ -v
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy .
+
+  # ── Tag and GitHub Release ─────────────────────────────────────────────────
+  release:
+    name: Tag and GitHub Release
+    needs: [gate, verify]
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.gate.outputs.version }}"
+          awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { flag = 1; next }
+            flag && index($0, "## [") == 1 { flag = 0 }
+            flag { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::extracted release notes are empty for $VERSION"
+            exit 1
+          fi
+          echo "----- notes -----"
+          cat RELEASE_NOTES.md
+
+      # ANNOTATED tag, never lightweight — the project has required annotated
+      # tags since 2.1.4. `-m` from the CHANGELOG title keeps the tag message
+      # and the release notes telling the same story.
+      - name: Create annotated tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.gate.outputs.tag }}"
+          V="${{ needs.gate.outputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $V"
+          git push origin "$TAG"
+          gh release create "$TAG" --title "$TAG" --notes-file RELEASE_NOTES.md

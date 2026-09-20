@@ -41,6 +41,12 @@ experiments/
 /scripts/claude_usage.py
 /scripts/sleep_signal.py
 /scripts/graphify_ollama.py
+# lint_plan.py checks an SBTDD plan before it costs a paid gate round;
+# thin_plan.py strips production bodies out of one so Green stays real work.
+# Both read planning/, which is itself dev-local, and no published surface tells
+# a user to run them — so they belong here, not in skills/magi/scripts/.
+/scripts/lint_plan.py
+/scripts/thin_plan.py
 # Release tooling: network-bound (excluded from make verify) and for the maintainer,
 # not the user. Its smoke test imports it, so that test is dev-local too: a fresh
 # checkout without scripts/ simply never collects tests/test_release_tooling.py.
@@ -76,6 +82,11 @@ experiments/
 # why: a tracked `make release-check` calling a gitignored script is the v5.0.3 bug).
 /marker-adherence-report.json
 magi-corpus/
+
+# magi-rs per-project state (v6.0.0): config, encrypted DB and run logs, created by
+# `magi-rs init`. Local to the developer exactly like .claude/ — it holds the model
+# trio for THIS machine's endpoint, and the DB is machine-local state, not source.
+.magi/
 
 # magi-rs executable installed by the bootstrap (v6.0.0). Never committed: the
 # pin (skills/magi/magi-rs.pin.json) is the trust channel, the binary is derived.
