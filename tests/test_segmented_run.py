@@ -330,3 +330,32 @@ def test_the_map_records_both_ceilings_and_the_wrapper(monkeypatch, tmp_path):
     seg = report["segmentation"]
     assert seg["transport_ceiling_bytes"] == _CEILING and seg["wrapper_bytes"] == 127
     assert seg["ceiling_bytes"] == _CEILING  # what the plan itself was computed against
+
+
+def test_a_segment_prompt_over_the_transport_ceiling_is_never_sent(monkeypatch, tmp_path):
+    # Gate (cycle 1): the arithmetic says a planned segment plus the wrapper
+    # always fits; the guarantee is EXECUTED anyway -- the real prompt is
+    # measured right before the launch and an oversized one is refused, tabled
+    # as NOT RUN, and the next segment still runs.
+    import run_magi
+
+    launched = []
+
+    async def _orch(agents_dir, prompt, output_dir, timeout, **kwargs):
+        launched.append(len(prompt))
+        return _report()
+
+    monkeypatch.setattr(run_magi, "run_orchestrator", _orch)
+    monkeypatch.setattr(run_magi, "_select_executor", lambda args, timeout: None)
+    huge = "x" * (run_magi.CONSULT_INPUT_CEILING_BYTES + 1)
+    sections = [
+        {"name": "s0", "body": huge, "defines": []},
+        {"name": "s1", "body": "ok", "defines": []},
+    ]
+    plan = _plan_with(2)
+    report = run_magi.run_segmented(plan, sections, _args(), str(tmp_path), "a", 1)
+    results = report["segmentation"]["results"]
+    assert results[0]["consensus"].startswith("NOT RUN") and "ceiling" in results[0]["consensus"]
+    assert results[1]["consensus"] == "STRONG GO"
+    assert len(launched) == 1  # the oversized one never reached the transport
+    assert report["segmentation"]["approved"] is False
