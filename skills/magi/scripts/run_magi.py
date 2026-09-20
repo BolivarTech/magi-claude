@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.10.1
+# Version: 2.10.2
 # Date: 2026-09-19
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -1583,8 +1583,10 @@ _CODE_FENCE = "```"
 _PREAMBLE_SECTION = "(preamble)"
 #: The extra segment that re-reads the contracts a split cut through.
 _INTEGRATION_SECTION = "(integration)"
-#: Per-section rendering overhead when a segment is re-assembled: the heading line and
-#: the blank line after it, measured on the longest heading the project's bundles use.
+#: Per-section safety margin charged to the planner. Sections are re-assembled by
+#: plain concatenation and each body already carries its own heading line, so this
+#: is not a measured rendering cost but a deliberate over-count (a long path heading
+#: is ~50 bytes) that keeps the planner conservative.
 _SECTION_RENDER_OVERHEAD_BYTES = 128
 #: Sub-directory of the run holding one segment's artefacts.
 _SEGMENT_DIR = "segment-{order}"
@@ -1597,9 +1599,12 @@ _FAILED_SEGMENT_LABEL = "FAILED ({reason})"
 #: The label of an integration segment that could not be run because it does not fit.
 _NOT_RUN_SEGMENT_LABEL = "NOT RUN ({reason})"
 #: What one segment's run may raise without aborting the others: the seat died,
-#: answered off-contract, or fewer than two seats survived. The bootstrap's
-#: fail-closed errors are NOT here -- a digest that does not verify fails
-#: identically for every later segment, so they abort the whole run.
+#: answered off-contract, or fewer than two seats survived -- ``RuntimeError``
+#: is what ``run_orchestrator`` raises for that last case (its documented
+#: contract), and a broader one still lands in the table with its message
+#: rather than killing the report, which is what §6.2.5 asks for. The
+#: bootstrap's fail-closed errors are NOT here -- a digest that does not
+#: verify fails identically for every later segment, so they abort the run.
 _SEGMENT_RUN_FAILURES = (MagiRsProcessError, MagiRsContractError, RuntimeError)
 
 
@@ -1834,7 +1839,9 @@ def _evaluate_segment(
         ``segment-N/magi-report.json``.
 
     Raises:
-        Whatever ``run_orchestrator`` raises (rendered by ``main()``).
+        SegmentTooLargeError: The rendered prompt exceeds the transport
+            ceiling (tabled as ``NOT RUN`` by the caller; nothing is launched).
+        Whatever ``run_orchestrator`` raises otherwise.
 
     Side effects:
         Launches one magi-rs run; writes the segment's artefacts.
@@ -1843,6 +1850,16 @@ def _evaluate_segment(
     os.makedirs(segment_dir, exist_ok=True)
     executor = _select_executor(args, timeout)
     prompt = build_user_prompt(args.mode, text)
+    # The planner's arithmetic says a segment plus the wrapper always fits; the
+    # guarantee is EXECUTED anyway, on the real prompt, right before the launch.
+    # An oversized prompt never reaches the transport, where it would be rejected
+    # fail-closed AFTER the seats had been reserved.
+    prompt_bytes = len(prompt.encode("utf-8"))
+    if prompt_bytes > CONSULT_INPUT_CEILING_BYTES:
+        raise SegmentTooLargeError(
+            f"segment-{order} renders to {prompt_bytes} bytes, over the "
+            f"{CONSULT_INPUT_CEILING_BYTES}-byte transport ceiling; not sent"
+        )
     report: dict[str, Any] = asyncio.run(
         run_orchestrator(
             agents_dir,
@@ -1950,6 +1967,10 @@ def run_segmented(
                 segment_report = _evaluate_segment(
                     order, text, args, output_dir, agents_dir, timeout
                 )
+            except SegmentTooLargeError as exc:
+                # Refused before the launch: tabled, and the next segment still runs.
+                print(f"[!] WARNING: segment-{order} not run: {exc}", file=sys.stderr)
+                entry["consensus"] = _NOT_RUN_SEGMENT_LABEL.format(reason=exc)
             except _SEGMENT_RUN_FAILURES as exc:
                 # Tabled, not fatal: the next segment still runs (§6.2.5).
                 print(f"[!] WARNING: segment-{order} failed: {exc}", file=sys.stderr)
@@ -1991,16 +2012,15 @@ def _integration_jobs(
         segments when the contract lines fit, or ONE ``text=None`` job carrying
         the reason when even a single piece does not.
     """
-    text = _integration_text(sections, plan)
+    parts = split_sections(_integration_text(sections, plan))
     try:
         pieces = BundleSegmenter.plan(
-            split_sections(text),
+            parts,
             CONSULT_INPUT_CEILING_BYTES - wrapper_bytes,
             overhead_bytes=_SECTION_RENDER_OVERHEAD_BYTES,
         )
     except SegmentTooLargeError as exc:
         return [(first_order + 1, [_INTEGRATION_SECTION], None, str(exc))]
-    parts = split_sections(text)
     by_name = {part["name"]: part for part in parts}
     return [
         (
@@ -3275,11 +3295,10 @@ def main() -> None:
             except BaseException as exc:
                 if is_temp_dir:
                     shutil.rmtree(output_dir, ignore_errors=True)
+                # Only the bootstrap's fail-closed family reaches here: a segment's
+                # own failures are tabled inside run_segmented (§6.2.5).
                 if isinstance(exc, FAIL_CLOSED_ERRORS):
                     print(f"[FATAL] {exc}", file=sys.stderr)
-                    sys.exit(1)
-                if isinstance(exc, (MagiRsProcessError, MagiRsContractError)):
-                    print(f"ERROR: {exc}", file=sys.stderr)
                     sys.exit(1)
                 raise
             print(f"\nFull report saved to: {os.path.join(output_dir, 'magi-report.json')}")
