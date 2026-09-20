@@ -1,383 +1,150 @@
-# MAGI Ollama Backend (`--ollama`)
+# MAGI open-weight path (`--ollama`), executed by `magi-rs`
 
-> **Opt-in.** Without `--ollama`, MAGI behaves exactly as before (Claude CLI via
-> `claude -p`). This backend changes **only** the engine of MAGI's *analysis gate*;
-> code generation stays in Claude Code. Available since **v4.0.0**.
+- **Author:** Julian Bolivar
+- **Version:** 6.0.0
+- **Date:** 2026-09-19
 
----
+Since 6.0.0, `--ollama` no longer talks to Ollama itself. The plugin builds the payload
+exactly as before and hands it to **`magi-rs`**, a pinned, digest-verified Rust binary that
+runs the three mages in one `consult` call. The three structured verdicts then enter the
+pipeline that already existed: `load_agent_output`, `determine_consensus`, `format_report`.
+For you the flag still means the same thing, an open-weight trio against an Ollama endpoint
+with one model per mage and no Claude call anywhere. What changed is who runs the trio,
+where the configuration lives, and what `--timeout` does.
 
-## 1. Why an Ollama backend for MAGI
+## 1. Quick start
 
-MAGI is not code generation: it is **ensemble judgment** — three perspectives
-(Melchior/Balthasar/Caspar) analyzing the same input and voting by majority. That
-shifts the cost-vs-token calculus compared to coding:
-
-- **Cost:** one MAGI cycle ingests spec+plan+diff ×3 agents + reasoning +
-  synthesis (~150–250k tokens), and it iterates as a recurring gate. It is the
-  pattern where per-token cost hurts. Local Ollama ≈ 0 marginal; Ollama Cloud ~$20 flat.
-- **Real diversity:** three instances of the *same* frontier model share the same
-  blind spots. With Ollama you run **three open-weight models of distinct lineages**
-  as the three mages → genuine architecture/training diversity, exactly the spirit
-  of MAGI. Majority voting over heterogeneous models is more robust, and human
-  review acts as a backstop.
-
-| Task | Backend |
-|-------|---------|
-| Generate code | **Claude Code** (frontier) — unchanged |
-| MAGI analysis gate | **Claude** (default) or **Ollama** (`--ollama`, opt-in) |
-
----
-
-## 2. How to use it
-
-### Activation
 ```bash
-# Skill:
-/magi --ollama
-# Direct orchestrator:
-python skills/magi/scripts/run_magi.py <code-review|design|analysis> <file_or_text> --ollama [--timeout 900]
-```
-- `--ollama` is **mutually exclusive** with `--model` (per-mage models come from
-  the config, not the CLI). Passing both is an error.
-- Each mage uses its **own model** (see §3).
-
-### Scaffolding the config
-```bash
+# Once per project: creates .magi/ (config, run log) through `magi-rs init`
 python skills/magi/scripts/run_magi.py --ollama-init
+
+# Any gate, any mode
+python skills/magi/scripts/run_magi.py code-review <file_or_text> --ollama
+python skills/magi/scripts/run_magi.py design      <file_or_text> --ollama --timeout 3600
 ```
-Generates `./.claude/magi-ollama.toml` (does not overwrite if it already exists) as
-an editable template, with the local `base_url` active, the default trio, and a
-2-mode header.
 
-### Configuration (layered, per-key merge)
-Precedence (first present wins): **env > repo `./.claude/magi-ollama.toml` >
-global `~/.claude/magi-ollama.toml` > built-in defaults**.
+The first `--ollama` (or `--ollama-init`) after an install downloads `magi-rs` into the
+plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`, and only then
+runs it. Every later run verifies the digest and `--version` again before executing. When
+the binary cannot be obtained or does not verify, the run stops with one `[FATAL]` line and
+nothing is executed. There is no fallback to another architecture or to an unverified copy.
+The one escape hatch is to place the pinned executable in `bin/` by hand, where it is
+verified like any download.
 
-| Key | Chain |
+Run both commands **from the project root**. `--ollama-init` and the gate pass the current
+directory to `magi-rs` as `-w`, so they always agree with each other. A gate run from a
+directory without `.magi/magi.toml` fails and names the command to run; it never
+initialises a project on its own.
+
+## 2. Configuration lives in `.magi/magi.toml`
+
+The plugin has no configuration file of its own any more. `.claude/magi-ollama.toml`, repo
+or global, is not read, not validated and not mentioned, and you can delete it. Everything
+it used to declare has exactly one owner now:
+
+| Setting | Where it lives |
 |---|---|
-| `base_url` | `MAGI_OLLAMA_HOST` → repo → global → `OLLAMA_HOST` → `http://localhost:11434/v1` |
-| `api_key` | `MAGI_OLLAMA_API_KEY` → repo → global → `OLLAMA_API_KEY` → *(none)* |
-| `models.<mage>` | `MAGI_OLLAMA_MODEL_<MAGE>` → repo `[models]` → global `[models]` → default trio |
+| provider, `base_url` | `.magi/magi.toml` (top level) |
+| the trio: `melchior_model`, `balthasar_model`, `caspar_model` and their `*_lineage` | `[magi]` |
+| fallbacks, `max_rotations`, `enforce_diversity`, `strict_context_guard` | `[magi]` / `[[magi.fallback]]` |
+| per-attempt timeouts, memory, everything else | `magi.toml`, documented inline by `magi-rs init` |
 
-Example `magi-ollama.toml` (minimal — just `base_url`/`api_key`/`models`; see §3b below for
-the full schema with `lineage` and `[[fallback]]`, required since **v5.0.0**):
-```toml
-base_url = "http://localhost:11434/v1"   # OpenAI-compatible base (any path is honored verbatim; a bare host:port gets /v1)
-# api_key = "sk-..."                       # cloud/auth only; local does not need it
-[models]
-melchior  = { model = "qwen3.5:397b-cloud",   lineage = "alibaba"  }
-balthasar = { model = "kimi-k2.6:cloud",      lineage = "moonshot" }
-caspar    = { model = "glm-5.2:cloud",        lineage = "zhipu"    }
-```
+You edit that file directly. Before a run the plugin only checks that it **exists**; its
+contents are `magi-rs`'s business, and a file that does not parse is reported by `magi-rs`
+in its own words. The environment chain of 5.x (`MAGI_OLLAMA_*`, repo, global, built-in)
+went away with the file.
 
-> **Security:** the `api_key` is never logged nor written to artifacts, and it is
-> redacted in error messages. Do not commit a TOML with a real key. An
-> `MAGI_OLLAMA_API_KEY=""` (empty) means **explicitly no auth** (it does not inherit
-> the one from the file) — useful in CI.
+`magi-rs` reads credentials from an encrypted vault only when given a passphrase, and this
+plugin never passes one. The provider is Ollama, which needs no key, so the vault would have
+nothing to hold. That is also why `--no-memory` is passed on every run: it is the flag that
+lets `magi-rs consult` proceed without a passphrase. It is not a memory switch; `consult`
+never touches the conversational memory in the first place. Should you ever point
+`magi.toml` at a provider that needs a key, that decision comes back.
 
-### Two cloud modes (same REST client)
-- **A) Local daemon + `ollama signin`** *(recommended)*: local `base_url`, **no**
-  `api_key`. The `:cloud` models run in Ollama's cloud **without downloading weights**
-  (just a manifest); the daemon attaches your credentials. This is the default.
-- **B) Direct cloud API**: cloud-endpoint `base_url` + `api_key`. For machines
-  without a local daemon.
+## 3. What the child process sees
 
-### Verdict extraction (v5.1.0 — replaces the old `structured`/`response_format` setting)
-Reliability no longer comes from asking the server to constrain its own output. Through
-**v5.0.x**, MAGI could request `response_format` (JSON schema) via the `structured` setting,
-with a one-retry-without-it downgrade on a 400. **Both were removed in v5.1.0**: a model
-constrained to raw JSON cannot also wrap its answer in the `<MAGI_VERDICT>` /
-`</MAGI_VERDICT>` marker lines the verdict sentinel now requires (see
-[`docs/faq-prompt-guard.md`](faq-prompt-guard.md) and the
-[ADR](adr/0001-no-runtime-heuristic-fallback.md)) — the two mechanisms are mutually
-exclusive, and the sentinel is the one that closes the fabrication residual, so it wins.
-There is no `structured` key and no `MAGI_OLLAMA_STRUCTURED` environment variable to set
-anymore; a `magi-ollama.toml` that still sets `structured` gets a `WARNING: unknown key
-'structured' ... (ignored)` on stderr and otherwise runs normally — it is not an error, but
-it no longer does anything. Reliability instead comes from the marker contract
-itself, cause-specific retry feedback (`retry_feedback.py`), and — since fallback rotation
-landed in v5.0.0 — rotating a mage to a declared substitute model rather than losing it.
+The child runs with an **allowlisted environment**: `PATH`, `HOME`/`USERPROFILE`, the temp
+variables, `SYSTEMROOT`, `COMSPEC`, the locale variables, the proxy variables
+(`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and their lowercase forms), the TLS/CA variables
+(`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`,
+`NODE_EXTRA_CA_CERTS`) and `OLLAMA_HOST`. Nothing else travels: no `MAGI_PASSPHRASE`, no
+`OPENAI_API_KEY`, no dynamic-linker variables. The same command therefore takes the same path
+whoever launches it. The list is enumerated rather than prefix-matched, and it grows only on
+the evidence of a run that failed. When the child dies or hangs, the error names the
+allowlist as a suspect and lists the parent variables that were withheld, by name only.
 
-**What to watch, and what to do about it.** Removing `response_format` means nothing but the
-prompt now pushes a model toward well-formed output, so the honest expectation is that some
-models drift more than they used to — and the drift is *visible* rather than silently
-"corrected" by a parser that guesses. The counter is `extraction_failures` in
-`magi-report.json`, broken down per mage and per cause (`missing_markers`,
-`unterminated_block`, `ambiguous_markers`, `invalid_json`, `echoed_example`,
-`agent_identity`, `schema`). If a run dies before it can write a report, the same counts go
-to stderr, so the cause outlives the run.
+## 4. `--timeout` has two effects
 
-| What you see | What it means | What to do |
-|---|---|---|
-| Occasional `missing_markers`, run still valid | the retry absorbed it — this is the system working | nothing |
-| One seat above ~10% of attempts, persistently | that model is drifting from the marker contract | iterate that agent's prompt, or move the model down its `[[fallback]]` list and promote a better one |
-| `unterminated_block` climbing | the model is being truncated | its window is too small for your payload — check `context_guard` in the report, raise `output_headroom_tokens`, or split the input |
-| `echoed_example` | the model copied the prompt's worked example | the seat is degraded, not the parser — rotate the model |
-| Every seat failing at once | this is not the models | check the endpoint before touching any prompt |
+`--timeout` is still the wall-clock ceiling of the run. It is also the number `magi-rs`
+derives each mage's per-attempt budget from: measured, `--timeout 1800` gives about 149 s
+per attempt with `max_rotations = 2`, `3600` about 299 s, `7200` about 599 s. The default
+on this path is **1800**, not the Claude path's 900. Any value is honoured; below 1200 s a
+warning goes to stderr, because lowering it also cuts every seat's reasoning budget, and
+the symptom (mages that stop completing) does not look like a timeout setting. The
+16 384-token completion cap belongs to `magi-rs` and cannot be raised from here. A
+reasoning model that spends it all on thinking shows up as a seat that fails; the remedy
+is a different model in that seat, not a longer timeout.
 
-What is *never* the answer is restoring a parser that searches for a verdict instead of
-reading the one the mage marked. That is not a safety valve, it is a switch that re-enables
-the silent fabrication of an `approve` — see the
-[ADR](adr/0001-no-runtime-heuristic-fallback.md).
+## 5. What the report carries
 
-### Preflight (fail-fast)
-Before launching agents, MAGI verifies that the host responds and that the trio is
-available. If the entire `:cloud` trio is missing and the daemon lists no `:cloud`
-models, the message suggests `ollama signin`. A missing `/models` (404/501) →
-warn-and-proceed.
+`magi-report.json` keeps its shape (`agents`, `consensus`, `cost`, `guard`, `input_size`,
+`model`) plus one block this path adds:
 
----
+- **`magi_rs`**: the `consult` telemetry verbatim (`degraded`, `mode`, `mode_source`,
+  `extraction_failures`, `input_size`, `report_truncated`, `endpoint_divergence`,
+  `timeout_below_formula`, `failed_agents`, `rotations`, `ran_unmeasured`, `completions`,
+  `pool_eligibility`), plus `capped_agents` (seats whose accepted attempt hit the completion
+  cap: the verdict counts, the trailing prose was lost), `model_used` (the tag each seat's
+  accepted attempt actually ran on), `run_id` (the pointer into `.magi/logs/magi-<date>.log`,
+  where `magi-rs` writes the per-mage ceiling and the probe notices) and
+  `gate_ran_on_unverified_context` (`true` only when **every** seat ran with an unmeasured
+  context window).
+- **`cost`** is `{"total_usd": null, "per_agent": {}, "cost_source": "unpriced"}`:
+  `magi-rs` exposes no usage per mage, and an unpriced run is not a free one.
+- The `model` block has the same shape as on the Claude path, with every Claude-only field
+  `null`. `served` stays `null` here because nothing confirms the served identity.
 
-## 3. Default models (what the plugin ships)
+The raw envelope is saved next to it as **`magi-rs-raw.json`**, exactly as received, for
+audit. Its embedded transcript is capped at 64 KiB by `magi-rs`; the prompt itself is what
+the plugin sent, unchanged.
 
-Default trio = **Maximum** tier (cloud), **three distinct lineages** on purpose; the
-most capable model goes to **Caspar** (the critic is the highest-leverage seat —
-"losing Caspar biases toward false-positive approval"):
+Four warnings reach stderr, and none of them on a clean run. The run is DEGRADED, because a
+seat delivered nothing or a delivered verdict failed the seven-key contract here, in which
+case the gate is invalid whatever the verdict says. A seat's accepted attempt hit the
+completion cap. The context window was not measured for some seats; the message names the
+remedy, `strict_context_guard = true` in `.magi/magi.toml`, and raises its tone when nobody
+measured anything. There were extraction failures upstream, with their `cause` relayed as
+spelled.
 
-| Mage | Role | Default model | Lineage |
-|------|-----|----------------|--------|
-| **Melchior** | Scientist | `qwen3.5:397b-cloud` | Alibaba |
-| **Balthasar** | Pragmatist | `kimi-k2.6:cloud` | Moonshot |
-| **Caspar** | Critic | `glm-5.2:cloud` | Zhipu |
+## 6. Bundles that do not fit are split
 
-> ⚠️ **Model recommendations current as of 2026-07-03.** The Ollama catalog
-> changes over time; **re-verify the current tags** at
-> [ollama.com](https://ollama.com/search?c=cloud) before pinning them. The defaults
-> are an easily updatable constant (`DEFAULT_MODELS` in `ollama_config.py`).
+`magi-rs consult` rejects any stdin above **262 144 bytes** (about 65 500 tokens), instantly
+and without truncating. A bundle that does not fit under 65 % of that ceiling is split at
+section boundaries and never mid-section: markdown headings up to `###`, and `diff --git`
+file boundaries, including inside a ```` ```diff ```` fence, which is closed and reopened
+per piece. The split is written to `magi-report.json` under `segmentation` **before** the
+first segment runs. Segments then run one at a time into `segment-N/`, every verdict is
+tabled verbatim, and the gate is approved only when every segment passed. A segment whose
+run fails is tabled as `FAILED (...)` while the rest still run; a section too large on its
+own is refused with its name, size and bound. A section may declare the interfaces it owns
+with a `<!-- defines: A, B -->` line right under its heading; when the split separates a
+definition from a segment that mentions it, an extra integration segment runs on the lines
+that mention those names. A bundle that fits is never split.
 
-### 3 recommended tiers (as of 2026-06-07)
+## 7. Troubleshooting
 
-| Tier | Melchior | Balthasar | Caspar | Hardware |
-|------|----------|-----------|--------|----------|
-| **Light** | `qwen3:8b` | `gpt-oss:20b` | `deepseek-r1:8b` | 1 GPU ~16-24 GB (may serialize) |
-| **Balanced** | `qwen3:32b` | `gpt-oss:20b` | `deepseek-r1:32b` | ~48-64 GB |
-| **Maximum (default)** | `qwen3.5:397b-cloud` | `kimi-k2.6:cloud` | `glm-5.2:cloud` | Ollama Cloud (`ollama signin`) or 80 GB+ |
+| Symptom | Meaning / what to do |
+|---|---|
+| `[FATAL] ... is not initialised for magi-rs ... run /magi --ollama-init` | No `.magi/magi.toml` under the current directory. Run the init from the project root, then the gate from the same place. |
+| `[FATAL] digest mismatch` / `version mismatch` | The binary in `bin/` is not the pinned one. Delete it and re-run; the bootstrap downloads and verifies again. |
+| `ERROR: magi-rs exited N; stderr: ...` | The child failed; its stderr is relayed verbatim. If it looks like a missing certificate, proxy or host, the allowlist (section 3) is the first suspect: the message lists what it withheld. |
+| `ERROR: magi-rs did not finish within --timeout` | Raise `--timeout` (section 4), or re-seat a model that keeps overrunning. |
+| `WARNING: the run is DEGRADED ... The gate is INVALID` | A seat died or a verdict failed the contract. Resolve the cause and re-run; a degraded run approves nothing. |
+| `WARNING: NOBODY MEASURED the context window` | Every seat ran on an estimated window. Set `strict_context_guard = true` in `.magi/magi.toml` to fail closed instead. |
+| `WARNING: the bundle was SPLIT into N segments` | Section 6. Each verdict judges one segment; read the table at the end. |
 
-Lineage per role: **Melchior = Qwen** (Alibaba). In the Light/Balanced tiers
-**Balthasar = OpenAI** (`gpt-oss`, adjustable effort) and **Caspar = DeepSeek-R1**
-(a strong local reasoner); the **default Maximum tier** instead runs
-**Balthasar = `kimi-k2.6:cloud` (Moonshot)** and **Caspar = `glm-5.2:cloud`
-(Zhipu)** — the latter after `deepseek-v4-pro:cloud` proved unreliable at
-chat-time (timeouts/5xx). The three defaults keep distinct lineages
-(Qwen / Moonshot / Zhipu). The Maximum tier uses `:cloud` tags (no weight download,
-requires `ollama signin`).
+## 8. References
 
-> VRAM/concurrency note: MAGI launches the 3 agents in parallel; if the models do
-> not coexist in VRAM, Ollama serializes them. Size the trio to your budget, or use
-> the Maximum tier in the cloud.
-
----
-
-## 3b. Fallback rotation (v5.0.0, BREAKING)
-
-When a mage's active model exhausts its attempts — whether from **transport** failures
-(HTTP 5xx, host unreachable, timeout) or **schema** drift (invalid/truncated JSON) — MAGI
-rotates that mage to a declared substitute instead of dropping it to degraded mode. The
-substitute is chosen from a per-run **`[[fallback]]`** list, and rotation is governed by
-one rule: **one lineage, one mage** — a candidate is skipped if its lineage is already in
-play, already failed this mage, condemned run-wide by a transport failure, or if its
-context window cannot hold the payload. This preserves the three *independent* perspectives
-that make the ensemble meaningful. A run where a mage rotated to a **declared** fallback is
-**VALID** (not degraded); only a mage that finds no eligible candidate, or falls to an
-arbitrary model, degrades the run.
-
-### Schema (BREAKING)
-
-```toml
-[models]
-# v4 was a bare string; v5 is a table with an explicit lineage (never inferred).
-melchior  = { model = "qwen3.5:397b-cloud",    lineage = "alibaba"  }
-balthasar = { model = "kimi-k2.6:cloud",        lineage = "moonshot" }
-caspar    = { model = "deepseek-v4-pro:cloud",  lineage = "deepseek" }
-
-# Ordered most -> least capable, one model per lineage, none sharing a trio lineage.
-# With max_rotations = 2 only the first three are ever reached.
-[[fallback]]
-model   = "glm-5.2:cloud"
-lineage = "zhipu"
-[[fallback]]
-model   = "gpt-oss:120b-cloud"
-lineage = "openai"
-[[fallback]]
-model   = "minimax-m3:cloud"
-lineage = "minimax"
-
-# Rotation and context-window settings (apply to ALL mages; top-level, before [models]).
-max_attempts_per_model    = 2     # tries per model before rotating to a fallback (>= 1)
-max_rotations             = 2     # fallback models a mage may rotate through (0 disables rotation)
-max_probe_attempts        = 3     # fallback candidates to size-check before a mage gives up (>= 1)
-output_headroom_tokens    = 8192  # context tokens reserved for the model's answer plus its thinking
-input_margin_pct          = 40    # extra margin when checking the input fits a model's window, percent
-strict_context_guard      = true  # default true: abort if a window cannot be measured; false to estimate
-strict_lineage            = false # if true, abort when a model's architecture contradicts its declared lineage
-retry_backoff_seconds     = 2.0   # seconds to wait between transport retries (0 = no wait)
-preflight_timeout_seconds = 30    # timeout for preflight metadata calls, seconds
-probe_timeout_seconds     = 120   # timeout for the context-probe call, seconds
-```
-
-`--ollama-init` scaffolds this shape — **all nine settings are emitted as active keys at
-their defaults**, so every knob (and the kill-switch) is visible and editable without
-reading the docs. Editing any of them is optional; an untouched scaffold behaves exactly
-as the built-in defaults. A **v4 config fails closed** with an actionable error;
-**`python skills/magi/scripts/validate_magi_toml.py [path]`** reports exactly what to
-change — it never guesses a lineage (two mages sharing a lineage would give a consensus
-that only *looks* like three perspectives). It ships with the plugin, so it is there the
-moment the fail-closed error tells you to run it; pointing it at a path that does not
-exist is an error (exit 2), never an `OK` on defaults it silently fell back to.
-
-### Settings — what each one does
-
-These are top-level keys (they apply to all three mages) and must appear **before**
-`[models]`. Every one has a safe default; change them only if you have a reason.
-
-| Setting | Default | Plain-language meaning |
-|---|---|---|
-| `max_attempts_per_model` | 2 | How many times a mage retries the **same** model before it gives up and rotates to a fallback. |
-| `max_rotations` | 2 | How many fallback models a mage may move through. **`0` turns rotation off** (the kill-switch). |
-| `max_probe_attempts` | 3 | When rotating, how many candidate models to size-check (does the payload fit?) before the mage gives up. |
-| `output_headroom_tokens` | 8192 | Context space reserved for the model's **answer plus its thinking**, so the reply is never cut off. Raise it for very verbose reasoning models. |
-| `input_margin_pct` | 40 | Safety cushion (percent) when estimating whether the input fits a model's context window, for the models MAGI can only estimate rather than measure exactly. |
-| `strict_context_guard` | **true** | Default `true` (v5.2.0): **abort** if a model's context window **cannot be measured**, instead of proceeding on an estimate. Set `false` to opt out and run with an estimated guard. |
-| `strict_lineage` | false | If `true`, **abort** when a model's real architecture family (from `/api/show`) contradicts its declared `lineage`; default `false` makes a contradiction a non-fatal warning. See "Lineage identity" below. |
-| `retry_backoff_seconds` | 2.0 | **Base** of the exponential backoff between transport retries (v5.3.0). `0` = retry immediately (disables the wait, bounded by `max_attempts_per_model`). Schema-error retries never wait. |
-| `retry_backoff_max_seconds` | 60.0 | **Ceiling for OUR computed backoff** — `min(base × 2^n, this)` (v5.3.0). |
-| `retry_after_max_seconds` | 300.0 | **Ceiling for a server `Retry-After` header** (defense against a hostile/buggy server; not a cap on your model). A `Retry-After` up to this wins over our formula (v5.3.0). |
-| `timeout` | 900.0 | Per-agent request timeout in seconds (v5.3.0). `--timeout` on the CLI overrides it; both floor at `1`. |
-| `preflight_timeout_seconds` | 30 | Timeout for the small preflight metadata calls (`/models`, `/api/show`). |
-| `probe_timeout_seconds` | 120 | Timeout for the context probe, which processes the **whole prompt** once — larger than the metadata timeout on purpose. |
-
-### Kill-switch and shadow rollout
-
-`max_rotations = 0` (or, without touching the TOML, **`MAGI_OLLAMA_MAX_ROTATIONS=0`**)
-turns rotation off while leaving the new preflight, the context probe, and the schema
-validation **active** — a shadow-rollout mode to validate the v5 config parsing and the
-measurement paths in production before enabling live rotation.
-
-### Worst-case run time, backoff, and tuning
-
-**Worst-case wall-clock (per mage).** The retry/rotation budget bounds the slowest a mage
-can be:
-
-```text
-worst_case ≈ (1 + max_rotations) × max_attempts_per_model × timeout + Σ backoffs
-```
-
-The three mages run in **parallel**, so the whole run's wall-clock is essentially one
-mage's, NOT ×3. `Σ backoffs` is a **loose upper bound**, not the expected value:
-
-```text
-Σ backoffs ≤ (1 + max_rotations) × max_attempts_per_model
-             × max(retry_backoff_max_seconds, retry_after_max_seconds)
-```
-
-The `max(...)` is needed because a server `Retry-After` (capped at `retry_after_max_seconds`,
-default 300s) can exceed the formula ceiling (`retry_backoff_max_seconds`, default 60s). At the
-defaults (`max_rotations = 2`, `max_attempts_per_model = 2`, `timeout = 900`, ceilings 60/300)
-the backoff term is ≈ 12s (negligible), so `worst_case ≈ 6 × 900s = 90 min` per mage. That is a
-**loose theoretical bound**, not typical behaviour — normal runs are far shorter.
-
-**Exponential backoff (v5.3.0).** For a transient transport failure (`408/429/500/502/503/504`)
-the wait grows `min(retry_backoff_seconds × 2^(attempt-1), retry_backoff_max_seconds)` (2s -> 4s
--> 8s ..., capped). A server `Retry-After` header, when present, **wins** over the formula and is
-honored up to `retry_after_max_seconds`. A **timeout** or a non-HTTP-status transport error uses
-the **flat** `retry_backoff_seconds` — waiting exponentially does not clear a network partition.
-`retry_backoff_seconds = 0` disables the wait (retry immediately, bounded by `max_attempts_per_model`).
-
-**The two ceilings** are distinct and easy to confuse — concretely: if the server asks for 10 min
-we respect it up to `retry_after_max_seconds` = 5 min; our own computed backoff never exceeds
-`retry_backoff_max_seconds` = 1 min.
-
-**Tuning.** Lower `timeout` / `max_rotations` / `max_attempts_per_model` to fit your SLA — it is
-**your** responsibility to size these to your model's latency; MAGI imposes no artificial run cap.
-
-**Caveats (documented honestly).** (a) **No jitter** (KISS at 3 agents): the mages may retry in
-sync against one backend; acceptable at this scale, and with `Retry-After` they sync with or
-without jitter. (b) **Flat backoff for timeouts** is deliberate, but if the endpoint is *overloaded*
-(not partitioned) the immediate retries can add load — raise `retry_backoff_seconds` there. (c) A
-backoff `asyncio.sleep` is a standard cancellation point (like MS1's flat sleep) — a SIGINT/cancel
-mid-wait propagates cleanly.
-
-### Context guard, the probe, and its cost
-
-Before launching a single agent, the preflight **measures** the payload with each trio
-model's own tokenizer (an exact `max_tokens=1` probe against `/chat/completions`) and reads
-each model's context window from `/api/show`. A model whose payload would not fit its
-window **does not run** (truncation produces a verdict indistinguishable from a legitimate
-one). The probe processes the full prompt once per trio model (concurrently) — on cloud
-models this is a real, if small, cost paid once per run. The report's **`context_guard`**
-field is `"enforced"` only when the payload was measured **and** every window is known; it
-reads `"estimated"` (and the banner says so) whenever measurement was not possible — for a
-rotated mage too.
-
-### Hard limitation — no `/api/show`, no window
-
-On an endpoint that does **not** expose `/api/show` (a generic OpenAI-compatible server),
-the window cannot be read. Since **v5.2.0** `strict_context_guard` defaults to **`true`**, so
-this now **fails closed**: the preflight aborts (and rotation skips such a model) rather than
-run on an unverified estimate. Set **`strict_context_guard = false`** to opt back into the
-old behaviour — a noisy warning names the affected models and the run proceeds on the
-estimator, with **no truncation protection at all** for those models.
-
-### Lineage identity (`strict_lineage`, and the digest check)
-
-Three **distinct lineages** is the whole point of the ensemble. MS1 already enforces that the
-declared `lineage` strings differ per mage. **v5.2.0** adds two deeper identity checks:
-
-- **Family check (`strict_lineage`, opt-in, default `false`):** when `true`, MAGI reads each
-  model's real architecture family from `/api/show` and compares it to the declared `lineage`;
-  a contradiction (e.g. `lineage = "deepseek"` but the architecture maps to another vendor)
-  **aborts** the run. With the default `false`, a contradiction is a non-fatal **warning** in
-  `lineage_warnings`, not an abort. The architecture-to-vendor map is deliberately
-  **non-exhaustive** — only unambiguous vendor-specific families (e.g. `qwen3.5 -> alibaba`,
-  `deepseek4 -> deepseek`); ambiguous bases like `llama`/`mistral` are excluded. An unmapped or
-  unknown architecture **never blocks** — it fails **open** (the TOML declaration always wins;
-  the map is a typo detector, never an authority). Adding entries as new models appear is a
-  maintenance point.
-
-- **Digest uniqueness (always on):** two mages must never resolve to the **same model digest**
-  — running the same model twice is forbidden on purpose, because it would collapse the
-  ensemble into a single opinion wearing three hats. This is checked in the preflight and again
-  at every rotation commit. **Cloud caveat (honest):** the `:cloud` trio's `/api/show` does
-  **not** report a digest, so for cloud models the digest check has nothing to compare and
-  **degrades gracefully** to the lineage-string uniqueness (MS1) plus the family check above;
-  the digest check is only fully active for **local** models that report a digest. A *non-cloud*
-  model that unexpectedly omits its digest **fails closed** (uniqueness cannot be proven).
-
-```toml
-strict_lineage = true   # opt in: a family contradiction aborts, not just warns
-```
-
-### Telemetry (never a silent fallback)
-
-Every rotation is announced on **stderr** at the moment it happens, marked in the report
-**banner** (`[fallback: <model>]`), and recorded in `magi-report.json` per agent
-(`model_configured`, `model_used`, `rotations`, structured `fallback_reason`) and per run
-(`fallback_agents`, `context_guard`, `lineage_warnings`, `token_estimate_delta`).
-
----
-
-## 4. Troubleshooting
-
-| Symptom | Likely cause | Action |
-|---|---|---|
-| `Cannot reach Ollama at <host>` | daemon down / wrong host | start Ollama; check `base_url`/`OLLAMA_HOST` |
-| `No :cloud models available ... Run ollama signin` | `:cloud` trio without a cloud session | `ollama signin` (mode A) or set `api_key`+cloud base_url (mode B) |
-| `Missing models on <host>: [...]` | local models not pulled | `ollama pull <model>`, or edit the TOML to the tier you have |
-| `Auth failed (401/403)` | invalid/absent api_key | fix `MAGI_OLLAMA_API_KEY` / the TOML |
-| `--model does not apply with --ollama` | you passed both | drop `--model`; models go in the TOML/env |
-| A mage is dropped although its `*.raw.json` looks like a valid verdict | the model wrapped its JSON in a markdown fence or a `<think>` block | **fixed in 4.0.6** — the parser now reads the raw file as text before assuming an envelope. If you still see it on 4.0.6+, keep the `raw.json`: it is a parser bug, not a config problem |
-| `[FATAL]` at startup naming a file under `agents/` | one of the three shipped agent prompts has malformed `<MAGI_VERDICT>` markers, or a complete verdict sitting between them | see [`docs/faq-prompt-guard.md`](faq-prompt-guard.md) — every message explained, with the fix |
-| `extraction_failures` non-empty in `magi-report.json` (v5.1.0+) | a model omitted the marker lines, emitted more than one block, or copied the prompt's worked example | check the per-cause counts; a model that fails this repeatedly needs a prompt iteration or a model swap, not a config change (see the ADR at `docs/adr/0001-no-runtime-heuristic-fallback.md`) |
-
----
-
-## 5. References
-
-- Implementation: `skills/magi/scripts/ollama_backend.py`, `ollama_config.py`,
-  `ollama_preflight.py`, `ollama_init.py`, `backend.py`, `claude_backend.py`,
-  `fallback_policy.py`, `model_context.py`.
-- Verdict extraction (v5.1.0): `skills/magi/scripts/verdict_markers.py`,
-  `prompt_guard.py`, `retry_feedback.py` — see
-  [`docs/faq-prompt-guard.md`](faq-prompt-guard.md) and
-  [`docs/adr/0001-no-runtime-heuristic-fallback.md`](adr/0001-no-runtime-heuristic-fallback.md).
-- Ollama cloud catalog: <https://ollama.com/search?c=cloud>
+- `skills/magi/magi-rs.pin.json`: the pinned version and per-platform digests.
+- `magi-rs`: [BolivarTech/magi](https://github.com/BolivarTech/magi) releases (assets and `SHA256SUMS.txt`).
+- `docs/MAGI-System-Documentation.md`: the full technical reference of the plugin.

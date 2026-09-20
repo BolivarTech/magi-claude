@@ -73,31 +73,25 @@ outputs, and runs synthesis automatically:
 
 Pass `--model sonnet` or `--model haiku` to override the default.
 
-**Ollama backend (opt-in, parallel mode only):** If the user requests Ollama
-(e.g. `/magi --ollama`, "use ollama", "con ollama"), pass `--ollama` to run the
-three magi against an **OpenAI-compatible Ollama server** (local, LAN, or cloud)
-instead of `claude -p`, with a **distinct model per mage** for genuine
-cross-lineage diversity:
+**Open-weight path (opt-in, parallel mode only):** If the user requests Ollama
+(e.g. `/magi --ollama`, "use ollama", "con ollama"), pass `--ollama`. The three magi
+then run through **`magi-rs`**, a pinned, digest-verified binary the plugin downloads
+into its `bin/` and verifies on every run, against the Ollama endpoint and the trio
+declared in the project's `.magi/magi.toml`, one model per mage:
 
-    python skills/magi/scripts/run_magi.py <mode> <input_file_or_text> --ollama [--timeout 900]
+    python skills/magi/scripts/run_magi.py <mode> <input_file_or_text> --ollama [--timeout 1800]
 
-- `--ollama` is **mutually exclusive** with `--model` (per-mage models come from
-  config, not the CLI — passing both errors out).
-- Host, API key, and the per-mage model trio resolve in layers: env
-  (`MAGI_OLLAMA_HOST` / `MAGI_OLLAMA_API_KEY` / `MAGI_OLLAMA_MODEL_<MAGE>`) > repo
-  `./.claude/magi-ollama.toml` > global `~/.claude/magi-ollama.toml` > built-in
-  defaults (cloud trio). `OLLAMA_HOST` / `OLLAMA_API_KEY` act as generic fallbacks
-  below the files.
-- Run `python skills/magi/scripts/run_magi.py --ollama-init` to scaffold a
-  starter `./.claude/magi-ollama.toml` (refuses to overwrite an existing one).
-- A fail-fast **preflight** checks the host is reachable and the trio is
-  available before launching; cloud models (`:cloud` tags) require `ollama signin`
-  on the local daemon (no weight download) or an `api_key` for the direct cloud API.
-- **v5.0.0 (BREAKING):** `[models]` now declares a `lineage` per mage and a
-  `[[fallback]]` list; a mage whose model fails **rotates** to a declared fallback of a
-  different lineage instead of degrading (announced on stderr/banner/report). A v4 config
-  fails closed — `python skills/magi/scripts/validate_magi_toml.py` shows the migration; kill-switch:
-  `MAGI_OLLAMA_MAX_ROTATIONS=0`. See [`docs/ollama-backend.md`](../../docs/ollama-backend.md).
+- `--ollama` is **mutually exclusive** with `--model`: the trio comes from
+  `.magi/magi.toml`, not the CLI, and passing both errors out.
+- Run `python skills/magi/scripts/run_magi.py --ollama-init` once per project, from
+  the project root: it calls `magi-rs init` and nothing else. A gate run from a project
+  without `.magi/magi.toml` fails and names that command; it never initialises on its own.
+- `.claude/magi-ollama.toml` is no longer read (6.0.0); everything it declared lives in
+  `.magi/magi.toml`, which `magi-rs` owns.
+- `--timeout` defaults to 1800 here and also sets each mage's per-attempt budget.
+- A bundle above `magi-rs`'s 256 KiB input ceiling is split at section boundaries and
+  evaluated one segment at a time; the gate passes only if every segment does.
+  See [`docs/ollama-backend.md`](../../docs/ollama-backend.md).
 
 The orchestrator handles everything: agent launching, output parsing, schema validation,
 failure alerting, consensus synthesis, and report generation. No additional steps needed.

@@ -46,44 +46,20 @@ For trivial questions with one clear answer, the complexity gate skips the full 
 
 For the full technical reference, see [`docs/MAGI-System-Documentation.md`](docs/MAGI-System-Documentation.md).
 
-**New in v4.0.0 — Ollama backend (opt-in):** run the MAGI *gate* on local/LAN/cloud
-open-weight models with genuine cross-lineage diversity (a distinct model per mage),
-without changing the default Claude path. Quick start: `/magi --ollama` (or
-`run_magi.py ... --ollama`); `--ollama-init` scaffolds the config. Full guide —
-rationale, configuration, default models, and recommended hardware tiers — in
-[`docs/ollama-backend.md`](docs/ollama-backend.md).
-
-**New in v5.0.0 — fallback rotation (BREAKING, Ollama only):** when a mage's model
-exhausts its attempts, MAGI now **rotates it to a declared `[[fallback]]` model of a
-different lineage** instead of losing the mage to degraded mode — preserving the three
-independent perspectives the ensemble depends on. This **changes the `magi-ollama.toml`
-schema**: `[models]` entries go from a bare string to a table with an explicit `lineage`
-(`melchior = { model = "qwen3.5:397b-cloud", lineage = "alibaba" }`). A v4 config now
-fails closed with an actionable error — run `python skills/magi/scripts/validate_magi_toml.py` to see
-exactly what to change (the lineage is never inferred). **Kill-switch:**
-`MAGI_OLLAMA_MAX_ROTATIONS=0` disables rotation entirely (a shadow-rollout mode that keeps
-the new preflight/probe active while rotation is off). **Fail-closed by default (v5.2.0):**
-`strict_context_guard` now defaults to **`true`** — on an endpoint that does **not** expose
-`/api/show` (so the window cannot be measured), MAGI **aborts** rather than run on an
-unverified estimate. Set `strict_context_guard = false` to opt out and proceed with an
-estimated guard. Rotation, its telemetry, the probe cost, and migration are documented in
-[`docs/ollama-backend.md`](docs/ollama-backend.md).
-
-**New in v5.0.2 — the scaffold shows every knob:** `--ollama-init` now writes all nine
-rotation / context-window settings as active keys at their defaults (top-level, before
-`[models]`), so the tuning surface — and the `max_rotations = 0` kill-switch — is visible
-and editable without reading the docs. In plain terms: **`max_attempts_per_model`** = how
-many times a mage retries the same model before rotating; **`max_rotations`** = how many
-fallbacks it may try (`0` turns rotation off); **`output_headroom_tokens`** = context space
-reserved for the model's reply so it is never cut off; **`input_margin_pct`** = safety
-cushion when estimating whether the input fits a model's window; **`strict_context_guard`**
-= refuse a model whose window cannot be measured (default `true`; set `false` to estimate);
-**`retry_backoff_seconds`** = **base** of the exponential retry backoff (v5.3.0; `0` = retry
-immediately), capped by **`retry_backoff_max_seconds`**; a server `Retry-After` is honored up to
-**`retry_after_max_seconds`**; **`timeout`** = per-agent request timeout (`--timeout` overrides);
-**`preflight_timeout_seconds`** / **`probe_timeout_seconds`** = timeouts for the metadata calls and
-the context probe. An untouched scaffold behaves exactly as the built-in defaults. Full table in
-[`docs/ollama-backend.md`](docs/ollama-backend.md).
+**New in v6.0.0: the open-weight trio is executed by `magi-rs` (BREAKING).** `--ollama`
+keeps its name and its meaning, three open-weight models against an Ollama endpoint, one
+per mage, with no Claude call anywhere. The plugin no longer runs them itself, though. It
+builds the payload as before and hands it to `magi-rs`, a pinned, sha256-verified binary
+that the plugin downloads into its own `bin/` on first use and re-verifies on every run,
+which runs the trio in one call and returns three structured verdicts. Configuration moved
+with the execution: `.claude/magi-ollama.toml` is gone (an old copy is simply ignored), and
+the trio, its fallbacks and its context guard now live in `.magi/magi.toml`, created by
+`--ollama-init` through `magi-rs init`. Two things to know before you run it. `--timeout`
+now also sets each mage's per-attempt budget (default 1800 on this path). And a bundle that
+does not fit `magi-rs`'s 256 KiB input ceiling is split at section boundaries and evaluated
+one segment at a time, with the gate approved only when every segment passes; it is never
+truncated. Migration, the report's `magi_rs` block, the stderr warnings and the
+troubleshooting table are in [`docs/ollama-backend.md`](docs/ollama-backend.md).
 
 > **`--ollama` runs the gate Claude-free, end-to-end.** The consensus verdict and the
 > output banner are produced by **deterministic local Python** (`consensus.determine_consensus`
@@ -224,15 +200,15 @@ MAGI analysis of this problem
 ### CLI (Direct Execution)
 
 ```bash
-python skills/magi/scripts/run_magi.py <mode> <file_or_text> [--model opus] [--timeout 300] [--output-dir <dir>]
+python skills/magi/scripts/run_magi.py <mode> <file_or_text> [--model opus] [--timeout 900] [--output-dir <dir>]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--model` | `opus` | LLM model for all agents (`opus`, `sonnet`, `haiku`) — Claude backend |
-| `--ollama` | off | Use the OpenAI-compatible **Ollama** backend (distinct model per mage) instead of `claude -p`. Mutually exclusive with `--model`. See [`docs/ollama-backend.md`](docs/ollama-backend.md) |
-| `--ollama-init` | — | Scaffold `./.claude/magi-ollama.toml` from defaults and exit |
-| `--timeout` | `300` | Per-agent timeout in seconds |
+| `--ollama` | off | Run the open-weight trio through **`magi-rs`** (one model per mage, from `.magi/magi.toml`) instead of `claude -p`. Mutually exclusive with `--model`. See [`docs/ollama-backend.md`](docs/ollama-backend.md) |
+| `--ollama-init` | — | Initialise the project for `magi-rs` (`magi-rs init -w <cwd>`, creates `.magi/`) and exit |
+| `--timeout` | `900` / `1800` | Per-agent timeout in seconds (`900` on the Claude path; `1800` with `--ollama`, where it also sets each mage's per-attempt budget) |
 | `--output-dir` | auto | Directory for agent outputs (default: temp dir) |
 | `-o`, `--out` | — | Redirect the human-readable verdict report to a file (suppressing it on stdout); on a write failure it warns and falls back to stdout so the verdict is never lost |
 
