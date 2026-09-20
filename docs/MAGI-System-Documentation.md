@@ -108,7 +108,7 @@ tests/
   test_verdict_markers.py     -- the sentinel: extraction, both marker predicates, hypothesis
   test_parse_agent_output.py  -- transport envelopes, the delimited block, fail-closed paths
   test_prompt_guard.py        -- the installation-time guard and its dry run
-  test_run_magi.py            -- args, orchestration, rotation, retry feedback, telemetry
+  test_run_magi.py            -- args, orchestration, retry feedback, telemetry, segmentation
 docs/
   MAGI-System-Documentation.md  -- This document
 pyproject.toml                -- Python >= 3.12, dual license, dev deps, tool config
@@ -501,12 +501,16 @@ Changes are picked up with `/reload-plugins` without restarting.
 
 ## 13. Test Suite
 
-994 tests. The load-bearing files:
+1107 tests (3 skipped). The load-bearing files:
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `test_run_magi.py` | 286 | Args, orchestration, degraded mode, lineage rotation, the retry's cause-specific feedback and its derived bound, marker-adherence telemetry, the attempt budget bounded at both ends |
+| `test_run_magi.py` | 211 | Args, orchestration, degraded mode, the retry's cause-specific feedback and its derived bound, marker-adherence telemetry, the attempt budget bounded at both ends |
 | `test_synthesize.py` | 167 | Validation, weight-based consensus, confidence formula (symmetric), findings dedup, dynamic labels, banner alignment, report formatting |
+| `test_magi_rs_bootstrap.py` | 58 | The `magi-rs` bootstrap: platform asset, digest and version verification, validated extraction (traversal, bombs), staging + rename, the sweep to exactly one executable |
+| `test_magi_rs_trio.py` | 55 | One `magi-rs consult` per run: argv and stdin, the allowlisted environment, fail-closed errors as one line, the `magi_rs` telemetry block and its stderr warnings |
+| `test_magi_rs_result.py` | 43 | The nested `consult` envelope: `agents`, the telemetry keys, `consult: null`, the open `cause` set |
+| `test_trio_executor.py` | 36 | `ClaudeTrio`: the `claude -p` transport, per-mage retry with cause-specific feedback, the echo and identity guards |
 | `test_verdict_markers.py` | 50 | The sentinel: the extraction algorithm and its fail-closed ORDER, both marker predicates (permissive for the model, strict for our own files), invisibles, homoglyphs, fences, and two `hypothesis` properties whose noise is hostile |
 | `test_measure_marker_adherence.py` | 37 | The release gate: a run measured blind cannot certify green, the instrument survives what it tallies, and it observes the parser without perturbing it |
 | `test_parse_agent_output.py` | 32 | Transport envelopes (3 CLI shapes), the delimited block, and every path that fails closed |

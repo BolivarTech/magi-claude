@@ -9,6 +9,33 @@ Install and update through the marketplace: `/plugin marketplace add BolivarTech
 `/plugin install magi@bolivartech-plugins`, then `/plugin marketplace update` to pick up a new
 release.
 
+## [6.1.0] - 2026-09-20
+
+### Removed
+
+- The 5.x Ollama HTTP client and everything that existed to sustain it: `ollama_backend.py`,
+  `ollama_preflight.py`, `fallback_policy.py`, `model_context.py`, `lineage_identity.py`,
+  `backoff.py`, `redaction.py`, `ollama_config.py` and `validate_magi_toml.py`, together with
+  the per-mage backend abstraction (`backend.py`, `claude_backend.py`) that `ClaudeTrio`
+  replaced in 6.0.0. Nothing in it has been reachable from `--ollama` since 6.0.0: rotation,
+  context guard, backoff and redaction all belong to `magi-rs` now. The migration
+  command `validate_magi_toml.py` goes with the schema it migrated: there is no plugin TOML
+  left to migrate.
+- `--ollama-init` no longer carries the 5.x template code. It is one `magi-rs init` call,
+  exactly as documented in 6.0.0.
+
+### Changed
+
+- `--max-attempts` passed together with `--ollama` now says that it has no effect on that
+  path (`magi-rs` owns every retry and rotation from `.magi/magi.toml`). It used to claim a
+  TOML override that no longer existed.
+
+### Documentation
+
+- `docs/ollama-backend.md` gains the two migration notes that only a document can carry: a
+  `magi.toml` written by a `magi-rs` older than 0.18.0 is refused over its `[headless]` log
+  keys, and the `linux-x86_64-compat` build is not in the pin.
+
 ## [6.0.0] - 2026-09-19
 
 ### Changed (BREAKING)
@@ -54,7 +81,8 @@ release.
 - The 5.x Ollama HTTP client (`ollama_backend.py`, `ollama_preflight.py`, the rotation and
   context-guard modules, `ollama_config.py`, `validate_magi_toml.py`) is still in the tree but
   is no longer reached by `--ollama`. It is deleted in the next release, after this one has
-  been installed from the marketplace and the bootstrap has survived the update.
+  been installed from the marketplace and the bootstrap has survived the update. (Done in
+  6.1.0.)
 
 ## [5.4.0] - 2026-07-30
 
