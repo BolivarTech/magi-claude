@@ -1338,6 +1338,16 @@ a typo as fact -- with ``max_rotations = 0`` even the recommended timeout is
 flagged (measured 2026-09-29). The warning arrives after the run, so it leaves
 evidence but cannot protect a hung run."""
 
+_CLOCK_ROTATIONS_WARNING = (
+    "[!] WARNING: magi-rs flagged --timeout {timeout} as a probable typo, but it is not above "
+    "the recommended value: the per-mage ceiling magi-rs derives also depends on max_rotations "
+    "in .magi/magi.toml (with max_rotations = 0 even the default is flagged). Check that "
+    "setting rather than the timeout."
+)
+"""The flag on a timeout at or below the recommended one points at the config:
+recommending the value already in use would contradict itself (measured
+2026-09-29: max_rotations = 0 turns 16820 into a 7005 s per-mage ceiling)."""
+
 
 def build_report_block(result: ConsultResult, *, timeout_seconds: int) -> dict[str, Any]:
     """Build the ``magi_rs`` block for ``magi-report.json``.
@@ -1473,7 +1483,9 @@ def _announce_magi_rs_telemetry(
         print(
             _CLOCK_TYPO_WARNING.format(
                 timeout=timeout_seconds, recommended=DEFAULT_OLLAMA_TIMEOUT_SECONDS
-            ),
+            )
+            if timeout_seconds > DEFAULT_OLLAMA_TIMEOUT_SECONDS
+            else _CLOCK_ROTATIONS_WARNING.format(timeout=timeout_seconds),
             file=stream,
         )
     if result.degraded or degraded_locally:
