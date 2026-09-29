@@ -1,29 +1,29 @@
 {
-  "version": "0.19.1",
+  "version": "0.21.0",
   "repository": "BolivarTech/magi",
   "assets": {
     "windows-x86_64": {
-      "name": "magi-rs-v0.19.1-windows-x86_64.zip",
-      "archive_sha256": "6833bf6049064076a5652de9fc83aaf8095ce906c0ffc78cfb0d98058443b71e",
-      "executable_sha256": "4c10850e41a8392301efe1e541bf5c53aa9dd859549f7453ac1539e4056b1355",
+      "name": "magi-rs-v0.21.0-windows-x86_64.zip",
+      "archive_sha256": "f8e171c501757c7bed7ba0507b310893ebdcf9649f3d08f0dfd23f2e2c84ea11",
+      "executable_sha256": "6e681b3074701fbc4fc2690b531bdc67e525572873dce0bcc314c26776bc514b",
       "archive_kind": "zip"
     },
     "linux-x86_64": {
-      "name": "magi-rs-v0.19.1-linux-x86_64.tar.gz",
-      "archive_sha256": "3071b75cb4b5b9152d965a40c2ead68d4d88ba8c36c5192ac2b7a51bed9a5330",
-      "executable_sha256": "2323738c54dec6d79a795d77cbd991b599dbfe8bd789071a30ae3abf95125932",
+      "name": "magi-rs-v0.21.0-linux-x86_64.tar.gz",
+      "archive_sha256": "151c94baa74abf77de30b859b8694ee05af87952155b672d2002b7e060a237aa",
+      "executable_sha256": "47e656743935b661c40a1263232f09141f01aed50019e3a06166a39958d3cc67",
       "archive_kind": "tar.gz"
     },
     "linux-aarch64": {
-      "name": "magi-rs-v0.19.1-linux-aarch64-rpi5.tar.gz",
-      "archive_sha256": "8a5c0102fb508da62a6ea15d4593d5a8ca47d4c5ea5614015cd25af333ca46ab",
-      "executable_sha256": "d26c16349a8acfffffdc58a5d479fdcb84d033127bc74dc32cd98b69e923996e",
+      "name": "magi-rs-v0.21.0-linux-aarch64-rpi5.tar.gz",
+      "archive_sha256": "1309d988b48b2e286de7081fa8cc35912e88683ed13cb787e988d088b296fbd0",
+      "executable_sha256": "eb05ea038bc9195992b0fb2a1f6089f1da84f2c0c83574541fffb9499ba6b220",
       "archive_kind": "tar.gz"
     },
     "macos-universal2": {
-      "name": "magi-rs-v0.19.1-macos-universal2.tar.gz",
-      "archive_sha256": "51995afe626b1d51b5b654dd4b4e6b495eae041b2ac661f6e4e941ae11ae2cc6",
-      "executable_sha256": "2e145d3eec26dd8987cdf9bda45d03c4509c281b53a52f0bf0f51fe41788ef58",
+      "name": "magi-rs-v0.21.0-macos-universal2.tar.gz",
+      "archive_sha256": "c38219700a4128afb91428efe15ef2008d024bb5b76abca00df2a7e4dbd87b7a",
+      "executable_sha256": "f78c020bf2badbf02a84492ac2dc664cc6d5ed85b8d33db58923067b42cd1ef4",
       "archive_kind": "tar.gz"
     }
   }
