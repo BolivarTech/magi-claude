@@ -253,7 +253,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # here would make every run look explicit.
         default=None,
         help=(
-            "Per-agent timeout in seconds, >= 1. Claude path: default 900. With --ollama: "
+            "Per-agent timeout in seconds, >= 1. When omitted, the plugin applies the "
+            "default of the path: 900 on the Claude path; with --ollama, "
             f"default {DEFAULT_OLLAMA_TIMEOUT_SECONDS}, and magi-rs also derives each mage's "
             "per-attempt budget from it."
         ),
