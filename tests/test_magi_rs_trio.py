@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.3.0
+# Version: 1.4.0
 # Date: 2026-09-29
 """Tests for MagiRsTrio, the second TrioExecutor (MS3 Task 3).
 
@@ -1018,3 +1018,29 @@ async def test_a_non_utf8_stderr_still_shows_its_last_line(monkeypatch, tmp_path
     with pytest.raises(MagiRsProcessError) as exc:
         await _run(monkeypatch, tmp_path)
     assert "FATAL: tail survives" in str(exc.value)
+
+
+_RUN_TIMEOUT = 1800  # the explicit timeout tests/test_magi_rs_trio.py::_invoke passes
+
+
+@pytest.mark.asyncio
+async def test_the_outer_clock_is_exactly_the_timeout_because_m4_found_no_overshoot(
+    monkeypatch, tmp_path
+):
+    # R3a row 1 (planning/v0.21.0-verification/M4): no margin, measured, not assumed.
+    # Guard test: green on purpose; fixes the measured decision.
+    import magi_rs_trio
+
+    seen = {}
+    real_wait_for = asyncio.wait_for
+
+    async def _spy(awaitable, timeout):
+        seen["timeout"] = timeout
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(magi_rs_trio.asyncio, "wait_for", _spy)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(_ok_payload()))
+    )
+    await _run(monkeypatch, tmp_path)
+    assert seen["timeout"] == _RUN_TIMEOUT
