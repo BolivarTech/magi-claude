@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.5.0
-# Date: 2026-09-19
+# Version: 1.6.0
+# Date: 2026-09-29
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
 This is the second implementer of :class:`TrioExecutor` -- the one that
@@ -92,6 +92,10 @@ historical 900 would roughly halve it, back to the 72 s ceiling that made E-B
 abort with one seat of three."""
 _MIN_HEALTHY_TIMEOUT_SECONDS = 1200
 _STDERR_EXCERPT_CHARS = 2000
+_STDERR_ELISION_MARKER = "[... earlier stderr elided ...] "
+"""Prefixed to a failure's stderr excerpt when its head was cut. Since 0.20 magi-rs
+writes WARN lines at startup and the real cause of a failure comes last, so the
+excerpt keeps the tail (v6.2.0 R14); the marker says the head is missing."""
 
 
 #: Every fail-closed error the bootstrap and the preflight can raise. All are

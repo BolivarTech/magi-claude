@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.2.0
+# Version: 1.3.0
 # Date: 2026-09-29
 """Tests for MagiRsTrio, the second TrioExecutor (MS3 Task 3).
 
@@ -17,6 +17,7 @@ import pytest
 from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_preflight import ProjectNotInitialisedError
 from magi_rs_trio import (
+    _STDERR_ELISION_MARKER,
     MagiRsContractError,
     MagiRsProcessError,
     MagiRsTrio,
@@ -975,3 +976,45 @@ def test_main_shouts_invalid_when_a_verdict_fails_the_contract_locally(
     assert report["degraded"] is True and report["magi_rs"]["degraded"] is False
     err = capsys.readouterr().err.lower()
     assert "the gate is invalid" in err
+
+
+@pytest.mark.asyncio
+async def test_a_long_stderr_keeps_its_tail_where_the_real_cause_is(monkeypatch, tmp_path):
+    # Scenario 15: 0.20+ writes WARN lines at startup; the cause comes last.
+    stderr = b"WARN clock coverage\n" * 200 + b"FATAL: the real cause"
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"", stderr=stderr, returncode=2)),
+    )
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    message = str(exc.value)
+    assert "FATAL: the real cause" in message
+    assert _STDERR_ELISION_MARKER in message
+
+
+@pytest.mark.asyncio
+async def test_a_short_stderr_goes_whole_and_unmarked(monkeypatch, tmp_path):
+    # Scenario 17. Guard test: green in Red on purpose; protects the marker from
+    # appearing when nothing was cut.
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"", stderr=b"boom", returncode=3)),
+    )
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    assert "boom" in str(exc.value)
+    assert _STDERR_ELISION_MARKER not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_a_non_utf8_stderr_still_shows_its_last_line(monkeypatch, tmp_path):
+    # Review Focus 2.
+    stderr = b"\xff\xfe garbage " * 400 + b"FATAL: tail survives"
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"", stderr=stderr, returncode=1)),
+    )
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    assert "FATAL: tail survives" in str(exc.value)
