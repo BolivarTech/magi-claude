@@ -257,6 +257,30 @@ def _emit(on_state: Callable[[str, str], None] | None, node: str, state: str) ->
         print(f"WARNING: status display failed for {node!r}: {exc}", file=sys.stderr)
 
 
+def _stderr_tail(stderr: bytes) -> str:
+    """Return the last ``_STDERR_EXCERPT_CHARS`` characters of a child's stderr.
+
+    Args:
+        stderr: The raw bytes the child wrote; need not be valid UTF-8.
+
+    Returns:
+        The decoded text (undecodable bytes replaced), whole when it fits, else
+        its tail prefixed with ``_STDERR_ELISION_MARKER``.
+
+    Example:
+        >>> _stderr_tail(b"boom")
+        'boom'
+
+    Note:
+        The tail, not the head: magi-rs's startup WARN lines come first and the
+        cause of a failure comes last (v6.2.0 R14). O(n) in the stderr size.
+    """
+    text = stderr.decode("utf-8", errors="replace")
+    if len(text) <= _STDERR_EXCERPT_CHARS:
+        return text
+    return _STDERR_ELISION_MARKER + text[-_STDERR_EXCERPT_CHARS:]
+
+
 class MagiRsTrio(TrioExecutor):
     """Run the three mages by delegating to one ``magi-rs consult``.
 
@@ -464,7 +488,7 @@ class MagiRsTrio(TrioExecutor):
             _emit(on_state, _TRIO_NODE, "failed")
             raise MagiRsProcessError(
                 f"magi-rs exited {process.returncode}; stderr: "
-                f"{stderr.decode('utf-8', errors='replace')[:_STDERR_EXCERPT_CHARS]!r}. "
+                f"{_stderr_tail(stderr)!r}. "
                 f"{self._allowlist_hint()}"
             )
         _emit(on_state, _TRIO_NODE, "success")
