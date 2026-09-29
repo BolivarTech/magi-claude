@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.6.0
+# Version: 1.7.0
 # Date: 2026-09-29
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
@@ -74,8 +74,9 @@ no config of its own (R13). It does NOT isolate memory: ``consult`` never
 touches the memory layer by construction, so every run is stateless anyway."""
 
 _TIMEOUT_FLAG = "--timeout"
-"""Wall-clock ceiling (R12). ``magi-rs`` also DERIVES the per-mage attempt
-budget from it: MS0 measured 149 s per attempt at 1800."""
+"""Wall-clock ceiling (R12). ``magi-rs`` also DERIVES the per-mage budget from
+it: with magi-rs 0.21.0, 16820 derives a 2335 s per-mage ceiling, a 1401 s
+operation budget and a 700 s per-request clock (v6.2.0 M1)."""
 
 _TRIO_NODE = "magi-rs consult · 3 mages"
 """The single status node. D5/BDD-27: the plugin launches ONE child and cannot
@@ -86,11 +87,15 @@ _RAW_ARTIFACT = "magi-rs-raw.json"
 #: ``failed_agents`` instead) still gets an entry: its failure.
 _MAGES = ("melchior", "balthasar", "caspar")
 _NO_VERDICT_CAUSE = "absent from agents and from failed_agents"
-_DEFAULT_OLLAMA_TIMEOUT_SECONDS = 1800
-"""Measured-healthy: MS0 saw 149 s per mage attempt at this value. The plugin's
-historical 900 would roughly halve it, back to the 72 s ceiling that made E-B
-abort with one seat of three."""
-_MIN_HEALTHY_TIMEOUT_SECONDS = 1200
+DEFAULT_OLLAMA_TIMEOUT_SECONDS = 16820
+"""magi-rs 0.21.0's published headless gate value; derives its 2335 s default
+ceiling (700 s per request, 1401 s operation budget). Source: 0.21.0 release
+notes and docs/REASONING-BUDGET.md, replay B (2026-09-27); confirmed locally
+in planning/v0.21.0-verification/M1 (2026-09-29). Re-measured at every pin
+move. Public: tools/measure_marker_adherence.py reads it."""
+_MIN_HEALTHY_TIMEOUT_SECONDS = DEFAULT_OLLAMA_TIMEOUT_SECONDS
+"""Below the default the derived ceiling falls under the only value measured
+with the 65 536-token output cap, so a lower value warns (D2)."""
 _STDERR_EXCERPT_CHARS = 2000
 _STDERR_ELISION_MARKER = "[... earlier stderr elided ...] "
 """Prefixed to a failure's stderr excerpt when its head was cut. Since 0.20 magi-rs
@@ -141,7 +146,7 @@ def build_argv(executable: str, workdir: str, mode: str, timeout: int) -> list[s
             omitting it costs ``magi-rs`` an extra model call to classify, and
             lets the content under review choose the lens it is reviewed under.
         timeout: Wall-clock ceiling in seconds. ``magi-rs`` also DERIVES the
-            per-mage budget from it (MS0 measured 149 s per attempt at 1800).
+            per-mage budget from it (16820 -> 2335 s per mage with 0.21.0).
 
     Returns:
         The argv. The prompt is NOT in it -- it travels on stdin, because the
@@ -173,11 +178,11 @@ def build_argv(executable: str, workdir: str, mode: str, timeout: int) -> list[s
 def resolve_timeout(flag_value: int | None) -> tuple[int, str | None]:
     """Resolve the wall timeout and warn when it starves the per-mage budget.
 
-    ``magi-rs`` DERIVES each mage's attempt budget from this value; MS0 measured
-    149 s per attempt at ``--timeout 1800``. The plugin's historical default of
-    900 would halve that to roughly the 72 s ceiling that made E-B abort with
-    one seat of three -- so the open-weight path defaults to 1800, and a lower
-    explicit value is honoured with a warning rather than silently accepted.
+    ``magi-rs`` DERIVES each mage's budget from this value; with 0.21.0,
+    ``--timeout 16820`` derives the 2335 s per-mage ceiling that magi-rs
+    measured with its 65 536-token output cap (v6.2.0 M1). The open-weight
+    path defaults to that value, and a lower explicit value is honoured with a
+    warning rather than silently accepted.
 
     Args:
         flag_value: The operator's ``--timeout``, or None when omitted.
@@ -189,12 +194,12 @@ def resolve_timeout(flag_value: int | None) -> tuple[int, str | None]:
         MagiRsContractError: The value is not a positive integer. Deterministic.
     """
     if flag_value is None:
-        return _DEFAULT_OLLAMA_TIMEOUT_SECONDS, None
+        return DEFAULT_OLLAMA_TIMEOUT_SECONDS, None
     if isinstance(flag_value, bool) or not isinstance(flag_value, int) or flag_value <= 0:
         raise MagiRsContractError(f"--timeout must be a positive integer, got {flag_value!r}")
     if flag_value < _MIN_HEALTHY_TIMEOUT_SECONDS:
         return flag_value, (
-            f"--timeout {flag_value} is below the measured-healthy "
+            f"--timeout {flag_value} is below the recommended "
             f"{_MIN_HEALTHY_TIMEOUT_SECONDS}s: magi-rs derives each mage's attempt budget "
             "from it, so a low wall timeout also cuts the reasoning budget of every seat"
         )
