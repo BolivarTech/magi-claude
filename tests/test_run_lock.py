@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-05-23
+# Version: 1.1.0
+# Date: 2026-09-29
 """Tests for run_lock.py — process-liveness locking."""
 
 from __future__ import annotations
@@ -562,3 +562,27 @@ class TestProbeFailureWarning:
         assert result2 is True
         captured2 = capsys.readouterr()
         assert captured2.err == "", f"Expected no output on second call, got: {captured2.err!r}"
+
+
+def test_refresh_lock_replaces_a_corrupt_lock_with_a_valid_one(tmp_path):
+    # CP2 r4 (Melchior): an existing but unparseable lock is rewritten whole, never kept.
+    run_dir = str(tmp_path)
+    lock = os.path.join(run_dir, ".magi-lock")
+    with open(lock, "w", encoding="utf-8") as handle:
+        handle.write("garbage\n")
+    run_lock.refresh_lock(run_dir, 34240)
+    lines = open(lock, encoding="utf-8").read().splitlines()
+    assert lines[0] == str(os.getpid())
+    assert lines[2] == "34240"
+
+
+def test_refresh_lock_rewrites_an_existing_lock_and_creates_none(tmp_path):
+    run_dir = str(tmp_path)
+    run_lock.refresh_lock(run_dir, 34240)
+    assert not os.path.exists(os.path.join(run_dir, ".magi-lock"))
+    run_lock.write_lock(run_dir, 34240)
+    before = open(os.path.join(run_dir, ".magi-lock"), encoding="utf-8").read().splitlines()
+    run_lock.refresh_lock(run_dir, 34240)
+    after = open(os.path.join(run_dir, ".magi-lock"), encoding="utf-8").read().splitlines()
+    assert after[0] == before[0] and after[2] == "34240"
+    assert after[1] >= before[1]
