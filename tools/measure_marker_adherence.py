@@ -79,13 +79,13 @@ _SCRIPTS_DIR = str(_REPO_ROOT / "skills" / "magi" / "scripts")
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+import magi_rs_trio  # noqa: E402
 from parse_agent_output import parse_agent_output as _parse_agent_output  # noqa: E402
 from retry_feedback import (  # noqa: E402
     CAUSE_INVALID_JSON,
     FEEDBACK_TEMPLATES,
     retry_feedback_cause,
 )
-import magi_rs_trio  # noqa: E402
 from run_magi import AGENTS  # noqa: E402
 from verdict_markers import VerdictExtractionError, VerdictSentinel  # noqa: E402
 
@@ -399,6 +399,13 @@ def resolve_tool_timeout(explicit: int | None, *, ollama: bool) -> int:
         ``explicit`` when given; else ``magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS``
         (read as a module attribute at call time, never copied) for ollama, and
         ``DEFAULT_TIMEOUT_SECONDS`` for the Claude path.
+
+    Raises:
+        Nothing.
+
+    Example:
+        >>> resolve_tool_timeout(None, ollama=False)
+        900
     """
     if explicit is not None:
         return explicit

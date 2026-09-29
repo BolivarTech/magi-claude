@@ -209,14 +209,29 @@ _MISSING: object = object()
 
 
 def _printable_name(value: Any) -> str:
-    """Return *value* if it is a printable identifier, else ``_UNPRINTABLE``."""
+    """Return a JSON-supplied name only when it is safe to print.
+
+    Args:
+        value: A name read from untrusted JSON (a variant key or a backend).
+
+    Returns:
+        ``value`` when it is a str that fully matches ``_PRINTABLE_NAME``, else
+        ``_UNPRINTABLE`` -- a partial match would let an escape sequence through.
+    """
     if isinstance(value, str) and _PRINTABLE_NAME.fullmatch(value):
         return value
     return _UNPRINTABLE
 
 
 def _int_chars_part(value: Any) -> str | None:
-    """Return ``"{value} chars"`` if *value* is an int but not a bool, else ``None``."""
+    """Format a reasoning length for the warning.
+
+    Args:
+        value: The ``chars`` field of a reasoning object, of any type.
+
+    Returns:
+        ``"<value> chars"`` when ``value`` is an int (``bool`` excluded), else None.
+    """
     if isinstance(value, int) and not isinstance(value, bool):
         return f"{value}{_CHARS}"
     return None
@@ -235,6 +250,14 @@ def describe_reasoning(attempt: Mapping[str, Any]) -> str:
         ``Measured N chars`` · ``NotMeasured`` · ``Unsupported (<backend>, N chars)``
         (parts omitted when absent or malformed) · ``not reported`` (key absent) ·
         ``unknown (<variant or type>)`` · with ``unprintable`` for a non-identifier name.
+
+    Raises:
+        Nothing: every input shape is handled explicitly, because this runs in
+        telemetry right before a report is written.
+
+    Example:
+        >>> describe_reasoning({"reasoning": {"Measured": {"chars": 4005, "text": None}}})
+        'Measured 4005 chars'
 
     Complexity: O(k) in the number of keys of the reasoning object.
     """

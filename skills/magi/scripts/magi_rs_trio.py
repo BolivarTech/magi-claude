@@ -76,7 +76,7 @@ touches the memory layer by construction, so every run is stateless anyway."""
 _TIMEOUT_FLAG = "--timeout"
 """Wall-clock ceiling (R12). ``magi-rs`` also DERIVES the per-mage budget from
 it: with magi-rs 0.21.0, 16820 derives a 2335 s per-mage ceiling, a 1401 s
-operation budget and a 700 s per-request clock (v6.2.0 M1)."""
+operation budget and a 700 s per-request clock (measured 2026-09-29)."""
 
 _TRIO_NODE = "magi-rs consult · 3 mages"
 """The single status node. D5/BDD-27: the plugin launches ONE child and cannot
@@ -91,9 +91,9 @@ DEFAULT_OLLAMA_TIMEOUT_SECONDS = 16820
 """magi-rs 0.21.0's published headless gate value; derives its 2335 s default
 ceiling (700 s per request, 1401 s operation budget). Source: 0.21.0 release
 notes and docs/REASONING-BUDGET.md, replay B (2026-09-27); confirmed locally
-in planning/v0.21.0-verification/M1 (2026-09-29). Re-measured at every pin
+on 2026-09-29 against the pinned binary. Re-measured at every pin
 move. Public: tools/measure_marker_adherence.py reads it."""
-_MIN_HEALTHY_TIMEOUT_SECONDS = DEFAULT_OLLAMA_TIMEOUT_SECONDS
+_RECOMMENDED_MIN_TIMEOUT_SECONDS = DEFAULT_OLLAMA_TIMEOUT_SECONDS
 """Below the default the derived ceiling falls under the only value measured
 with the 65 536-token output cap, so a lower value warns (D2)."""
 _STDERR_EXCERPT_CHARS = 2000
@@ -180,7 +180,7 @@ def resolve_timeout(flag_value: int | None) -> tuple[int, str | None]:
 
     ``magi-rs`` DERIVES each mage's budget from this value; with 0.21.0,
     ``--timeout 16820`` derives the 2335 s per-mage ceiling that magi-rs
-    measured with its 65 536-token output cap (v6.2.0 M1). The open-weight
+    measured with its 65 536-token output cap (confirmed 2026-09-29). The open-weight
     path defaults to that value, and a lower explicit value is honoured with a
     warning rather than silently accepted.
 
@@ -197,10 +197,10 @@ def resolve_timeout(flag_value: int | None) -> tuple[int, str | None]:
         return DEFAULT_OLLAMA_TIMEOUT_SECONDS, None
     if isinstance(flag_value, bool) or not isinstance(flag_value, int) or flag_value <= 0:
         raise MagiRsContractError(f"--timeout must be a positive integer, got {flag_value!r}")
-    if flag_value < _MIN_HEALTHY_TIMEOUT_SECONDS:
+    if flag_value < _RECOMMENDED_MIN_TIMEOUT_SECONDS:
         return flag_value, (
             f"--timeout {flag_value} is below the recommended "
-            f"{_MIN_HEALTHY_TIMEOUT_SECONDS}s: magi-rs derives each mage's attempt budget "
+            f"{_RECOMMENDED_MIN_TIMEOUT_SECONDS}s: magi-rs derives each mage's attempt budget "
             "from it, so a low wall timeout also cuts the reasoning budget of every seat"
         )
     return flag_value, None

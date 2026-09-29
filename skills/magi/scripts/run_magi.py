@@ -1455,6 +1455,8 @@ def announce_magi_rs_telemetry(
             that reached us and then failed the seven-key contract degrades the
             run on THIS side with magi-rs none the wiser (D6/BDD-28) -- the
             "gate is INVALID" warning must fire for either.
+        timeout_seconds: The ``--timeout`` handed to magi-rs for this run; the
+            clock-typo warning names it when magi-rs flagged it.
 
     Returns:
         None.
