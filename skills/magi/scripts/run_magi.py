@@ -248,13 +248,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--timeout",
         type=_positive_timeout,
         # None = "the user did not pass it": the open-weight path resolves its own
-        # default (1800, in ``magi_rs_trio.resolve_timeout``) and warns on a low explicit
+        # default (``DEFAULT_OLLAMA_TIMEOUT_SECONDS``, in ``magi_rs_trio``) and warns on a low explicit
         # value, so it has to be able to tell *not passed* from *passed*. A hardcoded 900
         # here would make every run look explicit.
         default=None,
         help=(
             "Per-agent timeout in seconds, >= 1. Claude path: default 900. With --ollama: "
-            "default 1800, and magi-rs also derives each mage's per-attempt budget from it."
+            f"default {DEFAULT_OLLAMA_TIMEOUT_SECONDS}, and magi-rs also derives each mage's "
+            "per-attempt budget from it."
         ),
     )
     parser.add_argument("--output-dir", help="Directory for agent outputs")
@@ -2110,7 +2111,7 @@ def main() -> None:
         # owned by magi-rs (R7).
         agent_models = None  # MagiRsTrio ignores it: the trio lives in .magi/magi.toml
         # R12: --timeout is BOTH the wall ceiling and the source magi-rs derives
-        # each mage's attempt budget from; the default is the measured 1800 and
+        # each mage's attempt budget from; the default is magi-rs's measured 16820 and
         # a low explicit value is honoured with a warning, never silently.
         try:
             resolved_timeout, timeout_warning = resolve_magi_rs_timeout(args.timeout)

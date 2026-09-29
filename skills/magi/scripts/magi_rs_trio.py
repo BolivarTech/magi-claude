@@ -295,10 +295,10 @@ class MagiRsTrio(TrioExecutor):
     which is precisely why the boundary sits at the trio and not at the mage.
 
     Example:
-        >>> trio = MagiRsTrio(workdir="/repo", mode="code-review", timeout=1800,
+        >>> trio = MagiRsTrio(workdir="/repo", mode="code-review", timeout=16820,
         ...                   bin_dir="/plugin/bin", pin=Pin.load(pin_path))
         >>> verdicts = await trio.run_trio(prompt=payload, agents_dir="agents",
-        ...                                output_dir=out, timeout=1800,
+        ...                                output_dir=out, timeout=16820,
         ...                                models={}, max_attempts=1)
 
     Side effects:
