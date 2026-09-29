@@ -1,8 +1,8 @@
 # MAGI open-weight path (`--ollama`), executed by `magi-rs`
 
 - **Author:** Julian Bolivar
-- **Version:** 6.1.0
-- **Date:** 2026-09-20
+- **Version:** 6.2.0
+- **Date:** 2026-09-29
 
 Since 6.0.0, `--ollama` no longer talks to Ollama itself. The plugin builds the payload
 exactly as before and hands it to **`magi-rs`**, a pinned, digest-verified Rust binary that
@@ -23,16 +23,17 @@ python skills/magi/scripts/run_magi.py code-review <file_or_text> --ollama
 python skills/magi/scripts/run_magi.py design      <file_or_text> --ollama --timeout 3600
 ```
 
-The first `--ollama` (or `--ollama-init`) after an install downloads `magi-rs` into the
-plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`, and only then
+The first `--ollama` (or `--ollama-init`) after an install downloads `magi-rs` (pinned at
+v0.21.0) into the plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`, and only then
 runs it. Every later run verifies the digest and `--version` again before executing. When
 the binary cannot be obtained or does not verify, the run stops with one `[FATAL]` line and
 nothing is executed. There is no fallback to another architecture or to an unverified copy.
 The one escape hatch is to place the pinned executable in `bin/` by hand, where it is
 verified like any download.
 
-One build is not in the pin: `linux-x86_64-compat`, the variant `magi-rs` publishes for
-older glibc. On such a host the bootstrap downloads the regular `linux-x86_64` asset. The
+The pin covers four builds: `windows-x86_64`, `linux-x86_64`, `linux-aarch64` (the rpi5
+build) and `macos-universal2`. One build is not in it: `linux-x86_64-compat`, the variant
+`magi-rs` publishes for older glibc (the `.7z` archives are out too). On such a host the bootstrap downloads the regular `linux-x86_64` asset. The
 escape hatch does not help either: the digest the plugin expects is the regular build's.
 If the regular build does not start on your machine, that is the limit of 6.x as shipped;
 say so in an issue and it can be pinned.
@@ -94,14 +95,44 @@ allowlist as a suspect and lists the parent variables that were withheld, by nam
 ## 4. `--timeout` has two effects
 
 `--timeout` is still the wall-clock ceiling of the run. It is also the number `magi-rs`
-derives each mage's per-attempt budget from: measured, `--timeout 1800` gives about 149 s
-per attempt with `max_rotations = 2`, `3600` about 299 s, `7200` about 599 s. The default
-on this path is **1800**, not the Claude path's 900. Any value is honoured; below 1200 s a
-warning goes to stderr, because lowering it also cuts every seat's reasoning budget, and
-the symptom (mages that stop completing) does not look like a timeout setting. The
-16 384-token completion cap belongs to `magi-rs` and cannot be raised from here. A
-reasoning model that spends it all on thinking shows up as a seat that fails; the remedy
-is a different model in that seat, not a longer timeout.
+derives each mage's per-attempt budget from. The default on this path is **16820**, not the
+Claude path's 900. That is the value `magi-rs` 0.21.0 publishes for a headless gate;
+confirmed locally on 2026-09-29, it derives a per-mage ceiling of 2335 s, an operation
+budget of 1401 s per attempt and a 700 s per-request clock. Any explicit positive value is
+honoured. Below 16820 a warning goes to stderr, because a lower wall timeout also cuts the
+reasoning budget of every seat, and the symptom (mages that stop completing) does not look
+like a timeout setting.
+
+A default run measured on 2026-09-29 took about 2 minutes on a 75 KB bundle; `magi-rs`'s
+own replay took 531 s. A run in which seats rotate through every model and exhaust their
+attempts can take hours (worst case about 4.7 h). When the orchestrator is launched from a
+tool with its own time limit, run it in the background.
+
+**Completion cap.** `magi-rs` 0.21.0 raised its default completion cap from 16 384 to
+**65 536** tokens. You can change it with `max_tokens` under `[magi]` in your own
+`.magi/magi.toml`; the plugin does not read or validate that file's model settings. A model
+whose maximum output is below the cap answers HTTP 400, and its lineage is dropped for that
+run. Measured on 2026-09-29, `kimi-k2.6:cloud`, `glm-5.2:cloud`, `gpt-oss:120b-cloud`,
+`mistral-large-3:675b-cloud` and `gemma4:cloud` all accepted 65 536. A reasoning model that
+spends the cap on thinking still shows up as a seat that fails; the remedy is a different
+model in that seat, not a longer timeout.
+
+**Reasoning keys.** `magi-rs` 0.20.0 added four `[magi]` keys: `reasoning`
+(`default`/`disabled`/`enabled`), `reasoning_spelling` (`openai-compat` only), `max_tokens`
+and `reasoning_trace` (opt-in, log only). They are documented in
+[`docs/REASONING-BUDGET.md`](https://github.com/BolivarTech/magi/blob/v0.21.0/docs/REASONING-BUDGET.md)
+in the `magi-rs` repository.
+
+**A `--timeout` that is too high.** A high value is obeyed as given. `magi-rs` flags a
+`--timeout` whose derived per-mage ceiling exceeds 2400 s as a probable typo (168200 for
+16820, say). The plugin records the flag in the report and prints one `WARNING` line
+**after** the run; it cannot warn before the launch, because the derivation is internal to
+`magi-rs`. The derivation also depends on `max_rotations` in `.magi/magi.toml`: with
+`max_rotations = 0` even 16820 derives 7005 s and is flagged, while the scaffold default
+`max_rotations = 2` derives 2335 s and is not.
+
+**Restoring the 6.1.0 behaviour.** Pass `--timeout 1800`, and set `max_tokens = 16384` and
+`agent_timeout_secs = 90` under `[magi]` in `.magi/magi.toml`.
 
 ## 5. What the report carries
 
@@ -112,7 +143,9 @@ is a different model in that seat, not a longer timeout.
   `extraction_failures`, `input_size`, `report_truncated`, `endpoint_divergence`,
   `timeout_below_formula`, `failed_agents`, `rotations`, `ran_unmeasured`, `completions`,
   `pool_eligibility`), plus `capped_agents` (seats whose accepted attempt hit the completion
-  cap: the verdict counts, the trailing prose was lost), `model_used` (the tag each seat's
+  cap: the verdict counts, the trailing prose was lost), `timeout_seconds` (the `--timeout`
+  passed to `magi-rs`), `ceiling_above_sanity` (`applied_caps.ceiling_above_sanity` from
+  `magi-rs`: `true`, `false`, or `null` when it published no boolean), `model_used` (the tag each seat's
   accepted attempt actually ran on), `run_id` (the pointer into `.magi/logs/magi-<date>.log`,
   where `magi-rs` writes the per-mage ceiling and the probe notices) and
   `gate_ran_on_unverified_context` (`true` only when **every** seat ran with an unmeasured
@@ -123,16 +156,23 @@ is a different model in that seat, not a longer timeout.
   `null`. `served` stays `null` here because nothing confirms the served identity.
 
 The raw envelope is saved next to it as **`magi-rs-raw.json`**, exactly as received, for
-audit. Its embedded transcript is capped at 64 KiB by `magi-rs`; the prompt itself is what
+audit. Each record of `completions` carries two keys added in 0.20.0, `reasoning` and
+`control`, and they reach the report verbatim; `schema_version` did not change. Its embedded transcript is capped at 64 KiB by `magi-rs`; the prompt itself is what
 the plugin sent, unchanged.
 
-Four warnings reach stderr, and none of them on a clean run. The run is DEGRADED, because a
+Five warnings can reach stderr; none appears on a clean run. The run is DEGRADED, because a
 seat delivered nothing or a delivered verdict failed the seven-key contract here, in which
 case the gate is invalid whatever the verdict says. A seat's accepted attempt hit the
-completion cap. The context window was not measured for some seats; the message names the
+completion cap; the message also names that attempt's reasoning state (`Measured N chars`,
+`NotMeasured`, `Unsupported (<backend>, N chars)`, `not reported` or `unknown (<variant or
+type>)`) and never prints model text. The context window was not measured for some seats; the message names the
 remedy, `strict_context_guard = true` in `.magi/magi.toml`, and raises its tone when nobody
 measured anything. There were extraction failures upstream, with their `cause` relayed as
-spelled.
+spelled. Last, `magi-rs` flagged the `--timeout` as a probable typo (see section 4).
+
+When `magi-rs` exits non-zero, the error shows the tail of its stderr: the last 2000
+characters, prefixed with `[... earlier stderr elided ...]` when cut. `magi-rs` writes its
+`WARN` lines at startup, so the cause comes last.
 
 ## 6. Bundles that do not fit are split
 
