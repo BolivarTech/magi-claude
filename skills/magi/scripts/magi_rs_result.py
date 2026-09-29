@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.2.1
-# Date: 2026-09-19
+# Version: 1.3.0
+# Date: 2026-09-29
 """Read the result of one ``magi-rs consult`` invocation.
 
 The JSON is NESTED: the telemetry fields plus ``agents``, ``consensus`` and
@@ -21,10 +21,16 @@ either.
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 _STRUCTURED_FLAG = "--structured-verdicts"
+
+#: Key of the clock-typo flag inside the envelope's top-level ``applied_caps``
+#: (captured from magi-rs v0.21.0, tests/fixtures/magi-rs-consult/three-agents.json).
+_CEILING_FLAG = "ceiling_above_sanity"
 
 _TELEMETRY_FIELDS = (
     "degraded",
@@ -80,6 +86,12 @@ class ConsultResult:
             ceiling and the probe notices live since 0.18.1 (stderr no longer
             carries INFO). ``None`` when absent -- telemetry is fail-soft, never
             a contract error.
+        ceiling_above_sanity: ``applied_caps.ceiling_above_sanity`` (top level
+            of the envelope, magi-rs >= 0.21.0): True when the ``--timeout``
+            handed to magi-rs derives a per-mage ceiling above its sanity
+            bound. ``None`` unless the value is a JSON boolean -- an absent
+            ``applied_caps``, a non-object one, a missing field and a
+            non-boolean value (``"true"``, ``1``, ``null``) all read as unknown.
     """
 
     agents: list[dict[str, Any]]
@@ -87,6 +99,7 @@ class ConsultResult:
     report: str
     degraded: bool
     run_id: str | None
+    ceiling_above_sanity: bool | None = None
 
     @property
     def capped_agents(self) -> list[str]:
@@ -172,10 +185,117 @@ class ConsultResult:
         if not isinstance(agents, list):
             raise MagiRsContractError("magi-rs 'agents' is not a list")
         run_id = envelope.get("run_id")
+        applied_caps = envelope.get("applied_caps")
+        ceiling = applied_caps.get(_CEILING_FLAG) if isinstance(applied_caps, dict) else None
         return cls(
             agents=list(agents),
             telemetry={field: consult.get(field) for field in _TELEMETRY_FIELDS},
             report=str(consult.get("report") or ""),  # a null report is empty, not "None"
             degraded=bool(consult.get("degraded", False)),
             run_id=str(run_id) if run_id is not None else None,
+            ceiling_above_sanity=ceiling if isinstance(ceiling, bool) else None,
         )
+
+
+_PRINTABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,63}")
+_UNPRINTABLE = "unprintable"
+_NOT_REPORTED = "not reported"
+_MEASURED = "Measured"
+_UNSUPPORTED = "Unsupported"
+_NOT_MEASURED = "NotMeasured"
+_UNKNOWN = "unknown"
+_CHARS = " chars"
+_MISSING: object = object()
+
+
+def _printable_name(value: Any) -> str:
+    """Return a JSON-supplied name only when it is safe to print.
+
+    Args:
+        value: A name read from untrusted JSON (a variant key or a backend).
+
+    Returns:
+        ``value`` when it is a str that fully matches ``_PRINTABLE_NAME``, else
+        ``_UNPRINTABLE`` -- a partial match would let an escape sequence through.
+    """
+    if isinstance(value, str) and _PRINTABLE_NAME.fullmatch(value):
+        return value
+    return _UNPRINTABLE
+
+
+def _int_chars_part(value: Any) -> str | None:
+    """Format a reasoning length for the warning.
+
+    Args:
+        value: The ``chars`` field of a reasoning object, of any type.
+
+    Returns:
+        ``"<value> chars"`` when ``value`` is an int (``bool`` excluded), else None.
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value}{_CHARS}"
+    return None
+
+
+def describe_reasoning(attempt: Mapping[str, Any]) -> str:
+    """Describe one attempt's reasoning state for a stderr warning.
+
+    Never prints model text or any value of an unknown form: only a variant or
+    type name, and only when it is a printable identifier. Never raises.
+
+    Args:
+        attempt: One ``completions[<seat>][k]`` record.
+
+    Returns:
+        ``Measured N chars`` · ``NotMeasured`` · ``Unsupported (<backend>, N chars)``
+        (parts omitted when absent or malformed) · ``not reported`` (key absent) ·
+        ``unknown (<variant or type>)`` · with ``unprintable`` for a non-identifier name.
+
+    Raises:
+        Nothing: every input shape is handled explicitly, because this runs in
+        telemetry right before a report is written.
+
+    Example:
+        >>> describe_reasoning({"reasoning": {"Measured": {"chars": 4005, "text": None}}})
+        'Measured 4005 chars'
+
+    Complexity: O(k) in the number of keys of the reasoning object.
+    """
+    if not isinstance(attempt, Mapping):
+        return _NOT_REPORTED
+
+    reasoning = attempt.get("reasoning", _MISSING)
+    if reasoning is _MISSING:
+        return _NOT_REPORTED
+
+    if isinstance(reasoning, str):
+        return _NOT_MEASURED if reasoning == _NOT_MEASURED else f"{_UNKNOWN} (str)"
+
+    if isinstance(reasoning, Mapping):
+        keys = list(reasoning.keys())
+        if len(keys) == 1:
+            key = keys[0]
+            if key == _MEASURED:
+                inner = reasoning[_MEASURED]
+                chars = inner.get("chars", _MISSING) if isinstance(inner, Mapping) else _MISSING
+                chars_part = _int_chars_part(chars)
+                return _MEASURED if chars_part is None else f"{_MEASURED} {chars_part}"
+            if key == _UNSUPPORTED:
+                inner = reasoning[_UNSUPPORTED]
+                parts: list[str] = []
+                if isinstance(inner, Mapping):
+                    backend = inner.get("backend", _MISSING)
+                    if isinstance(backend, str):
+                        parts.append(_printable_name(backend))
+                    chars_part = _int_chars_part(inner.get("chars", _MISSING))
+                    if chars_part is not None:
+                        parts.append(chars_part)
+                if not parts:
+                    return _UNSUPPORTED
+                return f"{_UNSUPPORTED} ({', '.join(parts)})"
+
+        if keys:
+            return f"{_UNKNOWN} ({_printable_name(keys[0])})"
+        return f"{_UNKNOWN} ({type(reasoning).__name__})"
+
+    return f"{_UNKNOWN} ({type(reasoning).__name__})"

@@ -9,6 +9,76 @@ Install and update through the marketplace: `/plugin marketplace add BolivarTech
 `/plugin install magi@bolivartech-plugins`, then `/plugin marketplace update` to pick up a new
 release.
 
+## [6.2.0] - 2026-09-29
+
+### Changed
+
+- The pinned `magi-rs` moves from v0.19.1 to **v0.21.0** (`magi-core` `=4.1.0` to `=4.2.0`),
+  on the same four platforms: `windows-x86_64`, `linux-x86_64`, `linux-aarch64` (rpi5) and
+  `macos-universal2`. `linux-x86_64-compat` and the `.7z` archives stay out of the pin.
+- Under `--ollama`, `--timeout` now defaults to **16820** (was 1800). It is the value
+  `magi-rs` 0.21.0 publishes for a headless gate: it derives a per-mage ceiling of 2335 s, an
+  operation budget of 1401 s per attempt and a 700 s per-request clock (confirmed locally on
+  2026-09-29). The Claude path keeps 900. A default `--ollama` run measured on 2026-09-29 took
+  about 2 minutes on a 75 KB bundle; a run where seats rotate through every model can take
+  hours (worst case about 4.7 h).
+- The `--timeout` warning threshold under `--ollama` moves from 1200 to 16820. Any explicit
+  positive value is still honoured; below 16820 the warning says a lower wall timeout also
+  cuts every seat's reasoning budget.
+- `magi-rs` 0.21.0 raises its completion cap from 16 384 to **65 536** tokens. It is adjustable
+  with `max_tokens` under `[magi]` in your `.magi/magi.toml`; the plugin does not validate that
+  file's model settings. A model whose maximum output is below the cap answers HTTP 400 and its
+  lineage is dropped for the run. Measured on 2026-09-29: `kimi-k2.6:cloud`, `glm-5.2:cloud`,
+  `gpt-oss:120b-cloud`, `mistral-large-3:675b-cloud` and `gemma4:cloud` all accepted it.
+- Each record of `consult.completions` gains two keys, `reasoning` and `control`, and they
+  travel verbatim into the `magi_rs` block of `magi-report.json`. `schema_version` is unchanged.
+- To get the 6.1.0 behaviour back: `--timeout 1800`, and in `[magi]` of `.magi/magi.toml`,
+  `max_tokens = 16384` and `agent_timeout_secs = 90`.
+- `magi-rs` 0.20.0 added four `[magi]` keys (`reasoning`, `reasoning_spelling`, `max_tokens`,
+  `reasoning_trace`); see `docs/REASONING-BUDGET.md` in the `magi-rs` repository.
+- `skills/magi/SKILL.md` now tells the agent to launch the `--ollama` orchestrator in the
+  background and wait for its completion notification, and how to find and stop a leftover
+  `magi-rs` process.
+- `tools/measure_marker_adherence.py` uses the plugin's `--ollama` default (16820) for
+  `--ollama-bundle` runs when its own `--timeout` is omitted, instead of 900. Claude bundles
+  keep 900.
+
+### Added
+
+- A `WARNING` line, printed after the run, when `magi-rs` flags the `--timeout` as a probable
+  typo (a derived per-mage ceiling above 2400 s, for example 168200 instead of 16820). The
+  plugin cannot warn before the launch because the derivation is internal to `magi-rs`, and it
+  also depends on `max_rotations`: with `max_rotations = 0` even 16820 is flagged, and a
+  flagged value that is not above 16820 gets a warning pointing at `max_rotations` instead.
+- The completion-cap warning now names the reasoning state of the cut attempt: `Measured N
+  chars`, `NotMeasured`, `Unsupported (<backend>, N chars)`, `not reported` or `unknown
+  (<variant or type>)`. It never prints model text.
+- The `magi_rs` block of every `--ollama` report records `timeout_seconds` (the `--timeout`
+  passed to `magi-rs`) and `ceiling_above_sanity` (`applied_caps.ceiling_above_sanity`: `true`,
+  `false`, or `null` when `magi-rs` published no boolean).
+
+### Fixed
+
+- When `magi-rs` exits non-zero, the error message shows the tail of its stderr (the last 2000
+  characters, prefixed with `[... earlier stderr elided ...]` when cut) instead of the head.
+  `magi-rs` writes its `WARN` lines at startup, so the cause comes last.
+- A segmented `--ollama` run refreshes its run lock before every segment, so a concurrent
+  `--keep-runs` cleanup can no longer remove a long run that is still alive.
+
+### Security
+
+Inherited with `magi-rs` 0.20.0 (details in its
+[release notes](https://github.com/BolivarTech/magi/releases/tag/v0.20.0)):
+
+- A credential in `base_url` is redacted in the connection-failure hint.
+- Memory-distillation failures go through the audited logging path.
+- `Authorization: Basic` is masked.
+- OAuth login no longer echoes the code, verifier or token.
+- `-p` accepts values that start with `-`.
+- The passphrase-strength floor applies to every envelope bootstrap, including the first open
+  of a `.magi/` scaffolded by `init` without a passphrase under headless `consult`. The plugin
+  runs without a passphrase and was verified to keep working.
+
 ## [6.1.0] - 2026-09-20
 
 ### Removed

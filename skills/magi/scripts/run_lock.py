@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-05-23
+# Version: 1.1.0
+# Date: 2026-09-29
 """Process-liveness locking for MAGI run directories.
 
 Each run directory under the per-project temp namespace carries a
@@ -228,6 +228,38 @@ def write_lock(run_dir: str, max_age_seconds: int | None = None) -> None:
             os.remove(tmp)
         except OSError:
             pass
+
+
+def refresh_lock(run_dir: str, max_age_seconds: int) -> None:
+    """Re-write ``<run_dir>/.magi-lock`` with a fresh start time, only if it exists.
+
+    A segmented run launches its segments in series, each bounded by the same
+    ``--timeout``; its single lock, written once, would age past the bound
+    that one launch justifies. Refreshing before every launch keeps the age
+    below ``max_age_seconds`` however many segments there are (v6.2.0 R12).
+
+    Args:
+        run_dir: The run directory whose lock is refreshed.
+        max_age_seconds: The staleness bound to record, as for
+            :func:`write_lock`.
+
+    Returns:
+        None.
+
+    Side effects:
+        Delegates to :func:`write_lock` (atomic, best-effort: an I/O error warns
+        on stderr and is swallowed). Never creates a lock: a run started with an
+        explicit ``--output-dir`` has none and must not gain one in a user's
+        directory. A corrupt existing lock is replaced whole.
+
+    Note:
+        The existence check and the write are two steps. The window is harmless
+        here: only the owning run writes or removes its lock, in series, and
+        cleanup deletes only directories already judged dead. No portable
+        atomic "replace only if it exists" is available.
+    """
+    if os.path.exists(_lock_path(run_dir)):
+        write_lock(run_dir, max_age_seconds)
 
 
 def _parse_lock(run_dir: str) -> tuple[int | None, float | None, int | None]:

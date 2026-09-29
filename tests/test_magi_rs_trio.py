@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-09-19
+# Version: 1.5.0
+# Date: 2026-09-29
 """Tests for MagiRsTrio, the second TrioExecutor (MS3 Task 3).
 
 Every child process is faked: nothing here launches a binary, reaches the
@@ -14,9 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 
+import magi_rs_trio
 from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_preflight import ProjectNotInitialisedError
 from magi_rs_trio import (
+    _STDERR_ELISION_MARKER,
     MagiRsContractError,
     MagiRsProcessError,
     MagiRsTrio,
@@ -109,6 +111,9 @@ def _stub_bootstrap(monkeypatch):
 def _initialise(tmp_path):
     (tmp_path / ".magi").mkdir(exist_ok=True)
     (tmp_path / ".magi" / "magi.toml").write_text("provider='ollama'", encoding="utf-8")
+
+
+_RUN_TIMEOUT = 1800  # the explicit timeout _invoke passes (arbitrary, PM-S-6)
 
 
 async def _invoke(tmp_path, prompt="a payload", on_state=None):
@@ -251,17 +256,42 @@ def test_a_process_failure_IS_retryable():
 
 @pytest.mark.parametrize(
     ("flag", "expected", "warns"),
-    [(None, 1800, False), (1800, 1800, False), (900, 900, True), (60, 60, True)],
+    [
+        (None, 16820, False),
+        (16820, 16820, False),
+        (16821, 16821, False),
+        (16819, 16819, True),
+        (1800, 1800, True),
+        (60, 60, True),
+    ],
 )
-def test_the_timeout_resolves_to_the_measured_healthy_default_and_warns_below_it(
+def test_the_ollama_timeout_defaults_to_magi_rs_recommendation_and_warns_below_it(
     flag, expected, warns
 ):
-    # MS0 measured 149 s per mage attempt at --timeout 1800. The plugin's
-    # historical 900 halves that, back toward the 72 s ceiling that made E-B
-    # abort with one seat of three -- so it is honoured, and it warns.
+    # v6.2.0 R2/R2a: 16820 is magi-rs 0.21.0's published gate value (replay B,
+    # 2026-09-27) and derives its 2335 s default ceiling; below it the ceiling
+    # falls under the only value measured with the 65 536-token cap.
+    # Guard cases, green in Red on purpose: 16820, 16821 and 60.
     seconds, warning = resolve_timeout(flag)
     assert seconds == expected
     assert (warning is not None) == warns
+
+
+def test_the_default_and_the_warning_threshold_are_one_public_constant():
+    # D2 + DB-4: one number, public because tools/measure_marker_adherence.py consumes it.
+    assert magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS == 16820
+    assert resolve_timeout(None) == (magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS, None)
+    below = magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS - 1
+    assert resolve_timeout(below)[1] is not None
+
+
+def test_the_low_timeout_warning_says_the_value_the_recommendation_and_why():
+    # Scenario 2: numbers alone would pass a warning that explains nothing.
+    _, warning = resolve_timeout(16819)
+    assert warning is not None
+    assert "16819" in warning
+    assert "16820" in warning
+    assert "reasoning budget" in warning
 
 
 @pytest.mark.parametrize("bad", [0, -1, -1800, True])
@@ -542,7 +572,7 @@ def test_the_magi_rs_executor_is_bound_to_the_cwd_mode_timeout_and_plugin_paths(
     assert seen["mode"] == "code-review"
     assert seen["timeout"] == 1800
     assert os.path.basename(seen["bin_dir"]) == "bin"
-    assert seen["pin"].version == "0.19.1"
+    assert seen["pin"].version == "0.21.0"
 
 
 def test_without_the_flag_no_executor_is_selected(monkeypatch):
@@ -975,3 +1005,66 @@ def test_main_shouts_invalid_when_a_verdict_fails_the_contract_locally(
     assert report["degraded"] is True and report["magi_rs"]["degraded"] is False
     err = capsys.readouterr().err.lower()
     assert "the gate is invalid" in err
+
+
+@pytest.mark.asyncio
+async def test_a_long_stderr_keeps_its_tail_where_the_real_cause_is(monkeypatch, tmp_path):
+    # Scenario 15: 0.20+ writes WARN lines at startup; the cause comes last.
+    stderr = b"WARN clock coverage\n" * 200 + b"FATAL: the real cause"
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"", stderr=stderr, returncode=2)),
+    )
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    message = str(exc.value)
+    assert "FATAL: the real cause" in message
+    assert _STDERR_ELISION_MARKER in message
+
+
+@pytest.mark.asyncio
+async def test_a_short_stderr_goes_whole_and_unmarked(monkeypatch, tmp_path):
+    # Scenario 17. Guard test: green in Red on purpose; protects the marker from
+    # appearing when nothing was cut.
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"", stderr=b"boom", returncode=3)),
+    )
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    assert "boom" in str(exc.value)
+    assert _STDERR_ELISION_MARKER not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_a_non_utf8_stderr_still_shows_its_last_line(monkeypatch, tmp_path):
+    # Review Focus 2.
+    stderr = b"\xff\xfe garbage " * 400 + b"FATAL: tail survives"
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"", stderr=stderr, returncode=1)),
+    )
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    assert "FATAL: tail survives" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_the_outer_clock_is_exactly_the_timeout_because_m4_found_no_overshoot(
+    monkeypatch, tmp_path
+):
+    # R3a row 1 (planning/v0.21.0-verification/M4): no margin, measured, not assumed.
+    # Guard test: green on purpose; fixes the measured decision.
+    seen = {}
+    real_wait_for = asyncio.wait_for
+
+    async def _spy(awaitable, timeout):
+        seen["timeout"] = timeout
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(magi_rs_trio.asyncio, "wait_for", _spy)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(_ok_payload()))
+    )
+    await _run(monkeypatch, tmp_path)
+    assert seen["timeout"] == _RUN_TIMEOUT

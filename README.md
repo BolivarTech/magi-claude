@@ -7,7 +7,7 @@
 
 A Claude Code plugin that implements a **multi-perspective analysis system** inspired by the [MAGI supercomputers](https://evangelion.fandom.com/wiki/Magi) from *Neon Genesis Evangelion*.
 
-Three specialized AI agents independently analyze the same problem from complementary — and deliberately adversarial — perspectives, then synthesize their verdicts via weight-based majority vote.
+Three specialized AI agents independently analyze the same problem from complementary, and deliberately adversarial, perspectives, then synthesize their verdicts via weight-based majority vote.
 
 ---
 
@@ -15,7 +15,7 @@ Three specialized AI agents independently analyze the same problem from compleme
 
 ### The MAGI in Evangelion
 
-In *Neon Genesis Evangelion* (1995, Hideaki Anno / Gainax), the MAGI are three supercomputers that govern Tokyo-3's critical decisions. Each embodies a different facet of their creator, Dr. Naoko Akagi: **Melchior** (the scientist), **Balthasar** (the mother), and **Caspar** (the woman). Decisions require consensus — no single perspective dominates.
+In *Neon Genesis Evangelion* (1995, Hideaki Anno / Gainax), the MAGI are three supercomputers that govern Tokyo-3's critical decisions. Each embodies a different facet of their creator, Dr. Naoko Akagi: **Melchior** (the scientist), **Balthasar** (the mother), and **Caspar** (the woman). Decisions require consensus; no single perspective dominates.
 
 This design reflects a profound insight: **complex decisions benefit from structured disagreement**. A single decision-maker, no matter how capable, carries blind spots. Three independent evaluators with different priorities surface risks, trade-offs, and opportunities that any one of them would miss.
 
@@ -55,7 +55,7 @@ which runs the trio in one call and returns three structured verdicts. Configura
 with the execution: `.claude/magi-ollama.toml` is gone (an old copy is simply ignored), and
 the trio, its fallbacks and its context guard now live in `.magi/magi.toml`, created by
 `--ollama-init` through `magi-rs init`. Two things to know before you run it. `--timeout`
-now also sets each mage's per-attempt budget (default 1800 on this path). And a bundle that
+now also sets each mage's per-attempt budget (default 16820 on this path). And a bundle that
 does not fit `magi-rs`'s 256 KiB input ceiling is split at section boundaries and evaluated
 one segment at a time, with the gate approved only when every segment passes; it is never
 truncated. Migration, the report's `magi_rs` block, the stderr warnings and the
@@ -63,7 +63,7 @@ troubleshooting table are in [`docs/ollama-backend.md`](docs/ollama-backend.md).
 
 > **`--ollama` runs the gate Claude-free, end-to-end.** The consensus verdict and the
 > output banner are produced by **deterministic local Python** (`consensus.determine_consensus`
-> + `reporting.format_report`), not by any LLM — so with `--ollama` the *entire* cycle
+> + `reporting.format_report`), not by any LLM, so with `--ollama` the *entire* cycle
 > (three mages, synthesis, and report) runs without any Claude/Anthropic API call. It is
 > runnable standalone as a CI gate: `python skills/magi/scripts/run_magi.py <mode> <file_or_text> --ollama`.
 
@@ -208,7 +208,7 @@ python skills/magi/scripts/run_magi.py <mode> <file_or_text> [--model opus] [--t
 | `--model` | `opus` | LLM model for all agents (`opus`, `sonnet`, `haiku`) — Claude backend |
 | `--ollama` | off | Run the open-weight trio through **`magi-rs`** (one model per mage, from `.magi/magi.toml`) instead of `claude -p`. Mutually exclusive with `--model`. See [`docs/ollama-backend.md`](docs/ollama-backend.md) |
 | `--ollama-init` | — | Initialise the project for `magi-rs` (`magi-rs init -w <cwd>`, creates `.magi/`) and exit |
-| `--timeout` | `900` / `1800` | Per-agent timeout in seconds (`900` on the Claude path; `1800` with `--ollama`, where it also sets each mage's per-attempt budget) |
+| `--timeout` | `900` / `16820` | Per-agent timeout in seconds (`900` on the Claude path; `16820` with `--ollama`, where it also sets each mage's per-attempt budget) |
 | `--output-dir` | auto | Directory for agent outputs (default: temp dir) |
 | `-o`, `--out` | — | Redirect the human-readable verdict report to a file (suppressing it on stdout); on a write failure it warns and falls back to stdout so the verdict is never lost |
 

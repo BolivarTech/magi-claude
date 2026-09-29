@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 3.0.1
-# Date: 2026-09-20
+# Version: 3.1.0
+# Date: 2026-09-29
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
 Launches Melchior, Balthasar, and Caspar in parallel using asyncio,
@@ -64,8 +64,9 @@ from bundle_segmenter import (  # noqa: E402
 )
 from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
 from magi_rs_pin import Pin  # noqa: E402
-from magi_rs_result import ConsultResult  # noqa: E402
+from magi_rs_result import ConsultResult, describe_reasoning  # noqa: E402
 from magi_rs_trio import (  # noqa: E402
+    DEFAULT_OLLAMA_TIMEOUT_SECONDS,
     FAIL_CLOSED_ERRORS,
     MagiRsContractError,
     MagiRsProcessError,
@@ -73,7 +74,12 @@ from magi_rs_trio import (  # noqa: E402
 )
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
 from ollama_init import run_ollama_init  # noqa: E402
-from run_lock import remove_lock, staleness_bound_for_timeout, write_lock  # noqa: E402
+from run_lock import (  # noqa: E402
+    refresh_lock,
+    remove_lock,
+    staleness_bound_for_timeout,
+    write_lock,
+)
 from temp_dirs import (  # noqa: E402
     MAGI_DIR_PREFIX,
     cleanup_old_runs,
@@ -242,13 +248,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--timeout",
         type=_positive_timeout,
         # None = "the user did not pass it": the open-weight path resolves its own
-        # default (1800, in ``magi_rs_trio.resolve_timeout``) and warns on a low explicit
+        # default (``DEFAULT_OLLAMA_TIMEOUT_SECONDS``, in ``magi_rs_trio``) and warns on a low explicit
         # value, so it has to be able to tell *not passed* from *passed*. A hardcoded 900
         # here would make every run look explicit.
         default=None,
         help=(
-            "Per-agent timeout in seconds, >= 1. Claude path: default 900. With --ollama: "
-            "default 1800, and magi-rs also derives each mage's per-attempt budget from it."
+            "Per-agent timeout in seconds, >= 1. When omitted, the plugin applies the "
+            "default of the path: 900 on the Claude path; with --ollama, "
+            f"default {DEFAULT_OLLAMA_TIMEOUT_SECONDS}, and magi-rs also derives each mage's "
+            "per-attempt budget from it."
         ),
     )
     parser.add_argument("--output-dir", help="Directory for agent outputs")
@@ -1057,11 +1065,15 @@ def _evaluate_segment(
     report["cost"] = unpriced_cost()
     result: ConsultResult | None = getattr(executor, "last_result", None)
     if result is not None:
-        report.update(build_report_block(result))
+        report.update(build_report_block(result, timeout_seconds=timeout))
     with open(os.path.join(segment_dir, "magi-report.json"), "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
     if result is not None:
-        announce_magi_rs_telemetry(result, degraded_locally=bool(report.get("degraded", False)))
+        announce_magi_rs_telemetry(
+            result,
+            degraded_locally=bool(report.get("degraded", False)),
+            timeout_seconds=timeout,
+        )
     return report
 
 
@@ -1107,7 +1119,9 @@ def run_segmented(
 
     Side effects:
         Writes ``magi-report.json`` before the first segment and after each;
-        prints each segment's report and a final table on stdout.
+        prints each segment's report and a final table on stdout. Re-writes
+        the run's ``.magi-lock`` (only if one exists) before every job, so a
+        run of N segments in series never outlives its staleness bound.
     """
     by_name = {section["name"]: section for section in sections}
     jobs: list[tuple[int, list[str], str | None, str]] = [
@@ -1136,6 +1150,9 @@ def run_segmented(
     _write_segmentation_map(output_dir, report)  # the decision, before anything runs
 
     for order, names, text, not_run_reason in jobs:
+        # Each job lasts at most `timeout` (the outer clock), so refreshing here keeps
+        # the lock's age under staleness_bound_for_timeout(timeout) for any N (R12).
+        refresh_lock(output_dir, staleness_bound_for_timeout(timeout))
         print(f"\n=== segment-{order}: {', '.join(names)} ===")
         entry: dict[str, Any] = {
             "order": order,
@@ -1312,7 +1329,28 @@ def unpriced_cost() -> dict[str, Any]:
     return {"total_usd": None, "per_agent": {}, "cost_source": COST_SOURCE_UNPRICED}
 
 
-def build_report_block(result: ConsultResult) -> dict[str, Any]:
+_CLOCK_TYPO_WARNING = (
+    "[!] WARNING: magi-rs flagged --timeout {timeout} as a probable typo: it derives a "
+    "per-mage ceiling above magi-rs's 2400 s sanity bound (the derivation also depends on "
+    "max_rotations in .magi/magi.toml). The recommended --timeout is {recommended}."
+)
+"""Relays magi-rs's ``applied_caps.ceiling_above_sanity`` flag; it does not assert
+a typo as fact -- with ``max_rotations = 0`` even the recommended timeout is
+flagged (measured 2026-09-29). The warning arrives after the run, so it leaves
+evidence but cannot protect a hung run."""
+
+_CLOCK_ROTATIONS_WARNING = (
+    "[!] WARNING: magi-rs flagged --timeout {timeout} as a probable typo, but it is not above "
+    "the recommended value: the per-mage ceiling magi-rs derives also depends on max_rotations "
+    "in .magi/magi.toml (with max_rotations = 0 even the default is flagged). Check that "
+    "setting rather than the timeout."
+)
+"""The flag on a timeout at or below the recommended one points at the config:
+recommending the value already in use would contradict itself (measured
+2026-09-29: max_rotations = 0 turns 16820 into a 7005 s per-mage ceiling)."""
+
+
+def build_report_block(result: ConsultResult, *, timeout_seconds: int) -> dict[str, Any]:
     """Build the ``magi_rs`` block for ``magi-report.json``.
 
     ADDITIVE and fail-soft, exactly like v5.4.0's ``model`` block: ``consensus``
@@ -1321,6 +1359,7 @@ def build_report_block(result: ConsultResult) -> dict[str, Any]:
 
     Args:
         result: The parsed consult result.
+        timeout_seconds: The ``--timeout`` handed to magi-rs for this run.
 
     Returns:
         ``{"magi_rs": {...}}`` carrying the telemetry VERBATIM (every field of
@@ -1332,7 +1371,10 @@ def build_report_block(result: ConsultResult) -> dict[str, Any]:
         magi-rs's daily log, ``None`` when not emitted (R15); and
         ``gate_ran_on_unverified_context`` -- ``True`` only when EVERY seat ran
         unmeasured (D11 / BDD-34), the marker a reader of the report needs
-        because stderr does not survive the run.
+        because stderr does not survive the run;
+        ``timeout_seconds`` and ``ceiling_above_sanity`` (the boolean magi-rs
+        published, ``None`` when unknown) -- recorded on EVERY report so the
+        corpus holds the base count, not only the runs that were flagged.
 
     Raises:
         Nothing -- see :func:`announce_magi_rs_telemetry`.
@@ -1341,6 +1383,8 @@ def build_report_block(result: ConsultResult) -> dict[str, Any]:
     block["capped_agents"] = result.capped_agents
     block["model_used"] = _model_used(result.telemetry.get("completions"))
     block["run_id"] = result.run_id
+    block["timeout_seconds"] = timeout_seconds
+    block["ceiling_above_sanity"] = result.ceiling_above_sanity
     block["gate_ran_on_unverified_context"] = _every_seat_unmeasured(
         result.telemetry.get("ran_unmeasured")
     )
@@ -1388,11 +1432,15 @@ def _every_seat_unmeasured(unmeasured: Any) -> bool:
 
 
 def announce_magi_rs_telemetry(
-    result: ConsultResult, stream: IO[str] | None = None, *, degraded_locally: bool = False
+    result: ConsultResult,
+    stream: IO[str] | None = None,
+    *,
+    degraded_locally: bool = False,
+    timeout_seconds: int,
 ) -> None:
     """Warn about anything that degrades a gate, on a channel a human reads.
 
-    Emits at most four warnings, and NONE of them on a clean run -- a channel
+    Emits at most five warnings, and NONE of them on a clean run -- a channel
     that speaks every time is a channel nobody reads, and then the run that
     mattered scrolls past unread. Sibling of :func:`announce_extraction_failures`
     and of the ``$0.00`` / unattributed warnings of v5.4.0, for the same reason:
@@ -1408,6 +1456,8 @@ def announce_magi_rs_telemetry(
             that reached us and then failed the seven-key contract degrades the
             run on THIS side with magi-rs none the wiser (D6/BDD-28) -- the
             "gate is INVALID" warning must fire for either.
+        timeout_seconds: The ``--timeout`` handed to magi-rs for this run; the
+            clock-typo warning names it when magi-rs flagged it.
 
     Returns:
         None.
@@ -1422,16 +1472,25 @@ def announce_magi_rs_telemetry(
     """
     out = sys.stderr if stream is None else stream
     try:
-        _announce_magi_rs_telemetry(result, out, degraded_locally)
+        _announce_magi_rs_telemetry(result, out, degraded_locally, timeout_seconds)
     except Exception as exc:  # noqa: BLE001 -- fail-soft by contract (see the docstring)
         print(f"[!] WARNING: could not render the magi-rs telemetry warnings ({exc})", file=out)
 
 
 def _announce_magi_rs_telemetry(
-    result: ConsultResult, stream: IO[str], degraded_locally: bool
+    result: ConsultResult, stream: IO[str], degraded_locally: bool, timeout_seconds: int
 ) -> None:
-    """The four warnings of :func:`announce_magi_rs_telemetry`, without the fail-soft wrap."""
+    """The warnings of :func:`announce_magi_rs_telemetry`, without the fail-soft wrap."""
     telemetry = result.telemetry
+    if result.ceiling_above_sanity is True:
+        print(
+            _CLOCK_TYPO_WARNING.format(
+                timeout=timeout_seconds, recommended=DEFAULT_OLLAMA_TIMEOUT_SECONDS
+            )
+            if timeout_seconds > DEFAULT_OLLAMA_TIMEOUT_SECONDS
+            else _CLOCK_ROTATIONS_WARNING.format(timeout=timeout_seconds),
+            file=stream,
+        )
     if result.degraded or degraded_locally:
         cause = (
             "a seat delivered no verdict"
@@ -1447,7 +1506,8 @@ def _announce_magi_rs_telemetry(
     if capped:
         completions = telemetry.get("completions") or {}
         detail = ", ".join(
-            f"{mage} ({completions[mage][-1].get('model')}, cap {completions[mage][-1].get('cap')})"
+            f"{mage} ({completions[mage][-1].get('model')}, cap {completions[mage][-1].get('cap')}, "
+            f"reasoning: {describe_reasoning(completions[mage][-1])})"
             for mage in capped
         )
         print(
@@ -2066,7 +2126,7 @@ def main() -> None:
         # owned by magi-rs (R7).
         agent_models = None  # MagiRsTrio ignores it: the trio lives in .magi/magi.toml
         # R12: --timeout is BOTH the wall ceiling and the source magi-rs derives
-        # each mage's attempt budget from; the default is the measured 1800 and
+        # each mage's attempt budget from; the default is magi-rs's measured 16820 and
         # a low explicit value is honoured with a warning, never silently.
         try:
             resolved_timeout, timeout_warning = resolve_magi_rs_timeout(args.timeout)
@@ -2404,7 +2464,7 @@ def main() -> None:
     # discipline as the blocks above. Absent on the Claude path (additive).
     magi_rs_result: ConsultResult | None = getattr(executor, "last_result", None)
     if magi_rs_result is not None:
-        report.update(build_report_block(magi_rs_result))
+        report.update(build_report_block(magi_rs_result, timeout_seconds=resolved_timeout))
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
@@ -2414,7 +2474,9 @@ def main() -> None:
     # and the file it points to always agree (D2, D3, D11, R17).
     if magi_rs_result is not None:
         announce_magi_rs_telemetry(
-            magi_rs_result, degraded_locally=bool(report.get("degraded", False))
+            magi_rs_result,
+            degraded_locally=bool(report.get("degraded", False)),
+            timeout_seconds=resolved_timeout,
         )
 
     # R18 made ACTIVE: filing the counts was not enough (MAGI gate, Caspar). Announced here,

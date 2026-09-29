@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.5.0
-# Date: 2026-09-19
+# Version: 1.7.0
+# Date: 2026-09-29
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
 This is the second implementer of :class:`TrioExecutor` -- the one that
@@ -74,8 +74,9 @@ no config of its own (R13). It does NOT isolate memory: ``consult`` never
 touches the memory layer by construction, so every run is stateless anyway."""
 
 _TIMEOUT_FLAG = "--timeout"
-"""Wall-clock ceiling (R12). ``magi-rs`` also DERIVES the per-mage attempt
-budget from it: MS0 measured 149 s per attempt at 1800."""
+"""Wall-clock ceiling (R12). ``magi-rs`` also DERIVES the per-mage budget from
+it: with magi-rs 0.21.0, 16820 derives a 2335 s per-mage ceiling, a 1401 s
+operation budget and a 700 s per-request clock (measured 2026-09-29)."""
 
 _TRIO_NODE = "magi-rs consult · 3 mages"
 """The single status node. D5/BDD-27: the plugin launches ONE child and cannot
@@ -86,12 +87,20 @@ _RAW_ARTIFACT = "magi-rs-raw.json"
 #: ``failed_agents`` instead) still gets an entry: its failure.
 _MAGES = ("melchior", "balthasar", "caspar")
 _NO_VERDICT_CAUSE = "absent from agents and from failed_agents"
-_DEFAULT_OLLAMA_TIMEOUT_SECONDS = 1800
-"""Measured-healthy: MS0 saw 149 s per mage attempt at this value. The plugin's
-historical 900 would roughly halve it, back to the 72 s ceiling that made E-B
-abort with one seat of three."""
-_MIN_HEALTHY_TIMEOUT_SECONDS = 1200
+DEFAULT_OLLAMA_TIMEOUT_SECONDS = 16820
+"""magi-rs 0.21.0's published headless gate value; derives its 2335 s default
+ceiling (700 s per request, 1401 s operation budget). Source: 0.21.0 release
+notes and docs/REASONING-BUDGET.md, replay B (2026-09-27); confirmed locally
+on 2026-09-29 against the pinned binary. Re-measured at every pin
+move. Public: tools/measure_marker_adherence.py reads it."""
+_RECOMMENDED_MIN_TIMEOUT_SECONDS = DEFAULT_OLLAMA_TIMEOUT_SECONDS
+"""Below the default the derived ceiling falls under the only value measured
+with the 65 536-token output cap, so a lower value warns (D2)."""
 _STDERR_EXCERPT_CHARS = 2000
+_STDERR_ELISION_MARKER = "[... earlier stderr elided ...] "
+"""Prefixed to a failure's stderr excerpt when its head was cut. Since 0.20 magi-rs
+writes WARN lines at startup and the real cause of a failure comes last, so the
+excerpt keeps the tail (v6.2.0 R14); the marker says the head is missing."""
 
 
 #: Every fail-closed error the bootstrap and the preflight can raise. All are
@@ -137,7 +146,7 @@ def build_argv(executable: str, workdir: str, mode: str, timeout: int) -> list[s
             omitting it costs ``magi-rs`` an extra model call to classify, and
             lets the content under review choose the lens it is reviewed under.
         timeout: Wall-clock ceiling in seconds. ``magi-rs`` also DERIVES the
-            per-mage budget from it (MS0 measured 149 s per attempt at 1800).
+            per-mage budget from it (16820 -> 2335 s per mage with 0.21.0).
 
     Returns:
         The argv. The prompt is NOT in it -- it travels on stdin, because the
@@ -169,11 +178,11 @@ def build_argv(executable: str, workdir: str, mode: str, timeout: int) -> list[s
 def resolve_timeout(flag_value: int | None) -> tuple[int, str | None]:
     """Resolve the wall timeout and warn when it starves the per-mage budget.
 
-    ``magi-rs`` DERIVES each mage's attempt budget from this value; MS0 measured
-    149 s per attempt at ``--timeout 1800``. The plugin's historical default of
-    900 would halve that to roughly the 72 s ceiling that made E-B abort with
-    one seat of three -- so the open-weight path defaults to 1800, and a lower
-    explicit value is honoured with a warning rather than silently accepted.
+    ``magi-rs`` DERIVES each mage's budget from this value; with 0.21.0,
+    ``--timeout 16820`` derives the 2335 s per-mage ceiling that magi-rs
+    measured with its 65 536-token output cap (confirmed 2026-09-29). The open-weight
+    path defaults to that value, and a lower explicit value is honoured with a
+    warning rather than silently accepted.
 
     Args:
         flag_value: The operator's ``--timeout``, or None when omitted.
@@ -185,13 +194,13 @@ def resolve_timeout(flag_value: int | None) -> tuple[int, str | None]:
         MagiRsContractError: The value is not a positive integer. Deterministic.
     """
     if flag_value is None:
-        return _DEFAULT_OLLAMA_TIMEOUT_SECONDS, None
+        return DEFAULT_OLLAMA_TIMEOUT_SECONDS, None
     if isinstance(flag_value, bool) or not isinstance(flag_value, int) or flag_value <= 0:
         raise MagiRsContractError(f"--timeout must be a positive integer, got {flag_value!r}")
-    if flag_value < _MIN_HEALTHY_TIMEOUT_SECONDS:
+    if flag_value < _RECOMMENDED_MIN_TIMEOUT_SECONDS:
         return flag_value, (
-            f"--timeout {flag_value} is below the measured-healthy "
-            f"{_MIN_HEALTHY_TIMEOUT_SECONDS}s: magi-rs derives each mage's attempt budget "
+            f"--timeout {flag_value} is below the recommended "
+            f"{_RECOMMENDED_MIN_TIMEOUT_SECONDS}s: magi-rs derives each mage's attempt budget "
             "from it, so a low wall timeout also cuts the reasoning budget of every seat"
         )
     return flag_value, None
@@ -253,6 +262,30 @@ def _emit(on_state: Callable[[str, str], None] | None, node: str, state: str) ->
         print(f"WARNING: status display failed for {node!r}: {exc}", file=sys.stderr)
 
 
+def _stderr_tail(stderr: bytes) -> str:
+    """Return the last ``_STDERR_EXCERPT_CHARS`` characters of a child's stderr.
+
+    Args:
+        stderr: The raw bytes the child wrote; need not be valid UTF-8.
+
+    Returns:
+        The decoded text (undecodable bytes replaced), whole when it fits, else
+        its tail prefixed with ``_STDERR_ELISION_MARKER``.
+
+    Example:
+        >>> _stderr_tail(b"boom")
+        'boom'
+
+    Note:
+        The tail, not the head: magi-rs's startup WARN lines come first and the
+        cause of a failure comes last (v6.2.0 R14). O(n) in the stderr size.
+    """
+    text = stderr.decode("utf-8", errors="replace")
+    if len(text) <= _STDERR_EXCERPT_CHARS:
+        return text
+    return _STDERR_ELISION_MARKER + text[-_STDERR_EXCERPT_CHARS:]
+
+
 class MagiRsTrio(TrioExecutor):
     """Run the three mages by delegating to one ``magi-rs consult``.
 
@@ -262,10 +295,10 @@ class MagiRsTrio(TrioExecutor):
     which is precisely why the boundary sits at the trio and not at the mage.
 
     Example:
-        >>> trio = MagiRsTrio(workdir="/repo", mode="code-review", timeout=1800,
+        >>> trio = MagiRsTrio(workdir="/repo", mode="code-review", timeout=16820,
         ...                   bin_dir="/plugin/bin", pin=Pin.load(pin_path))
         >>> verdicts = await trio.run_trio(prompt=payload, agents_dir="agents",
-        ...                                output_dir=out, timeout=1800,
+        ...                                output_dir=out, timeout=16820,
         ...                                models={}, max_attempts=1)
 
     Side effects:
@@ -419,6 +452,15 @@ class MagiRsTrio(TrioExecutor):
         Side effects:
             Launches a process with an allowlisted environment; writes
             ``magi-rs-raw.json`` (fail-soft: a failed write warns).
+
+        Note:
+            The outer clock is exactly ``timeout``, with no margin. Measured on
+            2026-09-29 against magi-rs 0.21.0 (``--timeout 300``, launched
+            directly): magi-rs derives its per-request and per-operation clocks
+            from ``--timeout``, gave up on a timed-out seat, and emitted its
+            partial JSON 250 s before the deadline. Nothing is lost by stopping
+            at ``timeout``. magi-rs's deadline behaviour is internal to it, so
+            this is re-measured on every pin bump.
         """
         env = EnvironmentPolicy.build(os.environ)
         _emit(on_state, _TRIO_NODE, "running")
@@ -460,7 +502,7 @@ class MagiRsTrio(TrioExecutor):
             _emit(on_state, _TRIO_NODE, "failed")
             raise MagiRsProcessError(
                 f"magi-rs exited {process.returncode}; stderr: "
-                f"{stderr.decode('utf-8', errors='replace')[:_STDERR_EXCERPT_CHARS]!r}. "
+                f"{_stderr_tail(stderr)!r}. "
                 f"{self._allowlist_hint()}"
             )
         _emit(on_state, _TRIO_NODE, "success")

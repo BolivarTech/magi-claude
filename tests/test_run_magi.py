@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 2.0.0
-# Date: 2026-09-20
+# Version: 2.1.0
+# Date: 2026-09-29
 """Tests for run_magi.py — async Python orchestrator."""
 
 from __future__ import annotations
@@ -5245,7 +5245,7 @@ def test_timeout_precedence_flag_over_default():
 
 
 def test_timeout_flag_defaults_to_none_so_the_open_weight_default_applies():
-    """argparse must NOT hardcode 900: magi-rs's 1800 default and its low-value warning
+    """argparse must NOT hardcode 900: magi-rs's own default and its low-value warning
     both need to tell *not passed* from *passed*. Parse WITHOUT --timeout."""
     from run_magi import parse_args
 
@@ -5260,3 +5260,15 @@ def test_timeout_flag_zero_or_negative_is_rejected_at_parse():
     for bad in ("0", "-1"):
         with pytest.raises(SystemExit):  # argparse errors exit
             parse_args(["design", "in.md", "--ollama", "--timeout", bad])
+
+
+def test_the_timeout_help_names_the_ollama_default_from_its_constant(capsys):
+    """The --help text is read by users: it must state the current --ollama default."""
+    import magi_rs_trio
+    from run_magi import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert f"default {magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS}" in help_text
+    assert "default 1800" not in help_text

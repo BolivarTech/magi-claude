@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-07-13
+# Version: 1.1.0
+# Date: 2026-09-29
 """Release gate: measure MAGI's adherence to the verdict-sentinel markers (R17a).
 
 MS2 replaced heuristic verdict recovery with the ``<MAGI_VERDICT>`` / ``</MAGI_VERDICT>``
@@ -79,6 +79,7 @@ _SCRIPTS_DIR = str(_REPO_ROOT / "skills" / "magi" / "scripts")
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+import magi_rs_trio  # noqa: E402
 from parse_agent_output import parse_agent_output as _parse_agent_output  # noqa: E402
 from retry_feedback import (  # noqa: E402
     CAUSE_INVALID_JSON,
@@ -96,12 +97,18 @@ AGENT_NAMES: tuple[str, ...] = AGENTS
 _AGENTS_DIR = _REPO_ROOT / "skills" / "magi" / "agents"
 _RUN_MAGI_PATH = _REPO_ROOT / "skills" / "magi" / "scripts" / "run_magi.py"
 
-#: Defaults for the CLI. Named, not magic (NR6).
+#: Per-agent timeout of the Claude path (the ``--ollama`` path takes the plugin's own
+#: default instead; see :func:`resolve_tool_timeout`). Named, not magic (NR6).
 DEFAULT_TIMEOUT_SECONDS = 900
 
-#: How much longer than ONE mage's timeout the parent waits before calling a run hung. A
-#: rotation serialises what would otherwise be concurrent, so the child's own worst case is
-#: several times its per-mage bound -- this leaves room for that and for shutdown.
+#: How much longer than ONE mage's timeout the parent waits before calling a run hung.
+#: Criterion (R13): the parent bound (``timeout x factor``) must exceed the child's worst
+#: case on each backend. Under ``--ollama`` the child is ONE magi-rs launch bounded by the
+#: plugin's outer clock of exactly ``T`` (measured 2026-09-29: magi-rs emits its JSON well
+#: before ``T``, so there is no margin), so any factor above 1 covers it. Under Claude a
+#: rotation serialises what would otherwise be concurrent, so the child's worst case is
+#: several times its per-mage bound; 6 leaves room for that and for shutdown. 6 meets
+#: both, so it is unchanged.
 PARENT_TIMEOUT_FACTOR = 6
 DEFAULT_REPORT_FILENAME = "marker-adherence-report.json"
 DEFAULT_MODE = "code-review"
@@ -379,6 +386,32 @@ def measure_output_dir(output_dir: Path) -> None:
         raw_path = output_dir / f"{agent}.raw.json"
         if raw_path.exists():
             measure_raw_file(raw_path, agent)
+
+
+def resolve_tool_timeout(explicit: int | None, *, ollama: bool) -> int:
+    """Resolve the per-run ``--timeout`` the measurement passes to ``run_magi.py``.
+
+    Args:
+        explicit: The tool's own ``--timeout``, or None when omitted.
+        ollama: True for an ``--ollama-bundle`` run.
+
+    Returns:
+        ``explicit`` when given; else ``magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS``
+        (read as a module attribute at call time, never copied) for ollama, and
+        ``DEFAULT_TIMEOUT_SECONDS`` for the Claude path.
+
+    Raises:
+        Nothing.
+
+    Example:
+        >>> resolve_tool_timeout(None, ollama=False)
+        900
+    """
+    if explicit is not None:
+        return explicit
+    if ollama:
+        return magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS
+    return DEFAULT_TIMEOUT_SECONDS
 
 
 def run_real_magi(
@@ -661,8 +694,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     measure.add_argument(
         "--timeout",
         type=int,
-        default=DEFAULT_TIMEOUT_SECONDS,
-        help=f"Per-agent timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS})",
+        default=None,
+        help=(
+            "Per-agent timeout in seconds (default: the plugin's --ollama default for "
+            f"--ollama bundles, {DEFAULT_TIMEOUT_SECONDS} for Claude bundles)"
+        ),
     )
     measure.add_argument(
         "--out",
@@ -716,13 +752,21 @@ def main(argv: list[str] | None = None) -> int:
             for index, bundle in enumerate(args.ollama_bundle):
                 run_dir = scratch / f"ollama-{index}"
                 run_real_magi(
-                    args.mode, Path(bundle), ollama=True, timeout=args.timeout, output_dir=run_dir
+                    args.mode,
+                    Path(bundle),
+                    ollama=True,
+                    timeout=resolve_tool_timeout(args.timeout, ollama=True),
+                    output_dir=run_dir,
                 )
                 measure_output_dir(run_dir)
             for index, bundle in enumerate(args.claude_bundle):
                 run_dir = scratch / f"claude-{index}"
                 run_real_magi(
-                    args.mode, Path(bundle), ollama=False, timeout=args.timeout, output_dir=run_dir
+                    args.mode,
+                    Path(bundle),
+                    ollama=False,
+                    timeout=resolve_tool_timeout(args.timeout, ollama=False),
+                    output_dir=run_dir,
                 )
                 measure_output_dir(run_dir)
 

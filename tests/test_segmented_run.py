@@ -1,13 +1,16 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-19
+# Version: 1.1.0
+# Date: 2026-09-29
 """Tests for the segmented evaluation of MS4b: the map, the warning, the gate."""
 
 import json
+import os
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
+import run_lock
 from bundle_segmenter import CONSULT_INPUT_CEILING_BYTES, Segment, SegmentPlan
 
 _CEILING = CONSULT_INPUT_CEILING_BYTES
@@ -359,3 +362,77 @@ def test_a_segment_prompt_over_the_transport_ceiling_is_never_sent(monkeypatch, 
     assert results[1]["consensus"] == "STRONG GO"
     assert len(launched) == 1  # the oversized one never reached the transport
     assert report["segmentation"]["approved"] is False
+
+
+_T = 16820
+
+
+class _Clock:
+    """A controllable UTC clock for run_lock (write and age use the same source)."""
+
+    def __init__(self):
+        self.now = datetime(2026, 9, 28, tzinfo=timezone.utc)
+
+
+def _install_clock(monkeypatch, clock):
+    class _FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock.now
+
+    monkeypatch.setattr(run_lock, "datetime", _FakeDateTime)
+
+
+def test_a_segmented_run_stays_live_past_the_unrefreshed_bound(monkeypatch, tmp_path):
+    # Scenario 13: at 3T (and 3T + T/2) an unrefreshed lock (bound 2T + 600 = 34240)
+    # is already stale; with the per-segment refresh the run is still live.
+    # MUTATION CHECK: remove the refresh call from run_segmented and this must fail.
+    import run_magi
+
+    clock = _Clock()
+    _install_clock(monkeypatch, clock)
+    run_lock.write_lock(str(tmp_path), run_lock.staleness_bound_for_timeout(_T))
+    observed = []
+
+    def _segment(order, text, args, output_dir, agents_dir, timeout):
+        if order == 4:  # the integration segment: it starts at 3T
+            observed.append(run_lock.is_dir_live(output_dir))
+            clock.now += timedelta(seconds=_T // 2)  # halfway through it
+            observed.append(run_lock.is_dir_live(output_dir))
+        else:
+            clock.now += timedelta(seconds=_T)  # segments 1-3 each run for T
+        return _report()
+
+    monkeypatch.setattr(run_magi, "_evaluate_segment", _segment)
+    run_magi.run_segmented(
+        _plan_with(3, references=["Name0"]), _sections(3), _args(), str(tmp_path), "a", _T
+    )
+    assert observed == [True, True]
+
+
+def test_a_run_without_a_lock_never_gains_one(monkeypatch, tmp_path):
+    # Scenario 16 + Review Focus 3: --output-dir runs have no lock; refreshing creates none.
+    # Guard test: green in Red on purpose.
+    import run_magi
+
+    monkeypatch.setattr(run_magi, "_evaluate_segment", lambda *a, **k: _report())
+    run_magi.run_segmented(
+        _plan_with(3, references=["Name0"]), _sections(3), _args(), str(tmp_path), "a", _T
+    )
+    assert not os.path.exists(os.path.join(str(tmp_path), ".magi-lock"))
+
+
+def test_a_failed_refresh_warns_and_the_run_continues(monkeypatch, tmp_path, capsys):
+    # DB-1: the refresh is best-effort like write_lock; a failure warns, never aborts.
+    import run_magi
+
+    run_lock.write_lock(str(tmp_path), run_lock.staleness_bound_for_timeout(_T))
+
+    def _replace_fails(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(run_lock.os, "replace", _replace_fails)
+    monkeypatch.setattr(run_magi, "_evaluate_segment", lambda *a, **k: _report())
+    report = run_magi.run_segmented(_plan_with(2), _sections(2), _args(), str(tmp_path), "a", _T)
+    assert len(report["segmentation"]["results"]) == 2
+    assert "could not write run lock" in capsys.readouterr().err

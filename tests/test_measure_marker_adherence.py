@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-07-13
+# Version: 1.1.0
+# Date: 2026-09-29
 """Tests for the R17a release gate: ``tools/measure_marker_adherence.py``.
 
 A broken measurement instrument does not give a bad number -- it gives a FALSE one, which
@@ -597,3 +597,82 @@ def test_the_spy_OBSERVES_and_never_decides(raw):
     mma.uninstall_spy()
 
     assert before == during, "the spy must observe the parser, not change it"
+
+
+def test_an_ollama_bundle_without_a_timeout_uses_the_plugins_default():
+    # Scenario 14 / R13: 900 would derive ~125 s per attempt under 0.21.0.
+    import magi_rs_trio
+
+    assert mma.resolve_tool_timeout(None, ollama=True) == (
+        magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS
+    )
+
+
+def test_a_claude_bundle_without_a_timeout_keeps_900():
+    assert mma.resolve_tool_timeout(None, ollama=False) == 900
+
+
+@pytest.mark.parametrize("ollama", [True, False])
+def test_an_explicit_timeout_wins_on_both_backends(ollama):
+    assert mma.resolve_tool_timeout(4321, ollama=ollama) == 4321
+
+
+def test_the_tool_reads_the_constant_instead_of_copying_it(monkeypatch):
+    # Mutation check (MAGI r3): a copied 16820 in the tool fails here.
+    import magi_rs_trio
+
+    monkeypatch.setattr(magi_rs_trio, "DEFAULT_OLLAMA_TIMEOUT_SECONDS", 12345)
+    assert mma.resolve_tool_timeout(None, ollama=True) == 12345
+
+
+def test_main_passes_the_backend_timeout_to_each_run(monkeypatch, tmp_path):
+    # The wiring (CP2 r3, Balthasar): resolve_tool_timeout alone is not enough if main()
+    # still forwards args.timeout. main's loops call run_real_magi per bundle (line ~718).
+    import magi_rs_trio
+
+    seen = []
+    monkeypatch.setattr(
+        mma,
+        "run_real_magi",
+        lambda mode, bundle, *, ollama, timeout, output_dir: seen.append((ollama, timeout)),
+    )
+    monkeypatch.setattr(mma, "measure_output_dir", lambda run_dir: None)
+    monkeypatch.setattr(mma, "build_artifact", lambda *a, **k: {"verdict": "green"})
+    bundle = tmp_path / "b.md"
+    bundle.write_text("x", encoding="utf-8")
+    mma.main(
+        [
+            "measure",
+            "--ollama-bundle",
+            str(bundle),
+            "--claude-bundle",
+            str(bundle),
+            "--out",
+            str(tmp_path / "out.json"),
+        ]
+    )
+    assert seen == [(True, magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS), (False, 900)]
+
+
+def test_the_parent_bound_exceeds_the_childs_worst_case_at_the_new_default(monkeypatch, tmp_path):
+    # R13's fixed criterion: under --ollama the child is one magi-rs launch bounded by
+    # the plugin's outer clock (T; M4 found no overshoot, so there is no margin).
+    # Guard test: green before the change on purpose.
+    import magi_rs_trio
+
+    captured: dict = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(mma.subprocess, "run", fake_run)
+    timeout = magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS
+    bundle = tmp_path / "bundle.md"
+    bundle.write_text("x", encoding="utf-8")
+    mma.run_real_magi("code-review", bundle, ollama=True, timeout=timeout, output_dir=tmp_path)
+    assert captured["timeout"] > timeout
