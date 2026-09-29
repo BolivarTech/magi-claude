@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 3.0.1
-# Date: 2026-09-20
+# Version: 3.1.0
+# Date: 2026-09-29
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
 Launches Melchior, Balthasar, and Caspar in parallel using asyncio,
@@ -73,7 +73,12 @@ from magi_rs_trio import (  # noqa: E402
 )
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
 from ollama_init import run_ollama_init  # noqa: E402
-from run_lock import remove_lock, staleness_bound_for_timeout, write_lock  # noqa: E402
+from run_lock import (  # noqa: E402
+    refresh_lock,
+    remove_lock,
+    staleness_bound_for_timeout,
+    write_lock,
+)
 from temp_dirs import (  # noqa: E402
     MAGI_DIR_PREFIX,
     cleanup_old_runs,
@@ -1107,7 +1112,9 @@ def run_segmented(
 
     Side effects:
         Writes ``magi-report.json`` before the first segment and after each;
-        prints each segment's report and a final table on stdout.
+        prints each segment's report and a final table on stdout. Re-writes
+        the run's ``.magi-lock`` (only if one exists) before every job, so a
+        run of N segments in series never outlives its staleness bound.
     """
     by_name = {section["name"]: section for section in sections}
     jobs: list[tuple[int, list[str], str | None, str]] = [
@@ -1136,6 +1143,9 @@ def run_segmented(
     _write_segmentation_map(output_dir, report)  # the decision, before anything runs
 
     for order, names, text, not_run_reason in jobs:
+        # Each job lasts at most `timeout` (the outer clock), so refreshing here keeps
+        # the lock's age under staleness_bound_for_timeout(timeout) for any N (R12).
+        refresh_lock(output_dir, staleness_bound_for_timeout(timeout))
         print(f"\n=== segment-{order}: {', '.join(names)} ===")
         entry: dict[str, Any] = {
             "order": order,
