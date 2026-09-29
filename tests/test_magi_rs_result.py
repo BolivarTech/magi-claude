@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-09-19
+# Version: 1.2.0
+# Date: 2026-09-29
 """Tests for reading a magi-rs consult envelope (MS3 Task 3c).
 
 The fixtures under ``tests/fixtures/magi-rs-consult/`` derive from ONE real
@@ -210,7 +210,16 @@ def test_the_captured_envelope_shape_is_exactly_the_pinned_contract():
             assert set(finding) == {"severity", "title", "detail", "file", "line", "category"}
     for attempts in consult["completions"].values():
         for attempt in attempts:
-            assert set(attempt) == {"model", "cap", "finish", "completion_tokens", "prompt_tokens"}
+            assert set(attempt) == {
+                "model",
+                "cap",
+                "finish",
+                "completion_tokens",
+                "prompt_tokens",
+                "reasoning",
+                "control",
+            }, "completion record shape drifted: re-verify with a real run, do not regenerate"
+            assert attempt["control"] in {"default", "disabled", "enabled"}
     for failures in consult["extraction_failures"].values():
         for failure in failures:
             assert set(failure) == {"attempt", "cause", "model"}
