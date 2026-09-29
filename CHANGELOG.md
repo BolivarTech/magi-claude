@@ -48,7 +48,8 @@ release.
 - A `WARNING` line, printed after the run, when `magi-rs` flags the `--timeout` as a probable
   typo (a derived per-mage ceiling above 2400 s, for example 168200 instead of 16820). The
   plugin cannot warn before the launch because the derivation is internal to `magi-rs`, and it
-  also depends on `max_rotations`: with `max_rotations = 0` even 16820 is flagged.
+  also depends on `max_rotations`: with `max_rotations = 0` even 16820 is flagged, and a
+  flagged value that is not above 16820 gets a warning pointing at `max_rotations` instead.
 - The completion-cap warning now names the reasoning state of the cut attempt: `Measured N
   chars`, `NotMeasured`, `Unsupported (<backend>, N chars)`, `not reported` or `unknown
   (<variant or type>)`. It never prints model text.
