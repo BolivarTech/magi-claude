@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.4.0
+# Version: 1.5.0
 # Date: 2026-09-29
 """Tests for MagiRsTrio, the second TrioExecutor (MS3 Task 3).
 
@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import magi_rs_trio
 from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_preflight import ProjectNotInitialisedError
 from magi_rs_trio import (
@@ -252,17 +253,42 @@ def test_a_process_failure_IS_retryable():
 
 @pytest.mark.parametrize(
     ("flag", "expected", "warns"),
-    [(None, 1800, False), (1800, 1800, False), (900, 900, True), (60, 60, True)],
+    [
+        (None, 16820, False),
+        (16820, 16820, False),
+        (16821, 16821, False),
+        (16819, 16819, True),
+        (1800, 1800, True),
+        (60, 60, True),
+    ],
 )
-def test_the_timeout_resolves_to_the_measured_healthy_default_and_warns_below_it(
+def test_the_ollama_timeout_defaults_to_magi_rs_recommendation_and_warns_below_it(
     flag, expected, warns
 ):
-    # MS0 measured 149 s per mage attempt at --timeout 1800. The plugin's
-    # historical 900 halves that, back toward the 72 s ceiling that made E-B
-    # abort with one seat of three -- so it is honoured, and it warns.
+    # v6.2.0 R2/R2a: 16820 is magi-rs 0.21.0's published gate value (replay B,
+    # 2026-09-27) and derives its 2335 s default ceiling; below it the ceiling
+    # falls under the only value measured with the 65 536-token cap.
+    # Guard cases, green in Red on purpose: 16820, 16821 and 60.
     seconds, warning = resolve_timeout(flag)
     assert seconds == expected
     assert (warning is not None) == warns
+
+
+def test_the_default_and_the_warning_threshold_are_one_public_constant():
+    # D2 + DB-4: one number, public because tools/measure_marker_adherence.py consumes it.
+    assert magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS == 16820
+    assert resolve_timeout(None) == (magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS, None)
+    below = magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS - 1
+    assert resolve_timeout(below)[1] is not None
+
+
+def test_the_low_timeout_warning_says_the_value_the_recommendation_and_why():
+    # Scenario 2: numbers alone would pass a warning that explains nothing.
+    _, warning = resolve_timeout(16819)
+    assert warning is not None
+    assert "16819" in warning
+    assert "16820" in warning
+    assert "reasoning budget" in warning
 
 
 @pytest.mark.parametrize("bad", [0, -1, -1800, True])

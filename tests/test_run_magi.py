@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 2.0.0
-# Date: 2026-09-20
+# Version: 2.1.0
+# Date: 2026-09-29
 """Tests for run_magi.py — async Python orchestrator."""
 
 from __future__ import annotations
@@ -5245,7 +5245,7 @@ def test_timeout_precedence_flag_over_default():
 
 
 def test_timeout_flag_defaults_to_none_so_the_open_weight_default_applies():
-    """argparse must NOT hardcode 900: magi-rs's 1800 default and its low-value warning
+    """argparse must NOT hardcode 900: magi-rs's own default and its low-value warning
     both need to tell *not passed* from *passed*. Parse WITHOUT --timeout."""
     from run_magi import parse_args
 
