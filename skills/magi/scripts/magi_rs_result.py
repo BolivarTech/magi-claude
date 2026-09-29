@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.2.1
-# Date: 2026-09-19
+# Version: 1.3.0
+# Date: 2026-09-29
 """Read the result of one ``magi-rs consult`` invocation.
 
 The JSON is NESTED: the telemetry fields plus ``agents``, ``consensus`` and
@@ -21,6 +21,7 @@ either.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -179,3 +180,22 @@ class ConsultResult:
             degraded=bool(consult.get("degraded", False)),
             run_id=str(run_id) if run_id is not None else None,
         )
+
+
+def describe_reasoning(attempt: Mapping[str, Any]) -> str:
+    """Describe one attempt's reasoning state for a stderr warning.
+
+    Never prints model text or any value of an unknown form: only a variant or
+    type name, and only when it is a printable identifier. Never raises.
+
+    Args:
+        attempt: One ``completions[<seat>][k]`` record.
+
+    Returns:
+        ``Measured N chars`` · ``NotMeasured`` · ``Unsupported (<backend>, N chars)``
+        (parts omitted when absent or malformed) · ``not reported`` (key absent) ·
+        ``unknown (<variant or type>)`` · with ``unprintable`` for a non-identifier name.
+
+    Complexity: O(k) in the number of keys of the reasoning object.
+    """
+    raise NotImplementedError

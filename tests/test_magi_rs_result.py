@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.2.0
+# Version: 1.3.0
 # Date: 2026-09-29
 """Tests for reading a magi-rs consult envelope (MS3 Task 3c).
 
@@ -14,7 +14,7 @@ import os
 
 import pytest
 
-from magi_rs_result import ConsultResult
+from magi_rs_result import ConsultResult, describe_reasoning
 from magi_rs_trio import MagiRsContractError
 
 _FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "magi-rs-consult")
@@ -610,3 +610,131 @@ def test_the_extraction_failure_count_is_the_number_of_records_not_an_attempt_in
         )
     )
     assert "2 verdict extraction failure(s)" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# v6.2.0 Task 10 -- the reasoning state of a capped seat (R5, R5a; DB-5)
+# --------------------------------------------------------------------------
+
+
+def _attempt_r(finish, reasoning=..., model="m", cap=65536, control="default"):
+    """A 0.21.0 completion record; reasoning=... omits the key (pre-0.20 shape)."""
+    record = {
+        "model": model,
+        "cap": cap,
+        "finish": finish,
+        "completion_tokens": 0,
+        "prompt_tokens": 0,
+        "control": control,
+    }
+    if reasoning is not ...:
+        record["reasoning"] = reasoning
+    return record
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "expected"),
+    [
+        ({"Measured": {"chars": 211124, "text": None}}, "Measured 211124 chars"),
+        ("NotMeasured", "NotMeasured"),
+        (
+            {"Unsupported": {"backend": "openai-compat", "chars": 0, "text": None}},
+            "Unsupported (openai-compat, 0 chars)",
+        ),
+        ({"Unsupported": {}}, "Unsupported"),
+        ({"Future": 1}, "unknown (Future)"),
+        (42, "unknown (int)"),
+        ("Future", "unknown (str)"),
+        (None, "unknown (NoneType)"),
+    ],
+)
+def test_the_reasoning_state_is_described_without_values(reasoning, expected):
+    # Scenarios 6, 8, 21, 23 and Review Focus 1.
+    assert describe_reasoning(_attempt_r("length", reasoning)) == expected
+
+
+def test_an_absent_reasoning_key_says_not_reported():
+    # Scenario 18.
+    assert describe_reasoning(_attempt_r("length")) == "not reported"
+
+
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        {"Measured": {"chars": 10, "text": "SECRET"}},
+        {"Future": {"text": "SECRET", "chars": 3}},
+        {"Unsupported": {"backend": "openai-compat", "chars": 0, "text": "SECRET"}},
+    ],
+)
+def test_no_model_text_or_unknown_value_is_ever_printed(reasoning):
+    # Scenarios 19, 20, 21 (the JSON is untrusted input).
+    described = describe_reasoning(_attempt_r("length", reasoning))
+    assert "SECRET" not in described
+    if "Future" in reasoning:
+        assert "3" not in described
+
+
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        {"Fu\u001b[31mture": 1},
+        {"Future\u001b[31m": 1},
+        {"Unsupported": {"backend": "x\u001b]0;pwn\u0007", "chars": 1}},
+        {"Unsupported": {"backend": "openai-compat\u0007", "chars": 1}},
+    ],
+)
+def test_a_name_that_is_not_a_printable_identifier_is_replaced(reasoning):
+    # Scenario 22: the JSON is untrusted; escape sequences never reach stderr.
+    described = describe_reasoning(_attempt_r("length", reasoning))
+    assert "unprintable" in described
+    assert "\u001b" not in described and "\u0007" not in described
+
+
+def test_the_capped_warning_carries_the_reasoning_state(capsys):
+    # Scenario 6: the diagnosis E-E asked for.
+    _announce(
+        _result(
+            completions={
+                "caspar": [
+                    _attempt_r(
+                        "length",
+                        {"Measured": {"chars": 211124, "text": None}},
+                        model="glm-5.3:cloud",
+                    )
+                ]
+            }
+        )
+    )
+    err = capsys.readouterr().err
+    assert "caspar" in err and "glm-5.3:cloud" in err and "Measured 211124 chars" in err
+
+
+def test_a_timed_out_last_attempt_is_not_capped_with_the_real_shape():
+    # Scenario 7: finish null + NotMeasured is the clock, not the cap.
+    # Guard test: green in Red on purpose.
+    result = _result(completions={"melchior": [_attempt_r(None, "NotMeasured")]})
+    assert result.capped_agents == []
+
+
+def test_the_reasoning_fields_travel_verbatim_into_the_report():
+    # Scenario 9 / R5a. Guard test: green in Red on purpose.
+    from run_magi import build_report_block
+
+    record = _attempt_r("stop", {"Measured": {"chars": 5, "text": None}}, control="enabled")
+    block = build_report_block(_result(completions={"caspar": [record]}))
+    assert block["magi_rs"]["completions"]["caspar"][0] == record
+
+
+def test_the_capped_warning_prints_on_a_cp1252_console(monkeypatch):
+    # Review Focus 4. Guard test: green in Red on purpose.
+    import io
+
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    from run_magi import announce_magi_rs_telemetry
+
+    announce_magi_rs_telemetry(
+        _result(completions={"caspar": [_attempt_r("length", {"Fu\u001b[31mture": 1})]}),
+        stream,
+    )
+    stream.flush()  # a UnicodeEncodeError above would already have failed the test
+    assert b"caspar" in stream.buffer.getvalue()
