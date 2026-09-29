@@ -21,6 +21,7 @@ either.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -182,6 +183,31 @@ class ConsultResult:
         )
 
 
+_PRINTABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,63}")
+_UNPRINTABLE = "unprintable"
+_NOT_REPORTED = "not reported"
+_MEASURED = "Measured"
+_UNSUPPORTED = "Unsupported"
+_NOT_MEASURED = "NotMeasured"
+_UNKNOWN = "unknown"
+_CHARS = " chars"
+_MISSING: object = object()
+
+
+def _printable_name(value: Any) -> str:
+    """Return *value* if it is a printable identifier, else ``_UNPRINTABLE``."""
+    if isinstance(value, str) and _PRINTABLE_NAME.fullmatch(value):
+        return value
+    return _UNPRINTABLE
+
+
+def _int_chars_part(value: Any) -> str | None:
+    """Return ``"{value} chars"`` if *value* is an int but not a bool, else ``None``."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value}{_CHARS}"
+    return None
+
+
 def describe_reasoning(attempt: Mapping[str, Any]) -> str:
     """Describe one attempt's reasoning state for a stderr warning.
 
@@ -198,4 +224,41 @@ def describe_reasoning(attempt: Mapping[str, Any]) -> str:
 
     Complexity: O(k) in the number of keys of the reasoning object.
     """
-    raise NotImplementedError
+    if not isinstance(attempt, Mapping):
+        return _NOT_REPORTED
+
+    reasoning = attempt.get("reasoning", _MISSING)
+    if reasoning is _MISSING:
+        return _NOT_REPORTED
+
+    if isinstance(reasoning, str):
+        return _NOT_MEASURED if reasoning == _NOT_MEASURED else f"{_UNKNOWN} (str)"
+
+    if isinstance(reasoning, Mapping):
+        keys = list(reasoning.keys())
+        if len(keys) == 1:
+            key = keys[0]
+            if key == _MEASURED:
+                inner = reasoning[_MEASURED]
+                chars = inner.get("chars", _MISSING) if isinstance(inner, Mapping) else _MISSING
+                chars_part = _int_chars_part(chars)
+                return _MEASURED if chars_part is None else f"{_MEASURED} {chars_part}"
+            if key == _UNSUPPORTED:
+                inner = reasoning[_UNSUPPORTED]
+                parts: list[str] = []
+                if isinstance(inner, Mapping):
+                    backend = inner.get("backend", _MISSING)
+                    if isinstance(backend, str):
+                        parts.append(_printable_name(backend))
+                    chars_part = _int_chars_part(inner.get("chars", _MISSING))
+                    if chars_part is not None:
+                        parts.append(chars_part)
+                if not parts:
+                    return _UNSUPPORTED
+                return f"{_UNSUPPORTED} ({', '.join(parts)})"
+
+        if keys:
+            return f"{_UNKNOWN} ({_printable_name(keys[0])})"
+        return f"{_UNKNOWN} ({type(reasoning).__name__})"
+
+    return f"{_UNKNOWN} ({type(reasoning).__name__})"

@@ -64,7 +64,7 @@ from bundle_segmenter import (  # noqa: E402
 )
 from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
 from magi_rs_pin import Pin  # noqa: E402
-from magi_rs_result import ConsultResult  # noqa: E402
+from magi_rs_result import ConsultResult, describe_reasoning  # noqa: E402
 from magi_rs_trio import (  # noqa: E402
     FAIL_CLOSED_ERRORS,
     MagiRsContractError,
@@ -1457,7 +1457,8 @@ def _announce_magi_rs_telemetry(
     if capped:
         completions = telemetry.get("completions") or {}
         detail = ", ".join(
-            f"{mage} ({completions[mage][-1].get('model')}, cap {completions[mage][-1].get('cap')})"
+            f"{mage} ({completions[mage][-1].get('model')}, cap {completions[mage][-1].get('cap')}, "
+            f"reasoning: {describe_reasoning(completions[mage][-1])})"
             for mage in capped
         )
         print(
