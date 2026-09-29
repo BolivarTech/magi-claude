@@ -877,3 +877,19 @@ def test_main_records_the_resolved_ollama_timeout_in_the_report(monkeypatch, tmp
     run_magi.main()
     report = json.loads((out / "magi-report.json").read_text(encoding="utf-8"))
     assert report["magi_rs"]["timeout_seconds"] == 17000
+
+
+def test_a_flagged_default_timeout_points_at_max_rotations_not_at_itself(capsys):
+    # Loop 1 (review): with max_rotations = 0 magi-rs flags even 16820 (measured
+    # 2026-09-29); recommending the value already in use would contradict itself.
+    import magi_rs_trio
+    from run_magi import announce_magi_rs_telemetry
+
+    default = magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS
+    announce_magi_rs_telemetry(
+        ConsultResult.from_json(_capture_with_applied_caps(True)), timeout_seconds=default
+    )
+    lines = [line for line in capsys.readouterr().err.splitlines() if "max_rotations" in line]
+    assert len(lines) == 1
+    assert "WARNING" in lines[0] and str(default) in lines[0]
+    assert "recommended --timeout is" not in lines[0]
