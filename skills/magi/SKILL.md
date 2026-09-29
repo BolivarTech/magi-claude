@@ -79,7 +79,7 @@ then run through **`magi-rs`**, a pinned, digest-verified binary the plugin down
 into its `bin/` and verifies on every run, against the Ollama endpoint and the trio
 declared in the project's `.magi/magi.toml`, one model per mage:
 
-    python skills/magi/scripts/run_magi.py <mode> <input_file_or_text> --ollama [--timeout 1800]
+    python skills/magi/scripts/run_magi.py <mode> <input_file_or_text> --ollama [--timeout 16820]
 
 - `--ollama` is **mutually exclusive** with `--model`: the trio comes from
   `.magi/magi.toml`, not the CLI, and passing both errors out.
@@ -88,7 +88,14 @@ declared in the project's `.magi/magi.toml`, one model per mage:
   without `.magi/magi.toml` fails and names that command; it never initialises on its own.
 - `.claude/magi-ollama.toml` is no longer read (6.0.0); everything it declared lives in
   `.magi/magi.toml`, which `magi-rs` owns.
-- `--timeout` defaults to 1800 here and also sets each mage's per-attempt budget.
+- `--timeout` defaults to 16820 here and also sets each mage's per-attempt budget.
+- **Launch this path in the background** (the Bash tool's `run_in_background`) and wait for
+  its completion notification. A default run usually takes a few minutes, but it can pass
+  the Bash tool's 10-minute ceiling when a seat rotates, and segmented bundles run their
+  segments in series.
+- If a run is interrupted, look for a leftover `magi-rs` process before starting another:
+  it holds Ollama slots. On Windows, `tasklist /FI "IMAGENAME eq magi-rs.exe"`, then
+  `taskkill /PID <pid> /T /F`. On Linux and macOS, `pgrep -x magi-rs`, then `kill <pid>`.
 - A bundle above `magi-rs`'s 256 KiB input ceiling is split at section boundaries and
   evaluated one segment at a time; the gate passes only if every segment does.
   See [`docs/ollama-backend.md`](../../docs/ollama-backend.md).
