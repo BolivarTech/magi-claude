@@ -370,7 +370,7 @@ def test_a_malformed_completions_record_is_skipped_not_fatal():
 def _announce(result):
     from run_magi import announce_magi_rs_telemetry
 
-    announce_magi_rs_telemetry(result)
+    announce_magi_rs_telemetry(result, timeout_seconds=16820)
 
 
 def test_the_capped_warning_names_the_mage_the_model_and_the_cap(capsys):
@@ -493,7 +493,7 @@ def test_a_raw_artifact_that_cannot_be_written_raises_not_swallows(tmp_path):
 def test_the_report_carries_a_magi_rs_block_with_the_telemetry_verbatim():
     from run_magi import build_report_block
 
-    report = build_report_block(_result(rotations=[]))
+    report = build_report_block(_result(rotations=[]), timeout_seconds=16820)
     assert report["magi_rs"]["rotations"] == []  # the POSITIVE certificate
     assert "capped_agents" in report["magi_rs"]
     assert "run_id" in report["magi_rs"] and report["magi_rs"]["run_id"] is None
@@ -528,7 +528,7 @@ def test_the_block_carries_the_tag_each_seat_actually_used_as_model_used():
             "melchior": [_attempt("stop", model="qwen3.5:397b-cloud")],
         }
     )
-    assert build_report_block(result)["magi_rs"]["model_used"] == {
+    assert build_report_block(result, timeout_seconds=16820)["magi_rs"]["model_used"] == {
         "caspar": "glm-5.2:cloud",
         "melchior": "qwen3.5:397b-cloud",
     }
@@ -538,8 +538,10 @@ def test_three_unmeasured_seats_leave_the_marker_in_the_report_and_two_do_not():
     # D11 / BDD-34: who consumes the gate reads the report, not the terminal.
     from run_magi import build_report_block
 
-    every = build_report_block(_result(ran_unmeasured=["balthasar", "caspar", "melchior"]))
-    some = build_report_block(_result(ran_unmeasured=["caspar", "melchior"]))
+    every = build_report_block(
+        _result(ran_unmeasured=["balthasar", "caspar", "melchior"]), timeout_seconds=16820
+    )
+    some = build_report_block(_result(ran_unmeasured=["caspar", "melchior"]), timeout_seconds=16820)
     assert every["magi_rs"]["gate_ran_on_unverified_context"] is True
     assert some["magi_rs"]["gate_ran_on_unverified_context"] is False
 
@@ -570,7 +572,9 @@ def test_a_run_degraded_locally_by_a_broken_verdict_is_shouted_invalid_too(capsy
     # and the "gate is INVALID" warning must fire for that path as well.
     from run_magi import announce_magi_rs_telemetry
 
-    announce_magi_rs_telemetry(_result(degraded=False), degraded_locally=True)
+    announce_magi_rs_telemetry(
+        _result(degraded=False), degraded_locally=True, timeout_seconds=16820
+    )
     err = capsys.readouterr().err.lower()
     assert "degraded" in err and "the gate is invalid" in err
 
@@ -581,9 +585,12 @@ def test_the_unmeasured_marker_and_the_tone_share_one_definition(capsys):
     from run_magi import announce_magi_rs_telemetry, build_report_block
 
     dup = _result(ran_unmeasured=["caspar", "caspar", "caspar"])
-    announce_magi_rs_telemetry(dup)
+    announce_magi_rs_telemetry(dup, timeout_seconds=16820)
     assert "nobody measured" not in capsys.readouterr().err.lower()
-    assert build_report_block(dup)["magi_rs"]["gate_ran_on_unverified_context"] is False
+    assert (
+        build_report_block(dup, timeout_seconds=16820)["magi_rs"]["gate_ran_on_unverified_context"]
+        is False
+    )
 
 
 def test_the_announcer_survives_telemetry_that_raises_on_access(capsys):
@@ -595,7 +602,7 @@ def test_the_announcer_survives_telemetry_that_raises_on_access(capsys):
             raise RuntimeError("telemetry exploded")
 
     hostile = ConsultResult(agents=[], telemetry=_Hostile(), report="", degraded=False, run_id=None)
-    announce_magi_rs_telemetry(hostile)
+    announce_magi_rs_telemetry(hostile, timeout_seconds=16820)
     assert "could not render" in capsys.readouterr().err
 
 
@@ -721,7 +728,7 @@ def test_the_reasoning_fields_travel_verbatim_into_the_report():
     from run_magi import build_report_block
 
     record = _attempt_r("stop", {"Measured": {"chars": 5, "text": None}}, control="enabled")
-    block = build_report_block(_result(completions={"caspar": [record]}))
+    block = build_report_block(_result(completions={"caspar": [record]}), timeout_seconds=16820)
     assert block["magi_rs"]["completions"]["caspar"][0] == record
 
 
@@ -735,6 +742,138 @@ def test_the_capped_warning_prints_on_a_cp1252_console(monkeypatch):
     announce_magi_rs_telemetry(
         _result(completions={"caspar": [_attempt_r("length", {"Fu\u001b[31mture": 1})]}),
         stream,
+        timeout_seconds=16820,
     )
     stream.flush()  # a UnicodeEncodeError above would already have failed the test
     assert b"caspar" in stream.buffer.getvalue()
+
+
+# --------------------------------------------------------------------------
+# T11 -- the clock-typo flag: recorded on every report, warned only when true
+# --------------------------------------------------------------------------
+
+_DROP_FIELD = object()
+_DROP_BLOCK = object()
+_TIMEOUT = 16820
+
+
+def _capture_with_applied_caps(value):
+    """The real capture with only applied_caps.ceiling_above_sanity changed (declared derivation)."""
+    raw = json.loads(_fixture("three-agents.json"))
+    if value is _DROP_FIELD:
+        raw["applied_caps"].pop("ceiling_above_sanity", None)
+    elif value is _DROP_BLOCK:
+        raw.pop("applied_caps", None)
+    else:
+        raw["applied_caps"]["ceiling_above_sanity"] = value
+    return json.dumps(raw)
+
+
+def test_the_real_capture_reads_ceiling_above_sanity_as_false():
+    assert ConsultResult.from_json(_fixture("three-agents.json")).ceiling_above_sanity is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, True),
+        (False, False),
+        ("true", None),
+        (1, None),
+        (None, None),
+        (_DROP_FIELD, None),
+        (_DROP_BLOCK, None),
+    ],
+)
+def test_ceiling_above_sanity_is_a_boolean_or_null_and_never_raises(value, expected):
+    # Scenario 12 (fail-soft): anything but a JSON boolean reads as null.
+    result = ConsultResult.from_json(_capture_with_applied_caps(value))
+    assert result.ceiling_above_sanity is expected
+
+
+def test_applied_caps_that_is_not_an_object_reads_as_null():
+    # Review Focus 5.
+    raw = json.loads(_fixture("three-agents.json"))
+    raw["applied_caps"] = ["not", "an", "object"]
+    assert ConsultResult.from_json(json.dumps(raw)).ceiling_above_sanity is None
+
+
+def test_every_ollama_report_records_the_timeout_and_the_flag():
+    # Scenarios 11-12 / DB-2: the corpus needs the base, not only the hits.
+    from run_magi import build_report_block
+
+    result = ConsultResult.from_json(_capture_with_applied_caps(True))
+    block = build_report_block(result, timeout_seconds=168200)["magi_rs"]
+    assert block["timeout_seconds"] == 168200
+    assert block["ceiling_above_sanity"] is True
+    clean = build_report_block(
+        ConsultResult.from_json(_fixture("three-agents.json")), timeout_seconds=_TIMEOUT
+    )["magi_rs"]
+    assert clean["timeout_seconds"] == _TIMEOUT and clean["ceiling_above_sanity"] is False
+
+
+def test_a_flagged_timeout_warns_once_with_the_value_the_recommendation_and_the_diagnosis(capsys):
+    # Scenario 11.
+    from run_magi import announce_magi_rs_telemetry
+
+    result = ConsultResult.from_json(_capture_with_applied_caps(True))
+    announce_magi_rs_telemetry(result, timeout_seconds=168200)
+    lines = [line for line in capsys.readouterr().err.splitlines() if "typo" in line]
+    assert len(lines) == 1
+    assert "168200" in lines[0] and "16820" in lines[0] and "WARNING" in lines[0]
+    assert "max_rotations" in lines[0]
+
+
+@pytest.mark.parametrize("value", [False, None, "true"])
+def test_no_typo_warning_unless_magi_rs_flagged_it(value, capsys):
+    # Scenario 12: silent on a clean run.
+    from run_magi import announce_magi_rs_telemetry
+
+    announce_magi_rs_telemetry(
+        ConsultResult.from_json(_capture_with_applied_caps(value)), timeout_seconds=_TIMEOUT
+    )
+    assert "typo" not in capsys.readouterr().err
+
+
+def test_main_records_the_resolved_ollama_timeout_in_the_report(monkeypatch, tmp_path):
+    # End to end: the --timeout the operator passed reaches the magi_rs block.
+    import sys
+
+    import run_magi
+    from synthesize import determine_consensus
+
+    result = ConsultResult.from_json(_capture_with_applied_caps(False))
+
+    class _Executor:
+        last_result = result
+
+        def preflight(self):
+            return "magi-rs"
+
+    monkeypatch.setattr(run_magi, "_select_executor", lambda args, timeout: _Executor())
+
+    async def _orch(*args, **kwargs):
+        agents = list(result.agents)
+        return {"agents": agents, "consensus": determine_consensus(agents)}
+
+    monkeypatch.setattr(run_magi, "run_orchestrator", _orch)
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_magi.py",
+            "design",
+            "hello",
+            "--ollama",
+            "--no-status",
+            "--timeout",
+            "17000",
+            "--output-dir",
+            str(out),
+        ],
+    )
+    run_magi.main()
+    report = json.loads((out / "magi-report.json").read_text(encoding="utf-8"))
+    assert report["magi_rs"]["timeout_seconds"] == 17000
