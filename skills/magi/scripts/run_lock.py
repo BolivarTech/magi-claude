@@ -251,6 +251,12 @@ def refresh_lock(run_dir: str, max_age_seconds: int) -> None:
         on stderr and is swallowed). Never creates a lock: a run started with an
         explicit ``--output-dir`` has none and must not gain one in a user's
         directory. A corrupt existing lock is replaced whole.
+
+    Note:
+        The existence check and the write are two steps. The window is harmless
+        here: only the owning run writes or removes its lock, in series, and
+        cleanup deletes only directories already judged dead. No portable
+        atomic "replace only if it exists" is available.
     """
     if os.path.exists(_lock_path(run_dir)):
         write_lock(run_dir, max_age_seconds)
