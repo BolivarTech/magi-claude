@@ -447,6 +447,15 @@ class MagiRsTrio(TrioExecutor):
         Side effects:
             Launches a process with an allowlisted environment; writes
             ``magi-rs-raw.json`` (fail-soft: a failed write warns).
+
+        Note:
+            The outer clock is exactly ``timeout``, with no margin. Measured on
+            2026-09-29 against magi-rs 0.21.0 (``--timeout 300``, launched
+            directly): magi-rs derives its per-request and per-operation clocks
+            from ``--timeout``, gave up on a timed-out seat, and emitted its
+            partial JSON 250 s before the deadline. Nothing is lost by stopping
+            at ``timeout``. magi-rs's deadline behaviour is internal to it, so
+            this is re-measured on every pin bump.
         """
         env = EnvironmentPolicy.build(os.environ)
         _emit(on_state, _TRIO_NODE, "running")
