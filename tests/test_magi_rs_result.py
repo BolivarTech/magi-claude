@@ -4,8 +4,9 @@
 """Tests for reading a magi-rs consult envelope (MS3 Task 3c).
 
 The fixtures under ``tests/fixtures/magi-rs-consult/`` derive from ONE real
-captured run against the pinned binary (MS0c, 0.19.1); the variants were made
-by editing that envelope, never by writing a shape from imagination.
+captured run against the pinned binary (v6.2.0 M1, 0.21.0); the variants were
+made by editing that envelope, never by writing a shape from imagination. Their
+origin and edits are listed in that directory's README.md.
 """
 
 import json
@@ -148,7 +149,8 @@ def test_the_captured_envelope_shape_is_exactly_the_pinned_contract():
     # (MS0b caught `+run_id` and `majority_summary` -> `dissent` this way).
     #
     # IF THIS GOES RED AFTER A PIN MOVE: re-verify the contract with a REAL run
-    # (the MS0b procedure in planning/magi-rs-pin-bump-v0.19.0.md section 5),
+    # (the MS0b procedure in
+    # planning/_archive/magi-rs-pin-bump-0.19-v6.0.0/magi-rs-pin-bump-v0.19.0.md section 5),
     # understand what changed and why, update the spec -- and only THEN
     # regenerate the fixture. Regenerating first blesses the drift this test
     # exists to catch.
