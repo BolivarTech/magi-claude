@@ -28,6 +28,10 @@ from typing import Any
 
 _STRUCTURED_FLAG = "--structured-verdicts"
 
+#: Key of the clock-typo flag inside the envelope's top-level ``applied_caps``
+#: (captured from magi-rs v0.21.0, tests/fixtures/magi-rs-consult/three-agents.json).
+_CEILING_FLAG = "ceiling_above_sanity"
+
 _TELEMETRY_FIELDS = (
     "degraded",
     "mode",
@@ -82,6 +86,12 @@ class ConsultResult:
             ceiling and the probe notices live since 0.18.1 (stderr no longer
             carries INFO). ``None`` when absent -- telemetry is fail-soft, never
             a contract error.
+        ceiling_above_sanity: ``applied_caps.ceiling_above_sanity`` (top level
+            of the envelope, magi-rs >= 0.21.0): True when the ``--timeout``
+            handed to magi-rs derives a per-mage ceiling above its sanity
+            bound. ``None`` unless the value is a JSON boolean -- an absent
+            ``applied_caps``, a non-object one, a missing field and a
+            non-boolean value (``"true"``, ``1``, ``null``) all read as unknown.
     """
 
     agents: list[dict[str, Any]]
@@ -89,6 +99,7 @@ class ConsultResult:
     report: str
     degraded: bool
     run_id: str | None
+    ceiling_above_sanity: bool | None = None
 
     @property
     def capped_agents(self) -> list[str]:
@@ -174,12 +185,15 @@ class ConsultResult:
         if not isinstance(agents, list):
             raise MagiRsContractError("magi-rs 'agents' is not a list")
         run_id = envelope.get("run_id")
+        applied_caps = envelope.get("applied_caps")
+        ceiling = applied_caps.get(_CEILING_FLAG) if isinstance(applied_caps, dict) else None
         return cls(
             agents=list(agents),
             telemetry={field: consult.get(field) for field in _TELEMETRY_FIELDS},
             report=str(consult.get("report") or ""),  # a null report is empty, not "None"
             degraded=bool(consult.get("degraded", False)),
             run_id=str(run_id) if run_id is not None else None,
+            ceiling_above_sanity=ceiling if isinstance(ceiling, bool) else None,
         )
 
 

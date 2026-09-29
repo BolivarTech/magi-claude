@@ -66,6 +66,7 @@ from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
 from magi_rs_pin import Pin  # noqa: E402
 from magi_rs_result import ConsultResult, describe_reasoning  # noqa: E402
 from magi_rs_trio import (  # noqa: E402
+    DEFAULT_OLLAMA_TIMEOUT_SECONDS,
     FAIL_CLOSED_ERRORS,
     MagiRsContractError,
     MagiRsProcessError,
@@ -1062,11 +1063,15 @@ def _evaluate_segment(
     report["cost"] = unpriced_cost()
     result: ConsultResult | None = getattr(executor, "last_result", None)
     if result is not None:
-        report.update(build_report_block(result))
+        report.update(build_report_block(result, timeout_seconds=timeout))
     with open(os.path.join(segment_dir, "magi-report.json"), "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
     if result is not None:
-        announce_magi_rs_telemetry(result, degraded_locally=bool(report.get("degraded", False)))
+        announce_magi_rs_telemetry(
+            result,
+            degraded_locally=bool(report.get("degraded", False)),
+            timeout_seconds=timeout,
+        )
     return report
 
 
@@ -1322,7 +1327,18 @@ def unpriced_cost() -> dict[str, Any]:
     return {"total_usd": None, "per_agent": {}, "cost_source": COST_SOURCE_UNPRICED}
 
 
-def build_report_block(result: ConsultResult) -> dict[str, Any]:
+_CLOCK_TYPO_WARNING = (
+    "[!] WARNING: magi-rs flagged --timeout {timeout} as a probable typo: it derives a "
+    "per-mage ceiling above magi-rs's 2400 s sanity bound (the derivation also depends on "
+    "max_rotations in .magi/magi.toml). The recommended --timeout is {recommended}."
+)
+"""Relays magi-rs's ``applied_caps.ceiling_above_sanity`` flag; it does not assert
+a typo as fact -- with ``max_rotations = 0`` even the recommended timeout is
+flagged (measured 2026-09-29). The warning arrives after the run, so it leaves
+evidence but cannot protect a hung run."""
+
+
+def build_report_block(result: ConsultResult, *, timeout_seconds: int) -> dict[str, Any]:
     """Build the ``magi_rs`` block for ``magi-report.json``.
 
     ADDITIVE and fail-soft, exactly like v5.4.0's ``model`` block: ``consensus``
@@ -1331,6 +1347,7 @@ def build_report_block(result: ConsultResult) -> dict[str, Any]:
 
     Args:
         result: The parsed consult result.
+        timeout_seconds: The ``--timeout`` handed to magi-rs for this run.
 
     Returns:
         ``{"magi_rs": {...}}`` carrying the telemetry VERBATIM (every field of
@@ -1342,7 +1359,10 @@ def build_report_block(result: ConsultResult) -> dict[str, Any]:
         magi-rs's daily log, ``None`` when not emitted (R15); and
         ``gate_ran_on_unverified_context`` -- ``True`` only when EVERY seat ran
         unmeasured (D11 / BDD-34), the marker a reader of the report needs
-        because stderr does not survive the run.
+        because stderr does not survive the run;
+        ``timeout_seconds`` and ``ceiling_above_sanity`` (the boolean magi-rs
+        published, ``None`` when unknown) -- recorded on EVERY report so the
+        corpus holds the base count, not only the runs that were flagged.
 
     Raises:
         Nothing -- see :func:`announce_magi_rs_telemetry`.
@@ -1351,6 +1371,8 @@ def build_report_block(result: ConsultResult) -> dict[str, Any]:
     block["capped_agents"] = result.capped_agents
     block["model_used"] = _model_used(result.telemetry.get("completions"))
     block["run_id"] = result.run_id
+    block["timeout_seconds"] = timeout_seconds
+    block["ceiling_above_sanity"] = result.ceiling_above_sanity
     block["gate_ran_on_unverified_context"] = _every_seat_unmeasured(
         result.telemetry.get("ran_unmeasured")
     )
@@ -1398,11 +1420,15 @@ def _every_seat_unmeasured(unmeasured: Any) -> bool:
 
 
 def announce_magi_rs_telemetry(
-    result: ConsultResult, stream: IO[str] | None = None, *, degraded_locally: bool = False
+    result: ConsultResult,
+    stream: IO[str] | None = None,
+    *,
+    degraded_locally: bool = False,
+    timeout_seconds: int,
 ) -> None:
     """Warn about anything that degrades a gate, on a channel a human reads.
 
-    Emits at most four warnings, and NONE of them on a clean run -- a channel
+    Emits at most five warnings, and NONE of them on a clean run -- a channel
     that speaks every time is a channel nobody reads, and then the run that
     mattered scrolls past unread. Sibling of :func:`announce_extraction_failures`
     and of the ``$0.00`` / unattributed warnings of v5.4.0, for the same reason:
@@ -1432,16 +1458,23 @@ def announce_magi_rs_telemetry(
     """
     out = sys.stderr if stream is None else stream
     try:
-        _announce_magi_rs_telemetry(result, out, degraded_locally)
+        _announce_magi_rs_telemetry(result, out, degraded_locally, timeout_seconds)
     except Exception as exc:  # noqa: BLE001 -- fail-soft by contract (see the docstring)
         print(f"[!] WARNING: could not render the magi-rs telemetry warnings ({exc})", file=out)
 
 
 def _announce_magi_rs_telemetry(
-    result: ConsultResult, stream: IO[str], degraded_locally: bool
+    result: ConsultResult, stream: IO[str], degraded_locally: bool, timeout_seconds: int
 ) -> None:
-    """The four warnings of :func:`announce_magi_rs_telemetry`, without the fail-soft wrap."""
+    """The warnings of :func:`announce_magi_rs_telemetry`, without the fail-soft wrap."""
     telemetry = result.telemetry
+    if result.ceiling_above_sanity is True:
+        print(
+            _CLOCK_TYPO_WARNING.format(
+                timeout=timeout_seconds, recommended=DEFAULT_OLLAMA_TIMEOUT_SECONDS
+            ),
+            file=stream,
+        )
     if result.degraded or degraded_locally:
         cause = (
             "a seat delivered no verdict"
@@ -2415,7 +2448,7 @@ def main() -> None:
     # discipline as the blocks above. Absent on the Claude path (additive).
     magi_rs_result: ConsultResult | None = getattr(executor, "last_result", None)
     if magi_rs_result is not None:
-        report.update(build_report_block(magi_rs_result))
+        report.update(build_report_block(magi_rs_result, timeout_seconds=resolved_timeout))
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
@@ -2425,7 +2458,9 @@ def main() -> None:
     # and the file it points to always agree (D2, D3, D11, R17).
     if magi_rs_result is not None:
         announce_magi_rs_telemetry(
-            magi_rs_result, degraded_locally=bool(report.get("degraded", False))
+            magi_rs_result,
+            degraded_locally=bool(report.get("degraded", False)),
+            timeout_seconds=resolved_timeout,
         )
 
     # R18 made ACTIVE: filing the counts was not enough (MAGI gate, Caspar). Announced here,
