@@ -20,12 +20,12 @@ python skills/magi/scripts/run_magi.py --ollama-init
 
 # Any gate, any mode
 python skills/magi/scripts/run_magi.py code-review <file_or_text> --ollama
-python skills/magi/scripts/run_magi.py design      <file_or_text> --ollama --timeout 3600
+python skills/magi/scripts/run_magi.py design      <file_or_text> --ollama --timeout 16820
 ```
 
 The first `--ollama` (or `--ollama-init`) after an install downloads `magi-rs` (pinned at
-v0.21.0) into the plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`, and only then
-runs it. Every later run verifies the digest and `--version` again before executing. When
+v0.21.0) into the plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`,
+and only then runs it. Every later run verifies the digest and `--version` again before executing. When
 the binary cannot be obtained or does not verify, the run stops with one `[FATAL]` line and
 nothing is executed. There is no fallback to another architecture or to an unverified copy.
 The one escape hatch is to place the pinned executable in `bin/` by hand, where it is
@@ -33,8 +33,9 @@ verified like any download.
 
 The pin covers four builds: `windows-x86_64`, `linux-x86_64`, `linux-aarch64` (the rpi5
 build) and `macos-universal2`. One build is not in it: `linux-x86_64-compat`, the variant
-`magi-rs` publishes for older glibc (the `.7z` archives are out too). On such a host the bootstrap downloads the regular `linux-x86_64` asset. The
-escape hatch does not help either: the digest the plugin expects is the regular build's.
+`magi-rs` publishes for older glibc (the `.7z` archives are out too). On such a host the
+bootstrap downloads the regular `linux-x86_64` asset. The escape hatch does not help either:
+the digest the plugin expects is the regular build's.
 If the regular build does not start on your machine, that is the limit of 6.x as shipped;
 say so in an issue and it can be pinned.
 
@@ -129,7 +130,8 @@ in the `magi-rs` repository.
 **after** the run; it cannot warn before the launch, because the derivation is internal to
 `magi-rs`. The derivation also depends on `max_rotations` in `.magi/magi.toml`: with
 `max_rotations = 0` even 16820 derives 7005 s and is flagged, while the scaffold default
-`max_rotations = 2` derives 2335 s and is not.
+`max_rotations = 2` derives 2335 s and is not. When the flagged value is not above 16820, the
+warning points at `max_rotations` instead of recommending a timeout.
 
 **Restoring the 6.1.0 behaviour.** Pass `--timeout 1800`, and set `max_tokens = 16384` and
 `agent_timeout_secs = 90` under `[magi]` in `.magi/magi.toml`.
@@ -145,8 +147,8 @@ in the `magi-rs` repository.
   `pool_eligibility`), plus `capped_agents` (seats whose accepted attempt hit the completion
   cap: the verdict counts, the trailing prose was lost), `timeout_seconds` (the `--timeout`
   passed to `magi-rs`), `ceiling_above_sanity` (`applied_caps.ceiling_above_sanity` from
-  `magi-rs`: `true`, `false`, or `null` when it published no boolean), `model_used` (the tag each seat's
-  accepted attempt actually ran on), `run_id` (the pointer into `.magi/logs/magi-<date>.log`,
+  `magi-rs`: `true`, `false`, or `null` when it published no boolean), `model_used` (the tag
+  each seat's accepted attempt actually ran on), `run_id` (the pointer into `.magi/logs/magi-<date>.log`,
   where `magi-rs` writes the per-mage ceiling and the probe notices) and
   `gate_ran_on_unverified_context` (`true` only when **every** seat ran with an unmeasured
   context window).
@@ -157,8 +159,9 @@ in the `magi-rs` repository.
 
 The raw envelope is saved next to it as **`magi-rs-raw.json`**, exactly as received, for
 audit. Each record of `completions` carries two keys added in 0.20.0, `reasoning` and
-`control`, and they reach the report verbatim; `schema_version` did not change. Its embedded transcript is capped at 64 KiB by `magi-rs`; the prompt itself is what
-the plugin sent, unchanged.
+`control`, and they reach the report verbatim; `schema_version` did not change. Its embedded
+transcript is capped at 64 KiB by `magi-rs`; the prompt itself is what the plugin sent,
+unchanged.
 
 Five warnings can reach stderr; none appears on a clean run. The run is DEGRADED, because a
 seat delivered nothing or a delivered verdict failed the seven-key contract here, in which
