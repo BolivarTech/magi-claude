@@ -187,11 +187,12 @@ class ConsultResult:
         run_id = envelope.get("run_id")
         applied_caps = envelope.get("applied_caps")
         ceiling = applied_caps.get(_CEILING_FLAG) if isinstance(applied_caps, dict) else None
+        flag = consult.get("degraded", False)
         return cls(
             agents=list(agents),
             telemetry={field: consult.get(field) for field in _TELEMETRY_FIELDS},
             report=str(consult.get("report") or ""),  # a null report is empty, not "None"
-            degraded=bool(consult.get("degraded", False)),
+            degraded=flag if isinstance(flag, bool) else True,
             run_id=str(run_id) if run_id is not None else None,
             ceiling_above_sanity=ceiling if isinstance(ceiling, bool) else None,
         )
