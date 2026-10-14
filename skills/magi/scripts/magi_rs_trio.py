@@ -580,7 +580,9 @@ class MagiRsTrio(TrioExecutor):
         }
         for index, verdict in enumerate(result.agents):
             name = verdict.get("agent") if isinstance(verdict, dict) else None
-            mage = str(name) if name else f"agent-{index}"
+            # The name is data from the child: only a seat of the trio may name
+            # the artifact, so a crafted name cannot write outside output_dir.
+            mage = name if name in _MAGES else f"agent-{index}"
             path = os.path.join(output_dir, f"{mage}.json")
             try:
                 with open(path, "w", encoding="utf-8") as handle:
