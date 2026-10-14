@@ -461,6 +461,18 @@ def test_the_degraded_warning_fires_and_says_the_gate_is_invalid(capsys):
     assert "invalid" in err
 
 
+def test_an_off_contract_degraded_flag_is_named_as_the_cause_not_a_missing_seat(capsys):
+    # Three verdicts arrived; only the flag was off-contract. Blaming a seat
+    # that "delivered no verdict" would send the operator after the wrong cause.
+    envelope = json.loads(_fixture("three-agents.json"))
+    envelope["consult"]["degraded"] = []
+    _announce(ConsultResult.from_json(json.dumps(envelope)))
+    err = capsys.readouterr().err
+    assert "DEGRADED" in err
+    assert "not a JSON boolean" in err
+    assert "delivered no verdict" not in err
+
+
 def test_a_clean_run_emits_no_warning_at_all(capsys):
     _announce(_result())
     assert capsys.readouterr().err == ""
