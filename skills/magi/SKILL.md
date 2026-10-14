@@ -88,6 +88,11 @@ declared in the project's `.magi/magi.toml`, one model per mage:
   without `.magi/magi.toml` fails and names that command; it never initialises on its own.
 - `.claude/magi-ollama.toml` is no longer read (6.0.0); everything it declared lives in
   `.magi/magi.toml`, which `magi-rs` owns.
+- If the run fails with `has no [decision] section`, the project's `.magi/` was created by
+  plugin 6.x. Do not edit or delete it on your own; tell the user it must be regenerated
+  (`mv .magi .magi.bak-0.21`, then `--ollama-init`, then copy their trio and fallbacks into
+  the new `magi.toml`) and point them to section 2 of
+  [`docs/ollama-backend.md`](../../docs/ollama-backend.md).
 - `--timeout` defaults to 16820 here and also sets each mage's per-attempt budget.
 - **Launch this path in the background** (the Bash tool's `run_in_background`) and wait for
   its completion notification. A default run usually takes a few minutes, but it can pass

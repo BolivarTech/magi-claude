@@ -1,8 +1,8 @@
 # MAGI open-weight path (`--ollama`), executed by `magi-rs`
 
 - **Author:** Julian Bolivar
-- **Version:** 6.2.0
-- **Date:** 2026-09-29
+- **Version:** 7.0.0
+- **Date:** 2026-10-14
 
 Since 6.0.0, `--ollama` no longer talks to Ollama itself. The plugin builds the payload
 exactly as before and hands it to **`magi-rs`**, a pinned, digest-verified Rust binary that
@@ -24,7 +24,7 @@ python skills/magi/scripts/run_magi.py design      <file_or_text> --ollama --tim
 ```
 
 The first `--ollama` (or `--ollama-init`) after an install downloads `magi-rs` (pinned at
-v0.21.0) into the plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`,
+v0.24.1) into the plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`,
 and only then runs it. Every later run verifies the digest and `--version` again before executing. When
 the binary cannot be obtained or does not verify, the run stops with one `[FATAL]` line and
 nothing is executed. There is no fallback to another architecture or to an unverified copy.
@@ -36,7 +36,7 @@ build) and `macos-universal2`. One build is not in it: `linux-x86_64-compat`, th
 `magi-rs` publishes for older glibc (the `.7z` archives are out too). On such a host the
 bootstrap downloads the regular `linux-x86_64` asset. The escape hatch does not help either:
 the digest the plugin expects is the regular build's.
-If the regular build does not start on your machine, that is the limit of 6.x as shipped;
+If the regular build does not start on your machine, that is the limit of 7.x as shipped;
 say so in an issue and it can be pinned.
 
 Run both commands **from the project root**. `--ollama-init` and the gate pass the current
@@ -64,7 +64,32 @@ went away with the file, and since 6.1.0 so did the plugin's own Ollama client: 
 context guard, backoff and redaction are all `magi-rs`'s, and there is no second validator
 of `magi.toml` on this side.
 
-A `magi.toml` written by a `magi-rs` older than 0.18.0 is one case where that matters. Its
+**Upgrading from 6.x: `.magi/` has to be regenerated (7.0.0).** Since `magi-rs` 0.23.0 a
+`magi.toml` needs a `[decision]` section, and one without it no longer loads. `magi-rs`
+stops before doing anything else, and the plugin relays its message:
+`... has no [decision] section: it was written by magi-rs 0.22.0 or earlier`. `magi-rs init`
+never edits an existing file, so `--ollama-init` cannot fix it in place. From the project root:
+
+1. Move the old state directory aside: `mv .magi .magi.bak-0.21`.
+2. Run `python skills/magi/scripts/run_magi.py --ollama-init`. It writes a fresh `.magi/`
+   whose `magi.toml` has the `[decision]` section.
+3. Copy your own settings (the trio, its lineages, the `[[magi.fallback]]` pool,
+   `max_rotations`, anything else you changed) from `.magi.bak-0.21/magi.toml` into the new
+   file. Comment lines can be ignored; the new scaffold groups the pool right under `[magi]`.
+
+Do not bring back the old `.magi-rs-memory.db`. `magi-rs` 0.22.0 moved its bundled SQLite to
+3.53.2 and no longer supports databases written by 0.21.0 or earlier, and the plugin never
+reads it (see below). The migration is one-way: plugin 6.2.0 (on `magi-rs` 0.21.0) rejects the new file
+(``unknown field `decision` ``), so going back to 6.2.0 means restoring the backup.
+
+The `[decision]` section configures `magi-rs`'s small decision models (`clef-flash`, with
+`nimble` as fallback, in the scaffold). They pick a consult's mode when none is given and
+judge memory contradictions. The plugin always passes the mode and runs with `--no-memory`,
+so it never calls them and you do not have to pull them. The section still has to be
+present, because `magi-rs` refuses to load a file without it.
+
+An older migration works the same way, with `magi-rs`'s message as the guide. In a
+`magi.toml` written by a `magi-rs` older than 0.18.0, the
 `[headless]` keys `log_retention`, `log_max_bytes` and `log_level` are fatal (`unknown
 field`) from 0.18.0 on, and nothing migrates them for you. Their replacements live under
 `[logging]`: `log_dir`, `file_filter`, `compress`, `compress_after_days`, `retain_days`,
@@ -88,7 +113,7 @@ variables, `SYSTEMROOT`, `COMSPEC`, the locale variables, the proxy variables
 (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and their lowercase forms), the TLS/CA variables
 (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`,
 `NODE_EXTRA_CA_CERTS`) and `OLLAMA_HOST`. Nothing else travels: no `MAGI_PASSPHRASE`, no
-`OPENAI_API_KEY`, no dynamic-linker variables. The same command therefore takes the same path
+`OPENAI_API_KEY` or `MAGI_API_KEY`, no dynamic-linker variables. The same command therefore takes the same path
 whoever launches it. The list is enumerated rather than prefix-matched, and it grows only on
 the evidence of a run that failed. When the child dies or hangs, the error names the
 allowlist as a suspect and lists the parent variables that were withheld, by name only.
@@ -97,9 +122,10 @@ allowlist as a suspect and lists the parent variables that were withheld, by nam
 
 `--timeout` is still the wall-clock ceiling of the run. It is also the number `magi-rs`
 derives each mage's per-attempt budget from. The default on this path is **16820**, not the
-Claude path's 900. That is the value `magi-rs` 0.21.0 publishes for a headless gate;
-confirmed locally on 2026-09-29, it derives a per-mage ceiling of 2335 s, an operation
-budget of 1401 s per attempt and a 700 s per-request clock. Any explicit positive value is
+Claude path's 900. That is the value `magi-rs` 0.21.0 publishes for a headless gate. It
+derives a per-mage ceiling of 2335 s, an operation budget of 1401 s per attempt and a
+700 s per-request clock, confirmed locally on 2026-09-29 and again with 0.24.1 on
+2026-10-13. Any explicit positive value is
 honoured. Below 16820 a warning goes to stderr, because a lower wall timeout also cuts the
 reasoning budget of every seat, and the symptom (mages that stop completing) does not look
 like a timeout setting.
@@ -121,7 +147,7 @@ model in that seat, not a longer timeout.
 **Reasoning keys.** `magi-rs` 0.20.0 added four `[magi]` keys: `reasoning`
 (`default`/`disabled`/`enabled`), `reasoning_spelling` (`openai-compat` only), `max_tokens`
 and `reasoning_trace` (opt-in, log only). They are documented in
-[`docs/REASONING-BUDGET.md`](https://github.com/BolivarTech/magi/blob/v0.21.0/docs/REASONING-BUDGET.md)
+[`docs/REASONING-BUDGET.md`](https://github.com/BolivarTech/magi/blob/v0.24.1/docs/REASONING-BUDGET.md)
 in the `magi-rs` repository.
 
 **A `--timeout` that is too high.** A high value is obeyed as given. `magi-rs` flags a
@@ -197,6 +223,7 @@ that mention those names. A bundle that fits is never split.
 | Symptom | Meaning / what to do |
 |---|---|
 | `[FATAL] ... is not initialised for magi-rs ... run /magi --ollama-init` | No `.magi/magi.toml` under the current directory. Run the init from the project root, then the gate from the same place. |
+| `ERROR: magi-rs exited 2; ... has no [decision] section` | The `.magi/magi.toml` predates `magi-rs` 0.23.0. Regenerate it as described in section 2 (upgrading from 6.x). |
 | `[FATAL] digest mismatch` / `version mismatch` | The binary in `bin/` is not the pinned one. Delete it and re-run; the bootstrap downloads and verifies again. |
 | `ERROR: magi-rs exited N; stderr: ...` | The child failed; its stderr is relayed verbatim. If it looks like a missing certificate, proxy or host, the allowlist (section 3) is the first suspect: the message lists what it withheld. |
 | `ERROR: magi-rs did not finish within --timeout` | Raise `--timeout` (section 4), or re-seat a model that keeps overrunning. |
