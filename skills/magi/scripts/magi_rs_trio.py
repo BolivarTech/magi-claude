@@ -75,8 +75,9 @@ touches the memory layer by construction, so every run is stateless anyway."""
 
 _TIMEOUT_FLAG = "--timeout"
 """Wall-clock ceiling (R12). ``magi-rs`` also DERIVES the per-mage budget from
-it: with magi-rs 0.21.0, 16820 derives a 2335 s per-mage ceiling, a 1401 s
-operation budget and a 700 s per-request clock (measured 2026-09-29)."""
+it: with magi-rs 0.21.0 and 0.24.1, 16820 derives a 2335 s per-mage ceiling, a
+1401 s operation budget and a 700 s per-request clock (measured 2026-09-29 and
+2026-10-13)."""
 
 _TRIO_NODE = "magi-rs consult · 3 mages"
 """The single status node. D5/BDD-27: the plugin launches ONE child and cannot
@@ -91,8 +92,8 @@ DEFAULT_OLLAMA_TIMEOUT_SECONDS = 16820
 """magi-rs 0.21.0's published headless gate value; derives its 2335 s default
 ceiling (700 s per request, 1401 s operation budget). Source: 0.21.0 release
 notes and docs/REASONING-BUDGET.md, replay B (2026-09-27); confirmed locally
-on 2026-09-29 against the pinned binary. Re-measured at every pin
-move. Public: tools/measure_marker_adherence.py reads it."""
+on 2026-09-29 against the pinned binary, and unchanged with 0.24.1 on
+2026-10-13. Re-measured at every pin move. Public: tools/measure_marker_adherence.py reads it."""
 _RECOMMENDED_MIN_TIMEOUT_SECONDS = DEFAULT_OLLAMA_TIMEOUT_SECONDS
 """Below the default the derived ceiling falls under the only value measured
 with the 65 536-token output cap, so a lower value warns (D2)."""
@@ -146,7 +147,7 @@ def build_argv(executable: str, workdir: str, mode: str, timeout: int) -> list[s
             omitting it costs ``magi-rs`` an extra model call to classify, and
             lets the content under review choose the lens it is reviewed under.
         timeout: Wall-clock ceiling in seconds. ``magi-rs`` also DERIVES the
-            per-mage budget from it (16820 -> 2335 s per mage with 0.21.0).
+            per-mage budget from it (16820 -> 2335 s per mage with 0.24.1).
 
     Returns:
         The argv. The prompt is NOT in it -- it travels on stdin, because the
@@ -178,9 +179,9 @@ def build_argv(executable: str, workdir: str, mode: str, timeout: int) -> list[s
 def resolve_timeout(flag_value: int | None) -> tuple[int, str | None]:
     """Resolve the wall timeout and warn when it starves the per-mage budget.
 
-    ``magi-rs`` DERIVES each mage's budget from this value; with 0.21.0,
+    ``magi-rs`` DERIVES each mage's budget from this value; with 0.24.1,
     ``--timeout 16820`` derives the 2335 s per-mage ceiling that magi-rs
-    measured with its 65 536-token output cap (confirmed 2026-09-29). The open-weight
+    measured with its 65 536-token output cap (confirmed 2026-09-29, 2026-10-13). The open-weight
     path defaults to that value, and a lower explicit value is honoured with a
     warning rather than silently accepted.
 
