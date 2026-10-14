@@ -68,6 +68,22 @@ def test_a_two_agent_run_is_read_and_flagged_degraded():
     assert result.degraded is True
 
 
+@pytest.mark.parametrize("off_contract", ["false", "no", 1, [], None])
+def test_a_degraded_flag_that_is_not_a_boolean_is_read_as_degraded(off_contract):
+    # magi-rs emits a real boolean. Anything else is off-contract and cannot
+    # vouch for a healthy run, so it reads as degraded -- never as healthy,
+    # which is what truthiness made of "false" or of an empty list.
+    envelope = json.loads(_fixture("three-agents.json"))
+    envelope["consult"]["degraded"] = off_contract
+    assert ConsultResult.from_json(json.dumps(envelope)).degraded is True
+
+
+def test_an_absent_degraded_flag_still_reads_as_healthy():
+    envelope = json.loads(_fixture("three-agents.json"))
+    envelope["consult"].pop("degraded", None)
+    assert ConsultResult.from_json(json.dumps(envelope)).degraded is False
+
+
 def test_a_null_consult_raises_relaying_stop_reason_and_error():
     # MS0 corrected R17: with fewer than 2 mages, `consult` comes back NULL --
     # no agents, no consensus, no telemetry. There is nothing to report but the
