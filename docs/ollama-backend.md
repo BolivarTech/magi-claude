@@ -1,7 +1,7 @@
 # MAGI open-weight path (`--ollama`), executed by `magi-rs`
 
 - **Author:** Julian Bolivar
-- **Version:** 7.0.0
+- **Version:** 7.0.1
 - **Date:** 2026-10-14
 
 Since 6.0.0, `--ollama` no longer talks to Ollama itself. The plugin builds the payload
@@ -193,8 +193,9 @@ transcript is capped at 64 KiB by `magi-rs`; the prompt itself is what the plugi
 unchanged.
 
 Five warnings can reach stderr; none appears on a clean run. The run is DEGRADED, because a
-seat delivered nothing or a delivered verdict failed the seven-key contract here, in which
-case the gate is invalid whatever the verdict says. A seat's accepted attempt hit the
+seat delivered nothing, a delivered verdict failed the seven-key contract here, or `magi-rs`
+sent a `degraded` flag that is not a JSON boolean; in each case the gate is invalid whatever
+the verdict says. A seat's last attempt ended without a clean `stop`, usually at the
 completion cap; the message also names that attempt's reasoning state (`Measured N chars`,
 `NotMeasured`, `Unsupported (<backend>, N chars)`, `not reported` or `unknown (<variant or
 type>)`) and never prints model text. The context window was not measured for some seats; the message names the
@@ -230,7 +231,7 @@ that mention those names. A bundle that fits is never split.
 | `[FATAL] digest mismatch` / `version mismatch` | The binary in `bin/` is not the pinned one. Delete it and re-run; the bootstrap downloads and verifies again. |
 | `ERROR: magi-rs exited N; stderr: ...` | The child failed; its stderr is relayed verbatim. If it looks like a missing certificate, proxy or host, the allowlist (section 3) is the first suspect: the message lists what it withheld. |
 | `ERROR: magi-rs did not finish within --timeout` | Raise `--timeout` (section 4), or re-seat a model that keeps overrunning. |
-| `WARNING: the run is DEGRADED ... The gate is INVALID` | A seat died or a verdict failed the contract. Resolve the cause and re-run; a degraded run approves nothing. |
+| `WARNING: the run is DEGRADED ... The gate is INVALID` | A seat died, a verdict failed the contract, or `magi-rs` sent a non-boolean `degraded` flag. Resolve the cause and re-run; a degraded run approves nothing. |
 | `WARNING: NOBODY MEASURED the context window` | Every seat ran on an estimated window. Set `strict_context_guard = true` in `.magi/magi.toml` to fail closed instead. |
 | `WARNING: the bundle was SPLIT into N segments` | Section 6. Each verdict judges one segment; read the table at the end. |
 
