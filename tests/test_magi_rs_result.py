@@ -72,10 +72,21 @@ def test_a_two_agent_run_is_read_and_flagged_degraded():
 def test_a_degraded_flag_that_is_not_a_boolean_is_read_as_degraded(off_contract):
     # magi-rs emits a real boolean. Anything else is off-contract and cannot
     # vouch for a healthy run, so it reads as degraded -- never as healthy,
-    # which is what truthiness made of "false" or of an empty list.
+    # which is what truthiness made of an empty list or of null.
     envelope = json.loads(_fixture("three-agents.json"))
     envelope["consult"]["degraded"] = off_contract
     assert ConsultResult.from_json(json.dumps(envelope)).degraded is True
+
+
+def test_the_report_keeps_an_off_contract_degraded_flag_verbatim():
+    # Documented in docs/ollama-backend.md section 5: only the stderr warning
+    # interprets the flag; the magi_rs block carries what magi-rs sent.
+    from run_magi import build_report_block
+
+    envelope = json.loads(_fixture("three-agents.json"))
+    envelope["consult"]["degraded"] = []
+    result = ConsultResult.from_json(json.dumps(envelope))
+    assert build_report_block(result, timeout_seconds=16820)["magi_rs"]["degraded"] == []
 
 
 def test_an_absent_degraded_flag_still_reads_as_healthy():
