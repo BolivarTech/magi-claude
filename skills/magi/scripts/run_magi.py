@@ -1492,11 +1492,12 @@ def _announce_magi_rs_telemetry(
             file=stream,
         )
     if result.degraded or degraded_locally:
-        cause = (
-            "a seat delivered no verdict"
-            if result.degraded
-            else "a delivered verdict failed the seven-key contract here"
-        )
+        if not result.degraded:
+            cause = "a delivered verdict failed the seven-key contract here"
+        elif isinstance(result.telemetry.get("degraded"), bool):
+            cause = "a seat delivered no verdict"
+        else:
+            cause = "magi-rs sent a degraded flag that is not a JSON boolean"
         print(
             f"[!] WARNING: the run is DEGRADED ({cause}). "
             "The gate is INVALID whatever the verdict says -- resolve the cause and re-run.",
