@@ -1,8 +1,8 @@
 # MAGI open-weight path (`--ollama`), executed by `magi-rs`
 
 - **Author:** Julian Bolivar
-- **Version:** 6.2.0
-- **Date:** 2026-09-29
+- **Version:** 7.0.0
+- **Date:** 2026-10-14
 
 Since 6.0.0, `--ollama` no longer talks to Ollama itself. The plugin builds the payload
 exactly as before and hands it to **`magi-rs`**, a pinned, digest-verified Rust binary that

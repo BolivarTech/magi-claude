@@ -9,6 +9,41 @@ Install and update through the marketplace: `/plugin marketplace add BolivarTech
 `/plugin install magi@bolivartech-plugins`, then `/plugin marketplace update` to pick up a new
 release.
 
+## [7.0.0] - 2026-10-14
+
+### Breaking
+
+- `.magi/` has to be regenerated. The pinned `magi-rs` 0.24.1 refuses a `.magi/magi.toml` that
+  has no `[decision]` section (required since `magi-rs` 0.23.0), and every `.magi/` created
+  with plugin 6.x lacks it. An `--ollama` run against such a project stops with `magi-rs`'s
+  message (`... has no [decision] section: it was written by magi-rs 0.22.0 or earlier`).
+  `magi-rs init` never edits an existing file, so from the project root: move `.magi` aside
+  (`mv .magi .magi.bak-0.21`), run `--ollama-init`, and copy your trio, lineages, fallback pool
+  and `max_rotations` from the old `magi.toml` into the new one. Do not restore the old
+  `.magi-rs-memory.db`: `magi-rs` 0.22.0 no longer supports databases written by 0.21.0 or
+  earlier, and the plugin never reads it. Steps in `docs/ollama-backend.md`, section 2.
+- The migration is one-way. Plugin 6.2.0 (on `magi-rs` 0.21.0) rejects the regenerated file (``unknown field
+  `decision` ``), so going back to 6.2.0 means restoring the backup.
+
+### Changed
+
+- The pinned `magi-rs` moves from v0.21.0 to **v0.24.1**, on the same four platforms
+  (`windows-x86_64`, `linux-x86_64`, `linux-aarch64` (rpi5), `macos-universal2`). Archive
+  digests are verified three ways and the archive layout is unchanged.
+- Nothing else changes on the plugin side: same flags, same defaults, same report. Measured on
+  2026-10-13 with 0.24.1, `--timeout 16820` still derives a per-mage ceiling of 2335 s, an
+  operation budget of 1401 s per attempt and a 700 s per-request clock, and the `consult` JSON
+  has exactly the shape the 6.2.0 fixtures pin.
+- The `[decision]` section that `--ollama-init` now writes configures `magi-rs`'s decision
+  models (`clef-flash`, then `nimble`). The plugin never calls them, because it always passes
+  the mode and runs with `--no-memory`, so they do not need to be pulled.
+- What `magi-rs` 0.22.0 to 0.24.1 bring, inherited with the binary: SQLite 3.53.2; the `decide`
+  command; per-section API keys (`MAGI_API_KEY`, `EMBEDDING_API_KEY`, `DECISION_API_KEY`) and
+  the main key withheld from other origins; a grouped `magi init` scaffold. The plugin passes
+  no key (its child environment does not carry `MAGI_API_KEY`), and an Ollama trio on the root
+  `base_url` needs none. See the
+  [`magi-rs` releases](https://github.com/BolivarTech/magi/releases) for details.
+
 ## [6.2.0] - 2026-09-29
 
 ### Changed
