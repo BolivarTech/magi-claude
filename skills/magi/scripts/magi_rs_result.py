@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.3.0
-# Date: 2026-09-29
+# Version: 7.0.1
+# Date: 2026-10-14
 """Read the result of one ``magi-rs consult`` invocation.
 
 The JSON is NESTED: the telemetry fields plus ``agents``, ``consensus`` and

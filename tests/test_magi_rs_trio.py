@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.0.0
+# Version: 7.0.1
 # Date: 2026-10-14
 """Tests for MagiRsTrio, the second TrioExecutor (MS3 Task 3).
 

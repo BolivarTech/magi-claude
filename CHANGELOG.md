@@ -9,6 +9,20 @@ Install and update through the marketplace: `/plugin marketplace add BolivarTech
 `/plugin install magi@bolivartech-plugins`, then `/plugin marketplace update` to pick up a new
 release.
 
+## [7.0.1] - 2026-10-14
+
+### Fixed
+
+- A `degraded` flag from `magi-rs` that is not a JSON boolean now reads as degraded. It used to
+  be read by truthiness, so an off-contract `[]` or `null` reported a healthy run. An absent
+  flag still reads as healthy, and `magi-rs` itself always sends a real boolean.
+
+### Documentation
+
+- `docs/ollama-backend.md` section 5 now describes `capped_agents` the way the code computes
+  it: any seat whose last attempt ended with something other than a clean `stop`, which is
+  usually the completion cap, and an unknown finish reason is listed rather than passed over.
+
 ## [7.0.0] - 2026-10-14
 
 ### Breaking

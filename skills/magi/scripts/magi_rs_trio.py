@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.0.0
+# Version: 7.0.1
 # Date: 2026-10-14
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
