@@ -442,6 +442,23 @@ async def test_a_verdict_breaking_the_seven_key_contract_is_rejected_per_mage(
 
 
 @pytest.mark.asyncio
+async def test_an_agent_name_outside_the_trio_never_becomes_a_file_path(monkeypatch, tmp_path):
+    # The "agent" field of a verdict is data from the child, so it must not
+    # choose where the per-mage artifact is written.
+    envelope = json.loads(_ok_payload().decode("utf-8"))
+    for verdict in envelope["consult"]["agents"]:
+        if verdict["agent"] == "caspar":
+            verdict["agent"] = "../escaped"
+    payload = json.dumps(envelope).encode("utf-8")
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(payload)))
+    verdicts = await _run(monkeypatch, tmp_path)
+    assert not (tmp_path.parent / "escaped.json").exists()
+    assert not any(key.startswith("..") for key in verdicts)
+    assert isinstance(verdicts["caspar"], RuntimeError)
+    assert isinstance(verdicts["melchior"], dict) and isinstance(verdicts["balthasar"], dict)
+
+
+@pytest.mark.asyncio
 async def test_a_binary_that_does_not_verify_stops_the_launch(monkeypatch, tmp_path):
     # R4 wired, not merely asserted in prose: nothing is launched.
     launched: list[object] = []
