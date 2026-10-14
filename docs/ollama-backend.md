@@ -170,8 +170,9 @@ warning points at `max_rotations` instead of recommending a timeout.
 - **`magi_rs`**: the `consult` telemetry verbatim (`degraded`, `mode`, `mode_source`,
   `extraction_failures`, `input_size`, `report_truncated`, `endpoint_divergence`,
   `timeout_below_formula`, `failed_agents`, `rotations`, `ran_unmeasured`, `completions`,
-  `pool_eligibility`), plus `capped_agents` (seats whose accepted attempt hit the completion
-  cap: the verdict counts, the trailing prose was lost), `timeout_seconds` (the `--timeout`
+  `pool_eligibility`), plus `capped_agents` (seats whose last attempt ended for any reason other
+  than a clean `stop`, usually the completion cap: the verdict counts, but the trailing prose may
+  be lost; an unknown finish reason is listed too rather than passed over), `timeout_seconds` (the `--timeout`
   passed to `magi-rs`), `ceiling_above_sanity` (`applied_caps.ceiling_above_sanity` from
   `magi-rs`: `true`, `false`, or `null` when it published no boolean), `model_used` (the tag
   each seat's accepted attempt actually ran on), `run_id` (the pointer into `.magi/logs/magi-<date>.log`,

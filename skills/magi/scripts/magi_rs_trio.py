@@ -245,7 +245,7 @@ def _emit(on_state: Callable[[str, str], None] | None, node: str, state: str) ->
     Args:
         on_state: The caller's callback, or None when status is off.
         node: The node's name. ONE node in this executor -- see run_trio.
-        state: ``running``, ``success`` or ``failed``.
+        state: ``running``, ``success``, ``failed`` or ``timeout``.
 
     Returns:
         None.

@@ -80,7 +80,9 @@ class ConsultResult:
         agents: The per-mage verdicts, exactly as emitted (seven-key contract).
         telemetry: The ``consult`` telemetry fields, carried verbatim.
         report: The rendered markdown report. Never scraped for findings.
-        degraded: ``magi-rs``'s own degraded flag.
+        degraded: ``magi-rs``'s own degraded flag. False when the field is
+            absent; True for any value that is not a JSON boolean, because an
+            off-contract flag cannot vouch for a healthy run.
         run_id: Top-level ``run_id`` of the envelope (magi-rs >= 0.18.0): the
             pointer into ``.magi/logs/magi-<date>.log``, where the per-mage
             ceiling and the probe notices live since 0.18.1 (stderr no longer
