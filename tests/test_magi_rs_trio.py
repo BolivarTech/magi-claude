@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.0.0
+# Version: 7.0.1
 # Date: 2026-10-14
 """Tests for MagiRsTrio, the second TrioExecutor (MS3 Task 3).
 
@@ -446,14 +446,19 @@ async def test_an_agent_name_outside_the_trio_never_becomes_a_file_path(monkeypa
     # The "agent" field of a verdict is data from the child, so it must not
     # choose where the per-mage artifact is written.
     envelope = json.loads(_ok_payload().decode("utf-8"))
-    for verdict in envelope["consult"]["agents"]:
+    renamed_index = None
+    for index, verdict in enumerate(envelope["consult"]["agents"]):
         if verdict["agent"] == "caspar":
             verdict["agent"] = "../escaped"
+            renamed_index = index
     payload = json.dumps(envelope).encode("utf-8")
     monkeypatch.setattr("asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(payload)))
     verdicts = await _run(monkeypatch, tmp_path)
     assert not (tmp_path.parent / "escaped.json").exists()
     assert not any(key.startswith("..") for key in verdicts)
+    # The renamed verdict is kept under its positional name and rejected by
+    # the seven-key validator, never silently dropped or accepted.
+    assert isinstance(verdicts[f"agent-{renamed_index}"], ValidationError)
     assert isinstance(verdicts["caspar"], RuntimeError)
     assert isinstance(verdicts["melchior"], dict) and isinstance(verdicts["balthasar"], dict)
 

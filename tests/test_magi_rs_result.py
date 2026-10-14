@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.3.0
-# Date: 2026-09-29
+# Version: 7.0.1
+# Date: 2026-10-14
 """Tests for reading a magi-rs consult envelope (MS3 Task 3c).
 
 The fixtures under ``tests/fixtures/magi-rs-consult/`` derive from ONE real
@@ -66,6 +66,33 @@ def test_a_two_agent_run_is_read_and_flagged_degraded():
     result = ConsultResult.from_json(_fixture("two-agents-degraded.json"))
     assert len(result.agents) == 2
     assert result.degraded is True
+
+
+@pytest.mark.parametrize("off_contract", ["false", "no", 1, [], None])
+def test_a_degraded_flag_that_is_not_a_boolean_is_read_as_degraded(off_contract):
+    # magi-rs emits a real boolean. Anything else is off-contract and cannot
+    # vouch for a healthy run, so it reads as degraded -- never as healthy,
+    # which is what truthiness made of an empty list or of null.
+    envelope = json.loads(_fixture("three-agents.json"))
+    envelope["consult"]["degraded"] = off_contract
+    assert ConsultResult.from_json(json.dumps(envelope)).degraded is True
+
+
+def test_the_report_keeps_an_off_contract_degraded_flag_verbatim():
+    # Documented in docs/ollama-backend.md section 5: only the stderr warning
+    # interprets the flag; the magi_rs block carries what magi-rs sent.
+    from run_magi import build_report_block
+
+    envelope = json.loads(_fixture("three-agents.json"))
+    envelope["consult"]["degraded"] = []
+    result = ConsultResult.from_json(json.dumps(envelope))
+    assert build_report_block(result, timeout_seconds=16820)["magi_rs"]["degraded"] == []
+
+
+def test_an_absent_degraded_flag_still_reads_as_healthy():
+    envelope = json.loads(_fixture("three-agents.json"))
+    envelope["consult"].pop("degraded", None)
+    assert ConsultResult.from_json(json.dumps(envelope)).degraded is False
 
 
 def test_a_null_consult_raises_relaying_stop_reason_and_error():
@@ -443,6 +470,18 @@ def test_the_degraded_warning_fires_and_says_the_gate_is_invalid(capsys):
     err = capsys.readouterr().err.lower()
     assert "degraded" in err
     assert "invalid" in err
+
+
+def test_an_off_contract_degraded_flag_is_named_as_the_cause_not_a_missing_seat(capsys):
+    # Three verdicts arrived; only the flag was off-contract. Blaming a seat
+    # that "delivered no verdict" would send the operator after the wrong cause.
+    envelope = json.loads(_fixture("three-agents.json"))
+    envelope["consult"]["degraded"] = []
+    _announce(ConsultResult.from_json(json.dumps(envelope)))
+    err = capsys.readouterr().err
+    assert "DEGRADED" in err
+    assert "not a JSON boolean" in err
+    assert "delivered no verdict" not in err
 
 
 def test_a_clean_run_emits_no_warning_at_all(capsys):

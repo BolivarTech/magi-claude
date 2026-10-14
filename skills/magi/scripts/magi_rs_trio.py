@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.0.0
+# Version: 7.0.1
 # Date: 2026-10-14
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
@@ -245,7 +245,7 @@ def _emit(on_state: Callable[[str, str], None] | None, node: str, state: str) ->
     Args:
         on_state: The caller's callback, or None when status is off.
         node: The node's name. ONE node in this executor -- see run_trio.
-        state: ``running``, ``success`` or ``failed``.
+        state: ``running``, ``success``, ``failed`` or ``timeout``.
 
     Returns:
         None.

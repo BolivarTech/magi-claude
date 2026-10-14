@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.3.0
-# Date: 2026-09-29
+# Version: 7.0.1
+# Date: 2026-10-14
 """Read the result of one ``magi-rs consult`` invocation.
 
 The JSON is NESTED: the telemetry fields plus ``agents``, ``consensus`` and
@@ -80,7 +80,9 @@ class ConsultResult:
         agents: The per-mage verdicts, exactly as emitted (seven-key contract).
         telemetry: The ``consult`` telemetry fields, carried verbatim.
         report: The rendered markdown report. Never scraped for findings.
-        degraded: ``magi-rs``'s own degraded flag.
+        degraded: ``magi-rs``'s own degraded flag. False when the field is
+            absent; True for any value that is not a JSON boolean, because an
+            off-contract flag cannot vouch for a healthy run.
         run_id: Top-level ``run_id`` of the envelope (magi-rs >= 0.18.0): the
             pointer into ``.magi/logs/magi-<date>.log``, where the per-mage
             ceiling and the probe notices live since 0.18.1 (stderr no longer
@@ -187,11 +189,12 @@ class ConsultResult:
         run_id = envelope.get("run_id")
         applied_caps = envelope.get("applied_caps")
         ceiling = applied_caps.get(_CEILING_FLAG) if isinstance(applied_caps, dict) else None
+        flag = consult.get("degraded", False)
         return cls(
             agents=list(agents),
             telemetry={field: consult.get(field) for field in _TELEMETRY_FIELDS},
             report=str(consult.get("report") or ""),  # a null report is empty, not "None"
-            degraded=bool(consult.get("degraded", False)),
+            degraded=flag if isinstance(flag, bool) else True,
             run_id=str(run_id) if run_id is not None else None,
             ceiling_above_sanity=ceiling if isinstance(ceiling, bool) else None,
         )
