@@ -572,7 +572,7 @@ def test_the_magi_rs_executor_is_bound_to_the_cwd_mode_timeout_and_plugin_paths(
     assert seen["mode"] == "code-review"
     assert seen["timeout"] == 1800
     assert os.path.basename(seen["bin_dir"]) == "bin"
-    assert seen["pin"].version == "0.21.0"
+    assert seen["pin"].version == "0.24.1"
 
 
 def test_without_the_flag_no_executor_is_selected(monkeypatch):
