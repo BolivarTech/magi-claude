@@ -44,6 +44,13 @@ release.
   `base_url` needs none. See the
   [`magi-rs` releases](https://github.com/BolivarTech/magi/releases) for details.
 
+### Fixed
+
+- Under `--ollama`, each verdict was written to `{agent}.json` using the `agent` field of the
+  `magi-rs` output unchecked, so a value such as `../x` wrote a file outside the run directory
+  before validation rejected it. Only `melchior`, `balthasar` and `caspar` name the file now;
+  any other value is written as `agent-<index>.json` and fails validation as before.
+
 ## [6.2.0] - 2026-09-29
 
 ### Changed
