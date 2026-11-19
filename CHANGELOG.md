@@ -18,10 +18,10 @@ release.
   digests are verified three ways and the archive layout is unchanged.
 - Nothing to migrate. A `.magi/` created with 7.0.x loads as it is. On 2026-11-18 a plugin
   consult on `magi-rs` 0.25.0 ran against a `magi.toml` and a memory database both written
-  by 0.24.1, and left the database untouched. `magi-rs` 0.25.0 refuses to open a
-  0.24.x database, but only when given a passphrase, and the plugin never passes one. If you
-  also use `magi-rs` directly with a passphrase, delete `.magi-rs-memory.db*` and reload your
-  secrets with `magi-rs vault set`.
+  by 0.24.1, and left the database untouched. `magi-rs` 0.25.0 refuses to open a database
+  written by 0.24.x or earlier, but only when given a passphrase, and the plugin never
+  passes one. If you also use `magi-rs` directly with a passphrase, delete
+  `.magi-rs-memory.db*` and reload your secrets with `magi-rs vault set`.
 - `--timeout 16820` still derives a per-mage ceiling of 2335 s, an operation budget of 1401 s
   per attempt and a 700 s per-request clock (measured 2026-11-18). The `consult` JSON keeps
   the shape the fixtures pin, plus one key the plugin does not read,

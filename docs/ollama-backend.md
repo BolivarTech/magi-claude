@@ -91,10 +91,11 @@ present, because `magi-rs` refuses to load a file without it.
 **Upgrading from 7.0.x: nothing to regenerate (7.1.0).** `magi-rs` 0.25.0 loads a
 `magi.toml` written by 0.24.x as it is. `--ollama-init` now also writes a `[code_review]`
 section, which configures `magi-rs`'s own `code-review` command; the section is optional,
-and the plugin does not use that command yet. `magi-rs` 0.25.0 cannot open a memory
-database written by 0.24.x or earlier, but the plugin never opens it (see below), so an old
-`.magi-rs-memory.db` can stay where it is. Delete it only if you also run `magi-rs` yourself
-with a passphrase; then reload your secrets with `magi-rs vault set`.
+and the plugin does not use that command yet. Given a passphrase, `magi-rs` 0.25.0 refuses
+to open a memory database written by 0.24.x or earlier; the plugin never passes one, so it
+never opens that database (see below), and an old `.magi-rs-memory.db` can stay where it
+is. Delete it only if you also run `magi-rs` yourself with a passphrase; then reload your
+secrets with `magi-rs vault set`.
 
 An older migration works the same way, with `magi-rs`'s message as the guide. In a
 `magi.toml` written by a `magi-rs` older than 0.18.0, the
