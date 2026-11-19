@@ -29,8 +29,9 @@ release.
 - `--ollama-init` now writes a `[code_review]` section too. It configures `magi-rs`'s new
   `code-review` command and its false-positive gate; the plugin does not call that command,
   so the models it names do not need to be pulled.
-- The development environment is pinned to Python 3.14 through `.python-version`, which
-  `uv` honours locally and in CI. Running the plugin is unaffected.
+- The development environment is pinned to Python 3.14 through `.python-version`. CI keeps
+  testing the declared floor, Python 3.12, by setting `UV_PYTHON` in its workflows. Running
+  the plugin is unaffected.
 - Inherited with the binary (see the [`magi-rs` releases](https://github.com/BolivarTech/magi/releases)):
   a refused connection is no longer reported as an HTTP status, a `429` inside an error
   message no longer triggers a rate-limit retry, and `rustls`, `rustls-webpki` and `rusqlite`
