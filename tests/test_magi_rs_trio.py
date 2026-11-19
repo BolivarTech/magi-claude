@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.0.1
-# Date: 2026-10-14
+# Version: 7.1.0
+# Date: 2026-11-19
 """Tests for MagiRsTrio, the second TrioExecutor (MS3 Task 3).
 
 Every child process is faked: nothing here launches a binary, reaches the
@@ -594,7 +594,7 @@ def test_the_magi_rs_executor_is_bound_to_the_cwd_mode_timeout_and_plugin_paths(
     assert seen["mode"] == "code-review"
     assert seen["timeout"] == 1800
     assert os.path.basename(seen["bin_dir"]) == "bin"
-    assert seen["pin"].version == "0.24.1"
+    assert seen["pin"].version == "0.25.0"
 
 
 def test_without_the_flag_no_executor_is_selected(monkeypatch):

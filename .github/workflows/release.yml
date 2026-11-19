@@ -164,6 +164,11 @@ jobs:
     needs: gate
     if: needs.gate.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    # Test the declared floor (`requires-python = ">= 3.12"`), not the developer's
+    # interpreter: UV_PYTHON overrides `.python-version` (3.14) for every uv command
+    # in this job (`uv lock`, `uv run`).
+    env:
+      UV_PYTHON: "3.12"
     steps:
       - uses: actions/checkout@v5
       - name: Install uv

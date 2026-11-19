@@ -9,6 +9,34 @@ Install and update through the marketplace: `/plugin marketplace add BolivarTech
 `/plugin install magi@bolivartech-plugins`, then `/plugin marketplace update` to pick up a new
 release.
 
+## [7.1.0] - 2026-11-19
+
+### Changed
+
+- The pinned `magi-rs` moves from v0.24.1 to **v0.25.0**, on the same four platforms
+  (`windows-x86_64`, `linux-x86_64`, `linux-aarch64` (rpi5), `macos-universal2`). Archive
+  digests are verified three ways and the archive layout is unchanged.
+- Nothing to migrate. A `.magi/` created with 7.0.x loads as it is. On 2026-11-18 a plugin
+  consult on `magi-rs` 0.25.0 ran against a `magi.toml` and a memory database both written
+  by 0.24.1, and left the database untouched. `magi-rs` 0.25.0 refuses to open a database
+  written by 0.24.x or earlier, but only when given a passphrase, and the plugin never
+  passes one. If you also use `magi-rs` directly with a passphrase, delete
+  `.magi-rs-memory.db*` and reload your secrets with `magi-rs vault set`.
+- `--timeout 16820` still derives a per-mage ceiling of 2335 s, an operation budget of 1401 s
+  per attempt and a 700 s per-request clock (measured 2026-11-18). The `consult` JSON keeps
+  the shape the fixtures pin, plus one key the plugin does not read,
+  `applied_caps.system_ignored`.
+- `--ollama-init` now writes a `[code_review]` section too. It configures `magi-rs`'s new
+  `code-review` command and its false-positive gate; the plugin does not call that command,
+  so the models it names do not need to be pulled.
+- The development environment is pinned to Python 3.14 through `.python-version`. CI keeps
+  testing the declared floor, Python 3.12, by setting `UV_PYTHON` in its workflows. Running
+  the plugin is unaffected.
+- Inherited with the binary (see the [`magi-rs` releases](https://github.com/BolivarTech/magi/releases)):
+  a refused connection is no longer reported as an HTTP status, a `429` inside an error
+  message no longer triggers a rate-limit retry, and `rustls`, `rustls-webpki` and `rusqlite`
+  updates clear RUSTSEC-2026-0346 to -0349, -0382, -0383 and -0459.
+
 ## [7.0.1] - 2026-10-14
 
 ### Fixed

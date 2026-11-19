@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.0.0
-# Date: 2026-10-14
+# Version: 7.1.0
+# Date: 2026-11-19
 """Tests for the read-only magi-rs release pin (MS2 Task 1)."""
 
 import json
@@ -19,13 +19,13 @@ _SHIPPED_PIN = os.path.join(
 
 
 def test_the_shipped_pin_file_loads_and_names_the_pinned_version():
-    assert Pin.load(_SHIPPED_PIN).version == "0.24.1"
+    assert Pin.load(_SHIPPED_PIN).version == "0.25.0"
 
 
-def test_the_shipped_pin_targets_magi_rs_0_24_1_on_the_four_platforms():
-    # v7.0.0: the pin moved from 0.21.0; linux-x86_64-compat stays out on purpose.
+def test_the_shipped_pin_targets_magi_rs_0_25_0_on_the_four_platforms():
+    # v7.1.0: the pin moved from 0.24.1; linux-x86_64-compat stays out on purpose.
     pin = Pin.load(_SHIPPED_PIN)
-    assert pin.version == "0.24.1"
+    assert pin.version == "0.25.0"
     assert sorted(pin.assets) == [
         "linux-aarch64",
         "linux-x86_64",
@@ -33,7 +33,7 @@ def test_the_shipped_pin_targets_magi_rs_0_24_1_on_the_four_platforms():
         "windows-x86_64",
     ]
     for asset in pin.assets.values():
-        assert asset.name.startswith("magi-rs-v0.24.1-")
+        assert asset.name.startswith("magi-rs-v0.25.0-")
 
 
 @pytest.mark.parametrize("field", ["archive_sha256", "executable_sha256"])
