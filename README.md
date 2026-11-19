@@ -46,6 +46,13 @@ For trivial questions with one clear answer, the complexity gate skips the full 
 
 For the full technical reference, see [`docs/MAGI-System-Documentation.md`](docs/MAGI-System-Documentation.md).
 
+**New in v7.1.0: `magi-rs` 0.25.0.** The pinned `magi-rs` moves from 0.24.1 to 0.25.0. A
+`.magi/` created with 7.0.x keeps working as it is, and flags, defaults and the report are
+unchanged. The new binary brings `magi-rs`'s own `code-review` command, which the plugin
+does not use yet, and fixes from 0.24.2 and 0.24.3, among them clearer transport errors and
+patched TLS dependencies. Details in [`docs/ollama-backend.md`](docs/ollama-backend.md)
+(section 2).
+
 **New in v7.0.0: `magi-rs` 0.24.1, and `.magi/` has to be regenerated (BREAKING).** The
 pinned `magi-rs` moves from 0.21.0 to 0.24.1. Since `magi-rs` 0.23.0 a `.magi/magi.toml`
 without a `[decision]` section no longer loads, so every `--ollama` run against a project

@@ -24,7 +24,7 @@ python skills/magi/scripts/run_magi.py design      <file_or_text> --ollama --tim
 ```
 
 The first `--ollama` (or `--ollama-init`) after an install downloads `magi-rs` (pinned at
-v0.24.1) into the plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`,
+v0.25.0) into the plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`,
 and only then runs it. Every later run verifies the digest and `--version` again before executing. When
 the binary cannot be obtained or does not verify, the run stops with one `[FATAL]` line and
 nothing is executed. There is no fallback to another architecture or to an unverified copy.
@@ -88,6 +88,14 @@ judge memory contradictions. The plugin always passes the mode and runs with `--
 so it never calls them and you do not have to pull them. The section still has to be
 present, because `magi-rs` refuses to load a file without it.
 
+**Upgrading from 7.0.x: nothing to regenerate (7.1.0).** `magi-rs` 0.25.0 loads a
+`magi.toml` written by 0.24.x as it is. `--ollama-init` now also writes a `[code_review]`
+section, which configures `magi-rs`'s own `code-review` command; the section is optional,
+and the plugin does not use that command yet. `magi-rs` 0.25.0 cannot open a memory
+database written by 0.24.x or earlier, but the plugin never opens it (see below), so an old
+`.magi-rs-memory.db` can stay where it is. Delete it only if you also run `magi-rs` yourself
+with a passphrase; then reload your secrets with `magi-rs vault set`.
+
 An older migration works the same way, with `magi-rs`'s message as the guide. In a
 `magi.toml` written by a `magi-rs` older than 0.18.0, the
 `[headless]` keys `log_retention`, `log_max_bytes` and `log_level` are fatal (`unknown
@@ -124,8 +132,8 @@ allowlist as a suspect and lists the parent variables that were withheld, by nam
 derives each mage's per-attempt budget from. The default on this path is **16820**, not the
 Claude path's 900. That is the value `magi-rs` 0.21.0 publishes for a headless gate. It
 derives a per-mage ceiling of 2335 s, an operation budget of 1401 s per attempt and a
-700 s per-request clock, confirmed locally on 2026-09-29 and again with 0.24.1 on
-2026-10-13. Any explicit positive value is
+700 s per-request clock, confirmed locally on 2026-09-29, again with 0.24.1 on
+2026-10-13 and with 0.25.0 on 2026-11-18. Any explicit positive value is
 honoured. Below 16820 a warning goes to stderr, because a lower wall timeout also cuts the
 reasoning budget of every seat, and the symptom (mages that stop completing) does not look
 like a timeout setting.
@@ -147,7 +155,7 @@ model in that seat, not a longer timeout.
 **Reasoning keys.** `magi-rs` 0.20.0 added four `[magi]` keys: `reasoning`
 (`default`/`disabled`/`enabled`), `reasoning_spelling` (`openai-compat` only), `max_tokens`
 and `reasoning_trace` (opt-in, log only). They are documented in
-[`docs/REASONING-BUDGET.md`](https://github.com/BolivarTech/magi/blob/v0.24.1/docs/REASONING-BUDGET.md)
+[`docs/REASONING-BUDGET.md`](https://github.com/BolivarTech/magi/blob/v0.25.0/docs/REASONING-BUDGET.md)
 in the `magi-rs` repository.
 
 **A `--timeout` that is too high.** A high value is obeyed as given. `magi-rs` flags a
