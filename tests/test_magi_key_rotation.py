@@ -891,3 +891,56 @@ def test_an_init_error_echoing_the_new_key_is_redacted(tmp_path):
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     message = str(exc.value)
     assert written[0].reveal() not in message and "<redacted>" in message
+
+
+class _NewKeyFileExposedGuard(_NoopGuard):
+    """Reports the key file at the project root as exposed while ``armed``; everything else verifies."""
+
+    def __init__(self, work):
+        self.key_file = os.path.normcase(os.path.join(str(work), ".magi", ".secret", "magi.key"))
+        self.armed = True
+
+    def verify(self, path, directory):
+        if self.armed and os.path.normcase(path) == self.key_file:
+            raise KeyExposedError(f"{path} grants access to S-1-5-11 (DACL protected: no)")
+
+
+def test_an_unverifiable_key_this_rotation_wrote_is_owned_and_the_backup_stays_put(tmp_path):
+    # [R5] the recorded store proves the key on disk is this rotation's: never deny authorship, and never send
+    # the operator back to the exposed backup.
+    work = _project(tmp_path)
+
+    guard = _NewKeyFileExposedGuard(work)
+
+    def _init(workdir, store):
+        guard.armed = (
+            False  # persist's own verification passes; the rotation's later check does not
+        )
+        store.persist(workdir, store.new_key())
+        guard.armed = True
+        return "initialised"
+
+    rotation, _ = _rotation(tmp_path, init=_init, guard=guard)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert "created by this rotation" in message and "could not be verified" in message
+    assert "S-1-5-11" in message and "do not move the exposed backup back" in message
+    assert "may not have created it" not in message and "\n" not in message.strip()
+
+
+def test_an_unverifiable_key_this_rotation_did_not_write_keeps_the_may_not_have_created_wording(
+    tmp_path,
+):
+    # [R5] the other branch: a key the recording store never persisted is not claimed.
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        _recreate_magi(workdir, FOREIGN)
+        return "initialised"
+
+    rotation, _ = _rotation(tmp_path, init=_init, guard=_NewKeyFileExposedGuard(work))
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert "may not have created it" in message and "created by this rotation" not in message
