@@ -572,7 +572,8 @@ class KeyRotation:
         """Move ``.magi/`` into ``backup_dir``; on failure, keep whichever copy is complete.
 
         Across volumes ``shutil.move`` copies and then deletes the source, so a
-        failure may leave the source partly deleted. The partial backup is
+        failure may leave the source partly deleted, or gone (the copy is then
+        complete, since it finishes before the delete starts). The partial backup is
         removed only when the source is still complete (every path that reached
         the copy still exists in the source); otherwise nothing is deleted and
         both paths are named. An interrupt (``KeyboardInterrupt``,
@@ -592,6 +593,11 @@ class KeyRotation:
             shutil.move(magi_dir, target)
         except BaseException as error:  # noqa: BLE001 - an interrupted copy must end in the described state
             reason = _reason(error)
+            if not os.path.lexists(magi_dir):
+                raise RotationFailedError(
+                    f"moving {magi_dir} to {target} failed ({reason}) after the copy finished: the source is "
+                    f"gone and {target} holds the complete copy; move it back to {magi_dir} to retry"
+                ) from error
             if not cls._source_still_complete(magi_dir, target):
                 raise RotationFailedError(
                     f"moving {magi_dir} to {target} failed ({reason}) after files were removed from the source: "
