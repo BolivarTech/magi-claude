@@ -13,8 +13,11 @@ guards harden a path to its owner and verify that nobody else can reach it;
   bits (a stricter mode such as ``0400`` is accepted).
 * Windows: the DACL, read as SDDL and compared by SID, never by an account
   name (names are localised; SIDs are not). Hardening cuts inheritance and
-  grants full control to the current user's SID only; verification requires a
-  protected DACL whose every ACE belongs to that SID.
+  grants full control to the current user's SID only (``icacls``);
+  verification requires a protected DACL whose every ACE belongs to that SID.
+  The SDDL and SDDL aliases are read natively through ``advapi32`` (ctypes),
+  without starting a process: under the allowlisted environment every Windows
+  PowerShell start on the CI runner took tens of seconds.
 
 Any failure to read what verification needs (the ``stat``, the current SID,
 the DACL) is reported as ``KeyExposedError``: permissions that cannot be read
@@ -28,6 +31,7 @@ the SDDL) is not checked, only the DACL.
 from __future__ import annotations
 
 import csv
+import ctypes
 import io
 import ntpath
 import os
@@ -36,7 +40,7 @@ import stat
 import subprocess
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 
 from magi_key import (
     DIR_MODE,
@@ -63,7 +67,7 @@ _GROUP_AND_OTHER_BITS = stat.S_IRWXG | stat.S_IRWXO
 """POSIX permission bits that grant access to anyone but the owner."""
 
 _COMMAND_TIMEOUT_SECONDS = 30
-"""Upper bound on each permission tool run (whoami, icacls, PowerShell)."""
+"""Upper bound on each permission tool run (whoami, icacls)."""
 
 _DEFAULT_SYSTEM_ROOT = r"C:\Windows"
 """Fallback when ``SystemRoot`` is absent from the environment."""
@@ -71,13 +75,9 @@ _DEFAULT_SYSTEM_ROOT = r"C:\Windows"
 _SYSTEM32_PARTS = ("System32",)
 _WHOAMI_PARTS = (*_SYSTEM32_PARTS, "whoami.exe")
 _ICACLS_PARTS = (*_SYSTEM32_PARTS, "icacls.exe")
-_POWERSHELL_PARTS = (*_SYSTEM32_PARTS, "WindowsPowerShell", "v1.0", "powershell.exe")
 
 _WHOAMI_ARGS = ("/user", "/fo", "csv", "/nh")
 """One CSV line, ``"<host>\\<user>","<SID>"``, without a header."""
-
-_ACL_PATH_VARIABLE = "MAGI_ACL_PATH"
-"""Environment variable that carries the path to PowerShell; never interpolated into the command."""
 
 _WINDOWS_SYSTEM_VARIABLES = (
     "LOCALAPPDATA",
@@ -106,10 +106,9 @@ _WINDOWS_SYSTEM_VARIABLES = (
 """Non-secret Windows system variables the permission tools get on top of the allowlist, upper case.
 
 ENUMERATED, matched case-insensitively, copied only when the parent has them.
-A cold Windows PowerShell 5.1 on the CI runner outlived ``_COMMAND_TIMEOUT_SECONDS``
-without the system environment (``LOCALAPPDATA``/``APPDATA``, its module-analysis
-cache, were not enough), while the full environment minus ``PSModulePath`` started
-in time. None of these names carries a credential."""
+They were added when the guard still started Windows PowerShell, which outlived
+``_COMMAND_TIMEOUT_SECONDS`` on the CI runner without them; whoami and icacls keep
+the same environment. None of these names carries a credential."""
 
 _STDERR_EXCERPT_CHARS = 300
 """How much of a failed tool's stderr an error message carries, from its start (the headline)."""
@@ -117,16 +116,19 @@ _STDERR_EXCERPT_CHARS = 300
 _YES = "yes"
 _NO = "no"
 
-_SDDL_COMMAND = f"(Get-Acl -LiteralPath $env:{_ACL_PATH_VARIABLE}).Sddl"
+_SE_FILE_OBJECT = 1
+"""``SE_OBJECT_TYPE`` of a file or directory for ``GetNamedSecurityInfoW``."""
 
-_SID_ALIAS_VARIABLE = "MAGI_SID_ALIAS"
-"""Environment variable that carries an SDDL alias to PowerShell; never interpolated into the command."""
-
-_RESOLVE_ALIAS_COMMAND = (
-    f"([System.Security.Principal.SecurityIdentifier]$env:{_SID_ALIAS_VARIABLE}).Value"
+_OWNER_SECURITY_INFORMATION = 0x1
+_GROUP_SECURITY_INFORMATION = 0x2
+_DACL_SECURITY_INFORMATION = 0x4
+_SDDL_SECTIONS = (
+    _OWNER_SECURITY_INFORMATION | _GROUP_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION
 )
+"""Owner, group and DACL: the sections ``Get-Acl``'s ``.Sddl`` renders (the M9 fixtures' shape)."""
 
-_POWERSHELL_OPTIONS = ("-NoProfile", "-NonInteractive", "-Command")
+_SDDL_REVISION_1 = 1
+_ERROR_SUCCESS = 0
 
 _REMOVE_INHERITANCE = "/inheritance:r"
 _REPLACE_GRANT = "/grant:r"
@@ -169,7 +171,7 @@ _ACE_SID_INDEX = 5
 def _stderr_excerpt(error: subprocess.SubprocessError) -> str:
     """Return the start of a failed tool's stderr as one bounded line.
 
-    The start, because PowerShell writes its headline first and the trace after.
+    The start, because a tool writes its headline first and any trace after.
 
     Args:
         error: The failure raised by ``subprocess.run``.
@@ -184,21 +186,16 @@ def _stderr_excerpt(error: subprocess.SubprocessError) -> str:
     return one_line(stderr)[:_STDERR_EXCERPT_CHARS]
 
 
-def _tool_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Return the environment of a permission tool: the allowlist, the Windows system variables, ``extra``.
+def _tool_environment() -> dict[str, str]:
+    """Return the environment of a permission tool: the allowlist plus the Windows system variables.
 
     The same allowlist the ``magi-rs`` child gets (``EnvironmentPolicy``), so no
-    API key and no parent ``MAGI_PASSPHRASE`` reach whoami, icacls or
-    PowerShell. The ``_WINDOWS_SYSTEM_VARIABLES`` the parent has are added,
-    whatever their case. ``PSModulePath`` is not among either: a PowerShell 7
-    module path inherited by Windows PowerShell 5.1 keeps ``Get-Acl`` from
-    loading, and unset, 5.1 rebuilds its default.
+    API key and no parent ``MAGI_PASSPHRASE`` reach whoami or icacls. The
+    ``_WINDOWS_SYSTEM_VARIABLES`` the parent has are added, whatever their case.
+    ``PSModulePath`` is in neither.
 
     Complexity: O(n) in the number of parent variables (each checked against
     22 names), once per tool run.
-
-    Args:
-        extra: The variables that carry the tool's input, added on top.
 
     Returns:
         A new environment mapping.
@@ -211,18 +208,14 @@ def _tool_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:
             if name.upper() in _WINDOWS_SYSTEM_VARIABLES
         }
     )
-    env.update(extra or {})
     return env
 
 
-def _run(argv: list[str], env: Mapping[str, str] | None = None) -> str:
-    """Run a permission tool and return its standard output.
+def _run(argv: list[str]) -> str:
+    """Run a permission tool, with the allowlisted environment, and return its standard output.
 
     Args:
         argv: The command, as an argument list (never through a shell).
-        env: The variables that carry the tool's input; they are added to
-            the allowlisted environment (``_tool_environment``), never to the
-            whole parent environment.
 
     Returns:
         The decoded standard output.
@@ -241,7 +234,7 @@ def _run(argv: list[str], env: Mapping[str, str] | None = None) -> str:
             errors="replace",
             timeout=_COMMAND_TIMEOUT_SECONDS,
             check=True,
-            env=_tool_environment(env),
+            env=_tool_environment(),
         )
     except subprocess.CalledProcessError as error:
         raise OSError(
@@ -256,27 +249,157 @@ def _run(argv: list[str], env: Mapping[str, str] | None = None) -> str:
     return completed.stdout
 
 
-def _run_powershell(command: str, variable: str, value: str) -> str:
-    """Run one Windows PowerShell command that reads its input from one variable.
+class _NativeSecurity:
+    """The ``advapi32``/``kernel32`` calls the Windows guard reads with, bound through ctypes.
 
-    The value travels only in the child environment, never in the command
-    text; that environment is the allowlist plus ``variable``
-    (``_tool_environment``).
+    Built lazily by the guard on its first read, so importing this module on
+    POSIX never loads a Windows DLL. Every prototype is declared explicitly;
+    every buffer the API allocates is released with ``LocalFree``.
 
-    Args:
-        command: The PowerShell command text.
-        variable: The environment variable that carries ``value``.
-        value: The input, e.g. a path or an SDDL alias.
-
-    Returns:
-        The output, stripped.
-
-    Raises:
-        OSError: PowerShell could not run or exited non-zero.
+    Example:
+        >>> native = _NativeSecurity()
+        >>> native.resolve_alias("BA")
+        'S-1-5-32-544'
     """
-    return _run(
-        [_system_tool(_POWERSHELL_PARTS), *_POWERSHELL_OPTIONS, command], {variable: value}
-    ).strip()
+
+    _get_named_security_info: Callable[..., int]
+    _descriptor_to_string: Callable[..., int]
+    _string_to_sid: Callable[..., int]
+    _sid_to_string: Callable[..., int]
+    _local_free: Callable[..., object]
+
+    def __init__(self) -> None:
+        """Load the two DLLs and declare the prototypes.
+
+        Raises:
+            OSError: Not Windows, or a DLL could not be loaded.
+        """
+        if sys.platform != "win32":
+            raise OSError("native ACL reads exist only on Windows")
+        from ctypes import wintypes
+
+        pointer = ctypes.POINTER(ctypes.c_void_p)
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._get_named_security_info = advapi32.GetNamedSecurityInfoW
+        self._get_named_security_info.argtypes = [
+            wintypes.LPCWSTR,
+            ctypes.c_int,
+            wintypes.DWORD,
+            pointer,
+            pointer,
+            pointer,
+            pointer,
+            pointer,
+        ]
+        self._get_named_security_info.restype = wintypes.DWORD
+        self._descriptor_to_string = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+        self._descriptor_to_string.argtypes = [
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            pointer,
+            ctypes.POINTER(wintypes.ULONG),
+        ]
+        self._descriptor_to_string.restype = wintypes.BOOL
+        self._string_to_sid = advapi32.ConvertStringSidToSidW
+        self._string_to_sid.argtypes = [wintypes.LPCWSTR, pointer]
+        self._string_to_sid.restype = wintypes.BOOL
+        self._sid_to_string = advapi32.ConvertSidToStringSidW
+        self._sid_to_string.argtypes = [ctypes.c_void_p, pointer]
+        self._sid_to_string.restype = wintypes.BOOL
+        self._local_free = kernel32.LocalFree
+        self._local_free.argtypes = [ctypes.c_void_p]
+        self._local_free.restype = ctypes.c_void_p
+
+    @staticmethod
+    def _failure(call: str, subject: str, code: int) -> OSError:
+        """Build the one-line error of a failed call, naming the Win32 error.
+
+        Args:
+            call: The API function that failed.
+            subject: The path or alias it was called for.
+            code: The Win32 error code.
+
+        Returns:
+            ``OSError("<call> failed for <subject>: Win32 error <code>: <text>")``.
+        """
+        if sys.platform != "win32":
+            return OSError(f"{call} failed for {subject}: Win32 error {code}")
+        return OSError(
+            f"{call} failed for {subject}: Win32 error {code}: {one_line(ctypes.FormatError(code))}"
+        )
+
+    @staticmethod
+    def _last_error() -> int:
+        """Return the calling thread's last Win32 error, as ctypes saved it.
+
+        Returns:
+            The error code.
+        """
+        if sys.platform != "win32":
+            return 0
+        return ctypes.get_last_error()
+
+    def read_sddl(self, path: str) -> str:
+        """Return the owner, group and DACL of ``path`` as SDDL.
+
+        Args:
+            path: The file or directory to read.
+
+        Returns:
+            The SDDL text.
+
+        Raises:
+            OSError: Either call failed; the message names the Win32 error.
+        """
+        descriptor = ctypes.c_void_p()
+        code = self._get_named_security_info(
+            path, _SE_FILE_OBJECT, _SDDL_SECTIONS, None, None, None, None, ctypes.byref(descriptor)
+        )
+        if code != _ERROR_SUCCESS:
+            raise self._failure("GetNamedSecurityInfoW", path, code)
+        try:
+            text = ctypes.c_void_p()
+            if not self._descriptor_to_string(
+                descriptor, _SDDL_REVISION_1, _SDDL_SECTIONS, ctypes.byref(text), None
+            ):
+                raise self._failure(
+                    "ConvertSecurityDescriptorToStringSecurityDescriptorW", path, self._last_error()
+                )
+            try:
+                return ctypes.wstring_at(text)
+            finally:
+                self._local_free(text)
+        finally:
+            self._local_free(descriptor)
+
+    def resolve_alias(self, alias: str) -> str:
+        """Return the numeric SID behind an SDDL alias (or a SID string).
+
+        Args:
+            alias: An SDDL SID alias such as ``LA`` or ``SY``.
+
+        Returns:
+            The SID string, e.g. ``S-1-5-18``.
+
+        Raises:
+            OSError: The alias is unknown or a call failed; the message names
+                the Win32 error.
+        """
+        sid = ctypes.c_void_p()
+        if not self._string_to_sid(alias, ctypes.byref(sid)):
+            raise self._failure("ConvertStringSidToSidW", alias, self._last_error())
+        try:
+            text = ctypes.c_void_p()
+            if not self._sid_to_string(sid, ctypes.byref(text)):
+                raise self._failure("ConvertSidToStringSidW", alias, self._last_error())
+            try:
+                return ctypes.wstring_at(text)
+            finally:
+                self._local_free(text)
+        finally:
+            self._local_free(sid)
 
 
 def _system_tool(parts: tuple[str, ...]) -> str:
@@ -443,6 +566,20 @@ class WindowsPermissionGuard(PermissionGuard):
         """
         self._runner = runner
         self._sid: str | None = None
+        self._native: _NativeSecurity | None = None
+
+    def _security(self) -> _NativeSecurity:
+        """Return the native API binding, built on first use.
+
+        Returns:
+            The binding.
+
+        Raises:
+            OSError: The DLLs could not be loaded (or this is not Windows).
+        """
+        if self._native is None:
+            self._native = _NativeSecurity()
+        return self._native
 
     def current_sid(self) -> str:
         """Return the SID of the user running this process, asking ``whoami`` once per guard.
@@ -466,28 +603,23 @@ class WindowsPermissionGuard(PermissionGuard):
         return self._sid
 
     def read_sddl(self, path: str) -> str:
-        """Return the SDDL of ``path``, read by PowerShell's ``Get-Acl``.
-
-        The path reaches PowerShell only through ``MAGI_ACL_PATH``, never in
-        the command text, so no character in it can be interpreted. The
-        child gets the allowlisted environment only (``_tool_environment``).
+        """Return the SDDL of ``path`` (owner, group, DACL), read natively; no process is started.
 
         Args:
             path: The file or directory to read.
 
         Returns:
-            The SDDL text; empty when the ACL could not be read.
+            The SDDL text, the same rendering as ``Get-Acl``'s ``.Sddl``.
 
         Raises:
-            OSError: PowerShell could not run.
+            OSError: The ACL could not be read; the message names the Win32 error.
         """
-        return _run_powershell(_SDDL_COMMAND, _ACL_PATH_VARIABLE, path)
+        return self._security().read_sddl(path)
 
     def resolve_alias(self, alias: str) -> str:
         """Return the numeric SID behind an SDDL alias.
 
-        The alias reaches PowerShell only through ``MAGI_SID_ALIAS``, with the
-        same clean environment as ``read_sddl``.
+        Resolved natively; no process is started.
 
         Args:
             alias: An SDDL SID alias such as ``LA`` or ``SY``.
@@ -496,10 +628,9 @@ class WindowsPermissionGuard(PermissionGuard):
             The SID string, e.g. ``S-1-5-18``.
 
         Raises:
-            OSError: PowerShell failed (an invalid alias exits 1) or answered
-                with something that is not a SID.
+            OSError: The alias is unknown (fail closed) or the answer is not a SID.
         """
-        sid = _run_powershell(_RESOLVE_ALIAS_COMMAND, _SID_ALIAS_VARIABLE, alias)
+        sid = self._security().resolve_alias(alias)
         if not _SID_PATTERN.fullmatch(sid):
             raise OSError(f"the SDDL alias {alias} did not resolve to a SID")
         return sid
