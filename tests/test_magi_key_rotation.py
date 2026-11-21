@@ -1614,3 +1614,23 @@ def test_a_vault_listing_that_fails_reports_why_in_one_line(tmp_path):
     report = rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert report.names_from_vault is False and "STRAY_NAME" in report.listing_detail
     assert "\n" not in report.listing_detail
+
+
+def test_an_unmapped_leftover_falls_back_to_the_generic_wording_instead_of_a_key_error(tmp_path):
+    # [Z4] a future InitLeftover member must degrade to the generic one-line failure, never a KeyError.
+    import enum
+
+    class _Future(enum.Enum):
+        NEW_STATE = "new-state"
+
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        raise OllamaInitError("init died", leftover=_Future.NEW_STATE)
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert "creating the new .magi/ failed (init died)" in message
+    assert "\n" not in message.strip() and os.listdir(tmp_path / "rotated")[0] in message
