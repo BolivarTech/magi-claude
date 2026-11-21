@@ -73,6 +73,13 @@ _WHOAMI_ARGS = ("/user", "/fo", "csv", "/nh")
 _ACL_PATH_VARIABLE = "MAGI_ACL_PATH"
 """Environment variable that carries the path to PowerShell; never interpolated into the command."""
 
+_PS_MODULE_PATH_VARIABLE = "PSMODULEPATH"
+"""Dropped from PowerShell's environment: a PowerShell 7 module path inherited by
+Windows PowerShell 5.1 keeps ``Get-Acl`` from loading; unset, 5.1 rebuilds its default."""
+
+_STDERR_TAIL_CHARS = 300
+"""How much of a failed tool's stderr an error message carries."""
+
 _SDDL_COMMAND = f"(Get-Acl -LiteralPath $env:{_ACL_PATH_VARIABLE}).Sddl"
 _POWERSHELL_ARGS = ("-NoProfile", "-NonInteractive", "-Command", _SDDL_COMMAND)
 
@@ -110,20 +117,38 @@ _ACE_FIELD_COUNT = 6
 _ACE_SID_INDEX = 5
 
 
-def _run(argv: list[str], extra_env: Mapping[str, str] | None = None) -> str:
+def _stderr_tail(error: subprocess.SubprocessError) -> str:
+    """Return the end of a failed tool's stderr as one bounded line.
+
+    Args:
+        error: The failure raised by ``subprocess.run``.
+
+    Returns:
+        At most ``_STDERR_TAIL_CHARS`` characters, whitespace collapsed; empty
+        when the tool wrote nothing.
+    """
+    stderr = getattr(error, "stderr", None) or ""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    return " ".join(stderr.split())[-_STDERR_TAIL_CHARS:]
+
+
+def _run(argv: list[str], env: Mapping[str, str] | None = None) -> str:
     """Run a permission tool and return its standard output.
 
     Args:
         argv: The command, as an argument list (never through a shell).
-        extra_env: Variables added to a copy of the current environment.
+        env: The child's whole environment; None inherits the current one.
 
     Returns:
         The decoded standard output.
 
     Raises:
-        OSError: The tool could not start, timed out or exited non-zero.
+        OSError: The tool could not start, timed out or exited non-zero; the
+            message names the tool, the exit code or timeout, and the tail of
+            its stderr.
     """
-    env = None if extra_env is None else {**os.environ, **extra_env}
+    tool = ntpath.basename(argv[0])
     try:
         completed = subprocess.run(
             argv,
@@ -134,8 +159,16 @@ def _run(argv: list[str], extra_env: Mapping[str, str] | None = None) -> str:
             check=True,
             env=env,
         )
+    except subprocess.CalledProcessError as error:
+        raise OSError(
+            f"{tool} failed with exit code {error.returncode}: {_stderr_tail(error)}"
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raise OSError(
+            f"{tool} timed out after {_COMMAND_TIMEOUT_SECONDS} s: {_stderr_tail(error)}"
+        ) from error
     except subprocess.SubprocessError as error:
-        raise OSError(f"{os.path.basename(argv[0])} failed") from error
+        raise OSError(f"{tool} failed: {_stderr_tail(error)}") from error
     return completed.stdout
 
 
@@ -322,7 +355,8 @@ class WindowsPermissionGuard(PermissionGuard):
         """Return the SDDL of ``path``, read by PowerShell's ``Get-Acl``.
 
         The path reaches PowerShell only through ``MAGI_ACL_PATH``, never in
-        the command text, so no character in it can be interpreted.
+        the command text, so no character in it can be interpreted. The
+        child does not inherit ``PSModulePath`` (see ``_PS_MODULE_PATH_VARIABLE``).
 
         Args:
             path: The file or directory to read.
@@ -334,7 +368,13 @@ class WindowsPermissionGuard(PermissionGuard):
             OSError: PowerShell could not run.
         """
         argv = [_system_tool(_POWERSHELL_PARTS), *_POWERSHELL_ARGS]
-        return _run(argv, {_ACL_PATH_VARIABLE: path}).strip()
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if name.upper() != _PS_MODULE_PATH_VARIABLE
+        }
+        env[_ACL_PATH_VARIABLE] = path
+        return _run(argv, env).strip()
 
     def harden(self, path: str, directory: bool) -> None:
         """Cut inheritance and grant full control to the current user's SID only.
