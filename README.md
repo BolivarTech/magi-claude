@@ -46,6 +46,21 @@ For trivial questions with one clear answer, the complexity gate skips the full 
 
 For the full technical reference, see [`docs/MAGI-System-Documentation.md`](docs/MAGI-System-Documentation.md).
 
+**New in v8.0.0: `code-review --ollama` reviews paths and git revisions, and every `--ollama`
+run uses a project key (BREAKING).** `code-review --ollama` hands the review to `magi-rs`'s
+own `code-review` command, so the input is now a path or a revision: a path, `--commit`,
+`--from` with `--to`, `--base` with `--head`, or `--uncommitted`. With no target it reviews
+`--base main --head HEAD`. A `.md` you pass is reviewed as a file, never read as a prompt, so
+a 7.x bundle no longer frames the review. Every `--ollama` run now opens `magi-rs`'s state
+with a key that `--ollama-init` generates in `.magi/.secret/magi.key`, stored as plain text
+next to the database; API keys go into the vault with `--ollama-vault-set`, and an exposed
+key is replaced with `--ollama-rotate-key`. A `.magi/` created by 7.x has no key and must be
+regenerated. `code-review --ollama` also needs the embedder from `[embedding]` to answer, and
+stops with `[FATAL]` if it does not. `--ollama-init` now exits 1 on failure; in 7.x it
+exited 0. The procedure, the limits of the key's protection, what `design` and `analysis`
+do with memory, and where your data goes are in
+[`docs/ollama-backend.md`](docs/ollama-backend.md).
+
 **New in v7.1.0: `magi-rs` 0.25.0.** The pinned `magi-rs` moves from 0.24.1 to 0.25.0. A
 `.magi/` created with 7.0.x keeps working as it is, and flags, defaults and the report are
 unchanged. The new binary brings `magi-rs`'s own `code-review` command, which the plugin
@@ -223,7 +238,11 @@ python skills/magi/scripts/run_magi.py <mode> <file_or_text> [--model opus] [--t
 |------|---------|-------------|
 | `--model` | `opus` | LLM model for all agents (`opus`, `sonnet`, `haiku`) — Claude backend |
 | `--ollama` | off | Run the open-weight trio through **`magi-rs`** (one model per mage, from `.magi/magi.toml`) instead of `claude -p`. Mutually exclusive with `--model`. See [`docs/ollama-backend.md`](docs/ollama-backend.md) |
-| `--ollama-init` | — | Initialise the project for `magi-rs` (`magi-rs init -w <cwd>`, creates `.magi/`) and exit |
+| `--ollama-init` | — | Initialise the project for `magi-rs` (generates the key, runs `magi-rs init -w <cwd>`, creates `.magi/`) and exit; exits 1 with `[FATAL]` on failure |
+| `--ollama-vault-set` | — | `--ollama-vault-set <NAME>`: store one API key in the vault (`OPENAI_API_KEY`, `MAGI_API_KEY`, `CODE_REVIEW_API_KEY`, `EMBEDDING_API_KEY` or `DECISION_API_KEY`); the value comes from stdin or a hidden prompt |
+| `--ollama-rotate-key` | — | Replace an exposed key, the database and the vault; asks `y/N` in a terminal, needs `--yes` without one |
+| `--yes` | off | Authorises `--ollama-rotate-key` without a terminal prompt |
+| `--commit`, `--from`/`--to`, `--base`/`--head`, `--uncommitted` | `--base main --head HEAD` | Targets of `code-review --ollama`; pick one, or pass a path as the input |
 | `--timeout` | `900` / `16820` | Per-agent timeout in seconds (`900` on the Claude path; `16820` with `--ollama`, where it also sets each mage's per-attempt budget) |
 | `--output-dir` | auto | Directory for agent outputs (default: temp dir) |
 | `-o`, `--out` | — | Redirect the human-readable verdict report to a file (suppressing it on stdout); on a write failure it warns and falls back to stdout so the verdict is never lost |

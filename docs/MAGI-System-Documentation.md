@@ -347,6 +347,14 @@ Agents should explicitly consider **scalability** and **migration cost**.
 
 This is the default mode if the input doesn't clearly fit the other two. It is the most flexible: agents apply their perspective to the problem as stated.
 
+### 6.4 The open-weight path (`--ollama`)
+
+With `--ollama` the three agents run through `magi-rs`, a pinned binary, instead of `claude -p`. The consensus, the report and the banner are produced by the same local code as on the Claude path. The full guide is [`ollama-backend.md`](ollama-backend.md); what changes in the modes above is this:
+
+- **Code review** takes a path or a git revision (`--commit`, `--from` with `--to`, `--base` with `--head`, `--uncommitted`; by default `--base main --head HEAD`) and hands it to `magi-rs code-review`, which builds the context itself. A markdown file given as the input is reviewed as a file, never read as a prompt. The embedder configured in `.magi/magi.toml` has to answer, or the run stops with `[FATAL]`.
+- **Design and analysis** still take a file or text. In `magi-rs` 0.25.0 they use the project's key only to open the vault; they store and retrieve no memory and do not call the embedder.
+- **The key.** `--ollama-init` generates `.magi/.secret/magi.key`, kept as plain text next to the database. `--ollama-vault-set <NAME>` stores an API key in the vault and `--ollama-rotate-key` replaces an exposed key. A lost key cannot be recovered. A `.magi/` created by 7.x has to be regenerated.
+
 ---
 
 ## 7. Complete Usage Example

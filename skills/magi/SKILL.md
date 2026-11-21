@@ -83,16 +83,26 @@ declared in the project's `.magi/magi.toml`, one model per mage:
 
 - `--ollama` is **mutually exclusive** with `--model`: the trio comes from
   `.magi/magi.toml`, not the CLI, and passing both errors out.
+- `code-review --ollama` takes a path or a git revision, not a prompt: a path, `--commit`,
+  `--from` with `--to`, `--base` with `--head`, or `--uncommitted`; with none it reviews
+  `--base main --head HEAD`. A `.md` given as the input is reviewed as a file, never read
+  as instructions. It needs the embedder from `[embedding]` in `.magi/magi.toml` to answer
+  and stops with `[FATAL]` otherwise. `design` and `analysis` keep taking a file or text.
 - Run `python skills/magi/scripts/run_magi.py --ollama-init` once per project, from
-  the project root: it calls `magi-rs init` and nothing else. A gate run from a project
-  without `.magi/magi.toml` fails and names that command; it never initialises on its own.
+  the project root: it generates the project's key in `.magi/.secret/magi.key` (plain text,
+  next to the database) and calls `magi-rs init` with it. It exits 1 with `[FATAL]` when it
+  fails. A gate run from a project without `.magi/magi.toml` fails and names that command;
+  it never initialises on its own. API keys go into the vault with
+  `--ollama-vault-set <NAME>`, and an exposed key is replaced with `--ollama-rotate-key`
+  (needs `--yes` without a terminal). Never rotate on your own: it moves the whole `.magi/`
+  to a backup.
 - `.claude/magi-ollama.toml` is no longer read (6.0.0); everything it declared lives in
   `.magi/magi.toml`, which `magi-rs` owns.
-- If the run fails with `has no [decision] section`, the project's `.magi/` was created by
-  plugin 6.x. Do not edit or delete it on your own; tell the user it must be regenerated
-  (`mv .magi .magi.bak-0.21`, then `--ollama-init`, then copy their trio and fallbacks into
-  the new `magi.toml`) and point them to section 2 of
-  [`docs/ollama-backend.md`](../../docs/ollama-backend.md).
+- If the run fails with `[FATAL]` about a missing memory key, or with `has no [decision]
+  section`, the project's `.magi/` was created by plugin 7.x or 6.x. Do not edit or delete
+  it on your own; tell the user it must be regenerated (move it outside the project, run
+  `--ollama-init`, then reload their API keys with `--ollama-vault-set`) and point them to
+  section 2 of [`docs/ollama-backend.md`](../../docs/ollama-backend.md).
 - `--timeout` defaults to 16820 here and also sets each mage's per-attempt budget.
 - **Launch this path in the background** (the Bash tool's `run_in_background`) and wait for
   its completion notification. A default run usually takes a few minutes, but it can pass
