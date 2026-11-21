@@ -369,7 +369,9 @@ def _fill_tally_all_ok() -> None:
 def test_build_artifact_includes_git_sha_and_prompts_sha256():
     _fill_tally_all_ok()
 
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 1})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 1}, mode="analysis"
+    )
 
     assert artifact["git_sha"] == mma._git_head_sha(mma._REPO_ROOT)
     assert artifact["prompts_sha256"] == mma._prompts_sha256(mma._AGENTS_DIR)
@@ -382,7 +384,9 @@ def test_build_artifact_verdict_red_when_any_failure_present():
     _fill_tally_all_ok()
     mma.tally["caspar"]["missing_markers"] = 1
 
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
 
     assert artifact["verdict"] == "red"
     assert artifact["per_seat"]["caspar"]["missing_markers"] == 1
@@ -394,7 +398,9 @@ def test_build_artifact_raises_when_a_seat_has_zero_data():
     # balthasar never appears at all.
 
     with pytest.raises(RuntimeError, match="balthasar"):
-        mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+        mma.build_artifact(
+            mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+        )
 
 
 # --- check_release_gate --------------------------------------------------------------
@@ -405,6 +411,8 @@ def _write_report(path: Path, **overrides) -> None:
         "git_sha": mma._git_head_sha(mma._REPO_ROOT),
         "prompts_sha256": mma._prompts_sha256(mma._AGENTS_DIR),
         "measured_at": "2026-07-13T00:00:00Z",
+        "schema": "v8",
+        "mode": "analysis",
         "runs": {"ollama": 5, "claude": 2},
         "fallback_measured": 0,
         "per_seat": {a: {"ok": 5, "missing_markers": 0} for a in mma.AGENT_NAMES},
@@ -631,10 +639,13 @@ def test_main_passes_the_backend_timeout_to_each_run(monkeypatch, tmp_path):
     import magi_rs_trio
 
     seen = []
+    monkeypatch.setattr(mma, "prepare_workspace", lambda scratch: tmp_path)
     monkeypatch.setattr(
         mma,
         "run_real_magi",
-        lambda mode, bundle, *, ollama, timeout, output_dir: seen.append((ollama, timeout)),
+        lambda mode, bundle, *, ollama, timeout, output_dir, cwd=mma._REPO_ROOT: seen.append(
+            (ollama, timeout)
+        ),
     )
     monkeypatch.setattr(mma, "measure_output_dir", lambda run_dir: None)
     monkeypatch.setattr(mma, "build_artifact", lambda *a, **k: {"verdict": "green"})
@@ -676,3 +687,152 @@ def test_the_parent_bound_exceeds_the_childs_worst_case_at_the_new_default(monke
     bundle.write_text("x", encoding="utf-8")
     mma.run_real_magi("code-review", bundle, ollama=True, timeout=timeout, output_dir=tmp_path)
     assert captured["timeout"] > timeout
+
+
+# --- v8: analysis lens, isolated workspace, schema (REQ-15, BDD-21) -------------------
+
+
+def test_the_default_mode_is_analysis_because_code_review_is_native_in_v8():
+    assert mma.DEFAULT_MODE == "analysis"
+
+
+def _record_runs(monkeypatch, tmp_path):
+    workspace = tmp_path / "scratch-ws"
+    workspace.mkdir()
+    seen = []
+    monkeypatch.setattr(mma, "prepare_workspace", lambda scratch: workspace)
+    monkeypatch.setattr(
+        mma,
+        "run_real_magi",
+        lambda mode, bundle, *, ollama, timeout, output_dir, cwd=mma._REPO_ROOT: seen.append(
+            (mode, ollama, cwd)
+        ),
+    )
+    monkeypatch.setattr(mma, "measure_output_dir", lambda run_dir: None)
+    monkeypatch.setattr(mma, "build_artifact", lambda *a, **k: {"verdict": "green"})
+    bundle = tmp_path / "b.md"
+    bundle.write_text("x", encoding="utf-8")
+    return workspace, seen, bundle
+
+
+def test_an_ollama_run_executes_in_the_prepared_workspace_never_the_repo_root(
+    monkeypatch, tmp_path
+):
+    workspace, seen, bundle = _record_runs(monkeypatch, tmp_path)
+    mma.main(["measure", "--ollama-bundle", str(bundle), "--out", str(tmp_path / "out.json")])
+    assert seen == [("analysis", True, workspace)]
+    assert workspace.resolve() != mma._REPO_ROOT.resolve()
+
+
+def test_a_claude_run_keeps_the_repo_root(monkeypatch, tmp_path):
+    _, seen, bundle = _record_runs(monkeypatch, tmp_path)
+    mma.main(["measure", "--claude-bundle", str(bundle), "--out", str(tmp_path / "out.json")])
+    assert seen == [("analysis", False, mma._REPO_ROOT)]
+
+
+def test_prepare_workspace_runs_ollama_init_inside_a_fresh_directory(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"], captured["cwd"] = command, kwargs.get("cwd")
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(mma.subprocess, "run", fake_run)
+    workspace = mma.prepare_workspace(tmp_path)
+    assert workspace.is_dir() and workspace.parent == tmp_path
+    assert "--ollama-init" in captured["command"] and Path(captured["cwd"]) == workspace
+
+
+def test_prepare_workspace_fails_loudly_when_init_fails(monkeypatch, tmp_path):
+    class _Failed:
+        returncode = 3
+
+    monkeypatch.setattr(mma.subprocess, "run", lambda command, **kwargs: _Failed())
+    with pytest.raises(RuntimeError, match="3"):
+        mma.prepare_workspace(tmp_path)
+
+
+def test_the_workspace_is_removed_even_when_a_run_fails(monkeypatch, tmp_path):
+    made = []
+
+    def fake_prepare(scratch):
+        workspace = scratch / "ws"
+        workspace.mkdir()
+        made.append(workspace)
+        return workspace
+
+    def boom(*a, **k):
+        raise RuntimeError("died")
+
+    monkeypatch.setattr(mma, "prepare_workspace", fake_prepare)
+    monkeypatch.setattr(mma, "run_real_magi", boom)
+    bundle = tmp_path / "b.md"
+    bundle.write_text("x", encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        mma.main(["measure", "--ollama-bundle", str(bundle), "--out", str(tmp_path / "out.json")])
+    assert made and not made[0].exists()
+
+
+def test_run_real_magi_runs_the_child_in_the_given_cwd(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(mma.subprocess, "run", fake_run)
+    mma.run_real_magi(
+        "analysis", tmp_path / "b.md", ollama=True, timeout=900, output_dir=tmp_path, cwd=tmp_path
+    )
+    assert Path(captured["cwd"]) == tmp_path
+
+
+def test_run_real_magi_passes_a_relative_bundle_as_an_absolute_path(monkeypatch, tmp_path):
+    # [CP2-M15] the child runs in the workspace; a relative bundle would not resolve there.
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(mma.subprocess, "run", fake_run)
+    monkeypatch.chdir(tmp_path)
+    mma.run_real_magi(
+        "analysis",
+        Path("b.md"),
+        ollama=True,
+        timeout=900,
+        output_dir=tmp_path,
+        cwd=tmp_path / "ws",
+    )
+    assert any(Path(str(part)) == tmp_path / "b.md" for part in captured["command"])
+
+
+def test_the_artifact_declares_the_v8_baseline_and_its_mode():
+    _fill_tally_all_ok()
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
+    assert artifact["schema"] == "v8" and artifact["mode"] == "analysis"
+
+
+def test_check_rejects_an_artifact_of_the_7x_series(tmp_path):
+    report_path = tmp_path / "report.json"
+    _write_report(report_path)
+    legacy = json.loads(report_path.read_text(encoding="utf-8"))
+    del legacy["schema"]
+    report_path.write_text(json.dumps(legacy), encoding="utf-8")
+    passed, message = mma.check_release_gate(report_path, mma._REPO_ROOT, mma._AGENTS_DIR)
+    assert not passed and "schema" in message
