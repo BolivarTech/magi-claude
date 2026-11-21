@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 
+from magi_key import KeyStore, MagiKey
+
 _CONFIG_RELATIVE_PATH = os.path.join(".magi", "magi.toml")
 _INIT_COMMAND = "/magi --ollama-init"
 
@@ -57,3 +59,28 @@ class ProjectPreflight:
                 "initialises a project on its own."
             )
         return config
+
+    @staticmethod
+    def require_ready(workdir: str, key_store: KeyStore) -> MagiKey:
+        """Run the ordered preflight: project config first, then the key.
+
+        An uninitialised project stops before the key store is touched.
+
+        Args:
+            workdir: Project root, the same path passed to ``magi-rs`` as ``-w``.
+            key_store: Store the key is loaded from.
+
+        Returns:
+            The loaded key, ready to be injected into the child environment.
+
+        Raises:
+            ProjectNotInitialisedError: ``.magi/magi.toml`` is absent.
+            KeyMissingError: The key file is absent or empty.
+            KeyExposedError: The key's permissions are looser than owner-only.
+            KeyHardeningError: The permissions could not be verified.
+
+        Side effects:
+            Reads the filesystem. Writes nothing.
+        """
+        ProjectPreflight.require_initialised(workdir)
+        return key_store.load(workdir)

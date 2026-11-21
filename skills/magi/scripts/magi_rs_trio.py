@@ -17,6 +17,7 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from magi_key import KeyExposedError, KeyHardeningError, KeyMissingError
 from magi_rs_bootstrap import (
     BinaryBootstrap,
     DigestMismatchError,
@@ -118,6 +119,9 @@ FAIL_CLOSED_ERRORS: tuple[type[Exception], ...] = (
     DigestMismatchError,
     VersionMismatchError,
     ProjectNotInitialisedError,
+    KeyMissingError,
+    KeyExposedError,
+    KeyHardeningError,
 )
 
 
