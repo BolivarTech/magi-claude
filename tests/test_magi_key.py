@@ -1,6 +1,7 @@
 import base64
 import os
 import sys
+from collections.abc import Callable
 
 import pytest
 
@@ -455,7 +456,7 @@ def test_redaction_also_scrubs_the_json_escaped_forms_of_the_key(escape):
 BS = chr(92)
 
 
-def _mixed(slash, plus, equals):
+def _mixed(slash: str, plus: str, equals: str) -> Callable[[str], str]:
     return lambda v: v.replace("/", slash).replace("+", plus).replace("=", equals)
 
 
