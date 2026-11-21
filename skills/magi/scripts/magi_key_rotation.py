@@ -37,7 +37,8 @@ moves ``<workdir>/.magi`` into it, restricts the backup's permissions, and
 creates a new ``<workdir>/.magi`` through ``init``.
 
 Error paths (state left on disk, the clause of the one-line message, what the
-operator is told to do). Each row is pinned by tests in ``tests/test_magi_key_rotation.py``:
+operator is told to do). The tests cited here, all in ``tests/test_magi_key_rotation.py``,
+exercise the rows:
 the ``init`` rows by the parametrized
 ``test_the_rotation_words_the_failure_by_the_leftover_init_reported``; pre-move by
 ``test_a_backup_dir_creation_failure_without_a_message_still_names_its_cause`` and
@@ -46,9 +47,9 @@ the ``init`` rows by the parametrized
 ``test_a_move_that_copied_and_then_failed_mid_delete_keeps_both_copies_and_names_them``;
 re-harden by ``test_a_backup_that_cannot_be_rehardened_names_the_guards_reason``; verify by
 ``test_a_magi_dir_the_rotation_did_not_create_is_never_reported_as_rotated``; names by
-``test_a_vault_listing_that_fails_reports_why_in_one_line``. An anchor test fails if any
-cited name stops existing, so this table is a map of pinned behaviour and not a second,
-unchecked source::
+``test_a_vault_listing_that_fails_reports_why_in_one_line``. An anchor test fails if a
+cited test is renamed or removed; it does not check what the table says, so the table is a
+reading aid, not a second source of truth::
 
     stage        state left on disk                       message says           operator verb
     -----------  ---------------------------------------  ---------------------  --------------
