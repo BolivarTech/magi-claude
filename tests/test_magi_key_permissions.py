@@ -862,3 +862,18 @@ def test_windows_real_file_with_an_allow_and_a_deny_for_users_hardens_to_owner_o
     guard.verify(str(path), directory=False)
     _, sids = parse_sddl_dacl(guard.read_sddl(str(path)))
     assert sids and all(sid in (guard.current_sid(), "LA") for sid in sids)
+
+
+def test_a_foreign_object_deny_entry_alone_is_unverifiable():
+    # [n-1] an object deny ACE (OD) takes access away like a plain deny.
+    sddl = f"D:PAI(A;;FA;;;{ME})(OD;;FR;;;{EVERYONE})"
+    with pytest.raises(KeyUnverifiableError) as raised:
+        _windows_guard(sddl).verify("k", directory=False)
+    assert "deny entry" in str(raised.value)
+
+
+def test_a_foreign_object_deny_beside_an_allow_for_the_same_sid_is_exposed():
+    sddl = f"D:PAI(A;;FA;;;{ME})(OD;;FR;;;{OTHER})(A;;FR;;;{OTHER})"
+    with pytest.raises(KeyExposedError) as raised:
+        _windows_guard(sddl).verify("k", directory=False)
+    assert not isinstance(raised.value, KeyUnverifiableError)
