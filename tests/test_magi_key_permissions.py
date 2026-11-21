@@ -165,21 +165,6 @@ def test_windows_harden_uses_the_sid_never_a_localised_name():
     assert any(part.startswith(f"*{ME}:") for part in icacls)
 
 
-def test_windows_read_sddl_drops_psmodulepath_and_carries_the_acl_path(monkeypatch):
-    # A pwsh 7 PSModulePath inherited by Windows PowerShell 5.1 breaks Get-Acl (CI, pwsh step shell).
-    seen = {}
-
-    def _fake_run(argv, **kwargs):
-        seen["env"] = kwargs["env"]
-        return SimpleNamespace(stdout=f"D:PAI(A;;FA;;;{ME})")
-
-    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
-    monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
-    assert WindowsPermissionGuard().read_sddl("k") == f"D:PAI(A;;FA;;;{ME})"
-    assert not any(name.upper() == "PSMODULEPATH" for name in seen["env"])
-    assert seen["env"]["MAGI_ACL_PATH"] == "k"
-
-
 def test_a_failing_permission_tool_reports_its_stderr_and_exit_code(monkeypatch):
     def _fake_run(argv, **kwargs):
         raise subprocess.CalledProcessError(
@@ -188,7 +173,7 @@ def test_a_failing_permission_tool_reports_its_stderr_and_exit_code(monkeypatch)
 
     monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
     with pytest.raises(OSError) as raised:
-        WindowsPermissionGuard().read_sddl("k")
+        WindowsPermissionGuard().current_sid()
     message = str(raised.value)
     assert "Get-Acl : module could not be loaded" in message
     assert "exit code 1" in message
@@ -338,7 +323,7 @@ def test_the_platform_factory_picks_the_matching_guard():
 
 
 def test_a_failing_permission_tool_keeps_the_headline_of_a_long_stderr(monkeypatch):
-    # PowerShell writes its headline first; a long trace must not push it out of the message.
+    # A tool writes its headline first; a long trace must not push it out of the message.
     headline = "Get-Acl : The term 'Get-Acl' is not recognized"
     trace = " ".join(f"At line:{n} char:1" for n in range(200))
 
@@ -347,7 +332,7 @@ def test_a_failing_permission_tool_keeps_the_headline_of_a_long_stderr(monkeypat
 
     monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
     with pytest.raises(OSError) as raised:
-        WindowsPermissionGuard().read_sddl("k")
+        WindowsPermissionGuard().current_sid()
     message = str(raised.value)
     assert headline in message
     assert "\n" not in message
@@ -410,29 +395,6 @@ def test_windows_verify_of_numeric_sids_never_resolves_an_alias():
 
     guard.resolve_alias = _never
     guard.verify("k", directory=False)
-
-
-def test_windows_resolve_alias_passes_the_alias_only_through_a_clean_env(monkeypatch):
-    seen = {}
-
-    def _fake_run(argv, **kwargs):
-        seen.update(argv=argv, env=kwargs["env"])
-        return SimpleNamespace(stdout="S-1-5-18\r\n")
-
-    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
-    monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
-    assert WindowsPermissionGuard().resolve_alias("SY") == "S-1-5-18"
-    assert seen["env"]["MAGI_SID_ALIAS"] == "SY"
-    assert not any(name.upper() == "PSMODULEPATH" for name in seen["env"])
-    assert not any("SY" == part for part in seen["argv"])
-
-
-def test_windows_resolve_alias_rejects_output_that_is_not_a_sid(monkeypatch):
-    monkeypatch.setattr(
-        "magi_key_permissions.subprocess.run", lambda argv, **kwargs: SimpleNamespace(stdout="")
-    )
-    with pytest.raises(OSError):
-        WindowsPermissionGuard().resolve_alias("ZZ")
 
 
 def test_windows_verify_that_cannot_read_the_acl_is_unverifiable_not_exposed():
@@ -513,13 +475,12 @@ def _capture_tool_envs(monkeypatch):
 
 
 def test_no_permission_tool_inherits_an_api_key_or_a_passphrase(monkeypatch):
-    # [W6] REQ-13c: whoami, icacls and PowerShell get the allowlist, never the operator's whole shell.
+    # [W6] REQ-13c: whoami and icacls get the allowlist, never the operator's whole shell.
     seen = _capture_tool_envs(monkeypatch)
     guard = WindowsPermissionGuard()
     guard.harden("k", directory=False)
-    guard.read_sddl("k")
     tools = {tool for tool, _ in seen}
-    assert {"whoami.exe", "icacls.exe", "powershell.exe"} <= tools
+    assert {"whoami.exe", "icacls.exe"} <= tools
     for tool, env in seen:
         assert env is not None, tool
         assert not set(_PARENT_SECRETS) & {name.upper() for name in env}, tool
@@ -553,17 +514,16 @@ _WINDOWS_SYSTEM_VARIABLES = (
 """[W6c] The ruling's enumerated, non-secret Windows system variables, pinned here as the contract."""
 
 
-def test_powershell_gets_the_allowlist_plus_only_its_one_variable(monkeypatch):
-    # [W6] the one variable carrying the input and [W6c] the enumerated Windows system variables are the only
-    # additions to the allowlisted environment: an exact equality, so any other addition fails.
+def test_icacls_gets_the_allowlist_plus_only_the_windows_system_variables(monkeypatch):
+    # [W6c] the enumerated Windows system variables are the only addition to the allowlisted environment
+    # [W6d: no tool takes an input variable any more]: an exact equality, so any other addition fails.
     for name in _WINDOWS_SYSTEM_VARIABLES:
         monkeypatch.setenv(name, f"value-of-{name}")
     seen = _capture_tool_envs(monkeypatch)
-    WindowsPermissionGuard().read_sddl("k")
-    ((_, env),) = [entry for entry in seen if entry[0] == "powershell.exe"]
+    WindowsPermissionGuard().harden("k", directory=False)
+    ((_, env),) = [entry for entry in seen if entry[0] == "icacls.exe"]
     expected = EnvironmentPolicy.build(os.environ)
     expected.update({name: f"value-of-{name}" for name in _WINDOWS_SYSTEM_VARIABLES})
-    expected["MAGI_ACL_PATH"] = "k"
     assert {name.upper(): value for name, value in env.items()} == {
         name.upper(): value for name, value in expected.items()
     }
@@ -594,8 +554,7 @@ def test_the_permission_tools_get_the_powershell_cache_dirs_and_nothing_secret(m
     seen = _capture_tool_envs(monkeypatch)
     guard = WindowsPermissionGuard()
     guard.harden("k", directory=False)
-    guard.read_sddl("k")
-    assert {"whoami.exe", "icacls.exe", "powershell.exe"} <= {tool for tool, _ in seen}
+    assert {"whoami.exe", "icacls.exe"} <= {tool for tool, _ in seen}
     for tool, env in seen:
         names = {name.upper() for name in env}
         assert env["LOCALAPPDATA"] == r"C:\Users\u\AppData\Local", tool
@@ -608,8 +567,8 @@ def test_the_cache_dirs_are_added_only_when_the_parent_has_them(monkeypatch):
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)
     seen = _capture_tool_envs(monkeypatch)
-    WindowsPermissionGuard().read_sddl("k")
-    ((_, env),) = [entry for entry in seen if entry[0] == "powershell.exe"]
+    WindowsPermissionGuard().harden("k", directory=False)
+    ((_, env),) = [entry for entry in seen if entry[0] == "icacls.exe"]
     assert "LOCALAPPDATA" not in env and "APPDATA" not in env
 
 
@@ -620,8 +579,7 @@ def test_every_permission_tool_gets_the_windows_system_variables(monkeypatch):
     seen = _capture_tool_envs(monkeypatch)
     guard = WindowsPermissionGuard()
     guard.harden("k", directory=False)
-    guard.read_sddl("k")
-    assert {"whoami.exe", "icacls.exe", "powershell.exe"} <= {tool for tool, _ in seen}
+    assert {"whoami.exe", "icacls.exe"} <= {tool for tool, _ in seen}
     for tool, env in seen:
         upper = {name.upper(): value for name, value in env.items()}
         for name in _WINDOWS_SYSTEM_VARIABLES:
@@ -633,9 +591,59 @@ def test_windows_system_variables_are_matched_case_insensitively(monkeypatch):
     monkeypatch.setenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
     monkeypatch.setenv("windir", r"C:\Windows")
     seen = _capture_tool_envs(monkeypatch)
-    WindowsPermissionGuard().read_sddl("k")
-    ((_, env),) = [entry for entry in seen if entry[0] == "powershell.exe"]
+    WindowsPermissionGuard().harden("k", directory=False)
+    ((_, env),) = [entry for entry in seen if entry[0] == "icacls.exe"]
     upper = {name.upper(): value for name, value in env.items()}
     assert (
         upper["PROGRAMFILES(X86)"] == r"C:\Program Files (x86)" and upper["WINDIR"] == r"C:\Windows"
     )
+
+
+def _no_process(*args, **kwargs):
+    raise AssertionError("a process was started")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real ACLs")
+def test_reading_a_hardened_acl_starts_no_process_and_returns_its_sddl(tmp_path, monkeypatch):
+    # [W6d] every PowerShell start on the CI runner took tens of seconds: the read is native (advapi32).
+    path = tmp_path / "k"
+    path.write_text("x")
+    guard = WindowsPermissionGuard()
+    guard.harden(str(path), directory=False)
+    sid = guard.current_sid()
+    monkeypatch.setattr("magi_key_permissions.subprocess.run", _no_process)
+    sddl = guard.read_sddl(str(path))
+    dacl = sddl[sddl.index("D:") :]
+    assert dacl in (f"D:PAI(A;;FA;;;{sid})", "D:PAI(A;;FA;;;LA)")
+    assert sddl.startswith("O:")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real SIDs")
+def test_resolving_an_alias_starts_no_process(monkeypatch):
+    monkeypatch.setattr("magi_key_permissions.subprocess.run", _no_process)
+    assert WindowsPermissionGuard().resolve_alias("BA") == "S-1-5-32-544"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real SIDs")
+def test_resolving_an_unknown_alias_is_an_os_error(monkeypatch):
+    monkeypatch.setattr("magi_key_permissions.subprocess.run", _no_process)
+    with pytest.raises(OSError):
+        WindowsPermissionGuard().resolve_alias("ZZ")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real ACLs")
+def test_reading_the_acl_of_a_missing_path_names_the_win32_error(tmp_path, monkeypatch):
+    # [W6d] a failed native read is an OSError naming the Win32 error; verify turns it into "unverifiable".
+    monkeypatch.setattr("magi_key_permissions.subprocess.run", _no_process)
+    missing = str(tmp_path / "absent")
+    with pytest.raises(OSError) as raised:
+        WindowsPermissionGuard().read_sddl(missing)
+    message = str(raised.value)
+    assert "Win32 error 2" in message and missing in message and "\n" not in message
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real ACLs")
+def test_verifying_a_path_whose_acl_cannot_be_read_is_unverifiable(tmp_path):
+    with pytest.raises(KeyUnverifiableError) as raised:
+        WindowsPermissionGuard().verify(str(tmp_path / "absent"), directory=False)
+    assert "Win32 error" in str(raised.value)
