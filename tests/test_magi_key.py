@@ -162,8 +162,23 @@ def test_load_of_an_empty_key_is_missing(tmp_path):
     secret = tmp_path / ".magi" / ".secret"
     secret.mkdir(parents=True)
     (secret / "magi.key").write_text("", encoding="ascii")
-    with pytest.raises(KeyMissingError):
+    with pytest.raises(KeyMissingError) as exc:
         _store().load(str(tmp_path))
+    # --ollama-init leaves an existing .magi/ untouched: the message must say to move it aside first.
+    message = str(exc.value)
+    assert "--ollama-init" in message and "move" in message and "backup" in message
+
+
+def test_a_failed_cleanup_never_masks_the_hardening_failure(tmp_path, monkeypatch):
+    def _remove_fails(path):
+        raise OSError("sharing violation")
+
+    store = _store(harden_fails=True)
+    key_file = store.key_path(str(tmp_path))
+    monkeypatch.setattr("magi_key.os.remove", _remove_fails)
+    with pytest.raises(KeyHardeningError) as exc:
+        store.persist(str(tmp_path), store.new_key())
+    assert key_file in str(exc.value)
 
 
 def test_load_never_reads_an_exposed_key(tmp_path, monkeypatch):
