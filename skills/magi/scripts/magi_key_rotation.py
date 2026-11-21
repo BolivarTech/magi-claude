@@ -354,6 +354,11 @@ class KeyRotation:
                 describes the state left behind and names the backup when one
                 exists. Neither key ever appears in it.
         """
+        if not os.path.isabs(self._backup_root):
+            raise RotationFailedError(
+                f"the rotation backup root {self._backup_root} is not an absolute path: nothing was done; "
+                "point the state directory at an absolute path"
+            )
         self._authorise(workdir, assume_yes, is_tty, confirm)
         magi_dir = os.path.join(workdir, MAGI_DIR)
         if not os.path.isdir(magi_dir):
@@ -363,9 +368,10 @@ class KeyRotation:
                 f"the rotation backup root {self._backup_root} is inside the working tree {workdir}: "
                 "nothing was moved; point the state directory outside the project"
             )
+        self._refuse_links_in_source(magi_dir)
         old_key = self._read_old_key(workdir)
-        backup_dir = self._create_backup_dir(workdir)
-        self._secure_backup_dir(backup_dir)
+        backup_dir, created_parents = self._create_backup_dir(workdir)
+        self._secure_backup_dir(backup_dir, created_parents)
         self._move(magi_dir, backup_dir)
         self._reharden(backup_dir, workdir)
         new_store = _RecordingKeyStore(self._store.guard)
@@ -405,6 +411,29 @@ class KeyRotation:
                 "the key rotation was not confirmed (nothing was changed)"
             )
 
+    @classmethod
+    def _refuse_links_in_source(cls, magi_dir: str) -> None:
+        """Refuse a source ``.magi/`` that holds a link or reparse point, before anything moves.
+
+        Across volumes ``shutil.move`` copies with ``symlinks=False`` and would
+        follow such a link into whatever it points at; the walk itself never
+        follows one (``_backup_entries``). O(n) in the entries of ``.magi/``.
+
+        Args:
+            magi_dir: ``<workdir>/.magi``.
+
+        Raises:
+            RotationFailedError: A link was found or an entry could not be
+                inspected; nothing was moved.
+        """
+        try:
+            cls._backup_entries(magi_dir)
+        except (_LinkInBackupError, OSError) as error:
+            raise RotationFailedError(
+                f"the {MAGI_DIR}/ at {magi_dir} cannot be rotated safely ({_reason(error)}): nothing was "
+                "moved; remove the link and retry"
+            ) from error
+
     def _read_old_key(self, workdir: str) -> MagiKey:
         """Read the exposed key, without verifying it, before anything moves.
 
@@ -425,17 +454,20 @@ class KeyRotation:
                 f"cannot read the current key at {key_file} ({_reason(error)}): nothing was moved"
             ) from error
 
-    def _create_backup_dir(self, workdir: str) -> str:
+    def _create_backup_dir(self, workdir: str) -> tuple[str, list[str]]:
         """Create ``<backup root>/<id>`` with owner-only mode, never reusing an existing one.
 
         ``<id>`` is ``<16 hex of the project path's sha256>-<UTC timestamp>``;
         a collision within the same second gets ``-2``, ``-3``, ... appended.
+        ``os.makedirs`` applies the mode to the leaf only, so the parents this
+        call creates are returned for the caller to restrict; parents that
+        already existed are never touched.
 
         Args:
             workdir: The project root, fingerprinted into the id.
 
         Returns:
-            The created directory.
+            ``(the created directory, the parents this call created, outermost first)``.
 
         Raises:
             RotationFailedError: The directory could not be created; nothing was moved.
@@ -447,19 +479,27 @@ class KeyRotation:
         candidate = next(
             path for path in itertools.chain([base], suffixed) if not os.path.lexists(path)
         )
+        created_parents: list[str] = []
+        parent = os.path.dirname(candidate)
+        while not os.path.lexists(parent) and os.path.dirname(parent) != parent:
+            created_parents.insert(0, parent)
+            parent = os.path.dirname(parent)
         try:
             os.makedirs(candidate, mode=DIR_MODE)
         except OSError as error:
             raise RotationFailedError(
                 f"cannot create the rotation backup {candidate} ({_reason(error)}): nothing was moved"
             ) from error
-        return candidate
+        return candidate, created_parents
 
-    def _secure_backup_dir(self, backup_dir: str) -> None:
-        """Restrict ``<backup root>/<id>`` to its owner and verify it, before anything goes into it.
+    def _secure_backup_dir(self, backup_dir: str, created_parents: list[str]) -> None:
+        """Restrict the parents the rotation created and ``<backup root>/<id>`` to the owner, then verify each.
+
+        Done before anything goes into the backup.
 
         Args:
             backup_dir: The directory just created by :meth:`_create_backup_dir`.
+            created_parents: The parents that call created, outermost first.
 
         Raises:
             RotationFailedError: Hardening or verification failed; the empty
@@ -468,8 +508,9 @@ class KeyRotation:
         """
         guard = self._store.guard
         try:
-            guard.harden(backup_dir, True)
-            guard.verify(backup_dir, True)
+            for directory in (*created_parents, backup_dir):
+                guard.harden(directory, True)
+                guard.verify(directory, True)
         except (KeyStoreError, OSError) as error:
             leftover = ""
             try:
