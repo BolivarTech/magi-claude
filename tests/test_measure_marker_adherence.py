@@ -852,3 +852,71 @@ def test_check_rejects_an_artifact_of_the_7x_series(tmp_path):
     report_path.write_text(json.dumps(legacy), encoding="utf-8")
     passed, message = mma.check_release_gate(report_path, mma._REPO_ROOT, mma._AGENTS_DIR)
     assert not passed and "schema" in message
+
+
+# --- magi-rs per-attempt tally (Loop 1, C1) ------------------------------------------
+
+_MAGI_RS_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "magi-rs-run-reports" / "extraction-failures.json"
+)
+
+
+def _copy_magi_rs_report(tmp_path: Path, mutate=None) -> Path:
+    """Copy the real-derived magi-rs report fixture into *tmp_path* (never edit it on disk)."""
+    report = json.loads(_MAGI_RS_FIXTURE.read_text(encoding="utf-8"))
+    if mutate is not None:
+        mutate(report)
+    path = tmp_path / mma.RUN_REPORT_FILENAME
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return path
+
+
+def test_magi_rs_marker_failures_are_folded_into_the_tally(tmp_path):
+    """A seat that failed on magi-rs attempt 1 must NOT be scored clean (real corpus shape)."""
+    path = _copy_magi_rs_report(tmp_path)
+
+    mma.measure_run_report(path)
+
+    assert mma.tally["melchior"]["missing_markers"] == 1
+    assert mma.tally["balthasar"]["invalid_json"] == 1
+    assert mma.tally["caspar"]["missing_markers"] == 0
+    assert mma.tally["melchior"][mma.OK_TALLY_KEY] == 1
+
+
+@pytest.mark.parametrize(
+    ("magi_rs_cause", "tool_cause"),
+    [
+        ("missing-markers", "missing_markers"),
+        ("unterminated", "unterminated_block"),
+        ("ambiguous", "ambiguous_markers"),
+        ("invalid-json", "invalid_json"),
+        ("malformed-object", "schema"),
+        ("schema", "schema"),
+        ("echoed-example", "echoed_example"),
+        ("agent-identity", "agent_identity"),
+    ],
+)
+def test_every_magi_rs_cause_maps_into_the_tool_vocabulary(tmp_path, magi_rs_cause, tool_cause):
+    """The closed mapping covers every label magi-core 4.2.0 serialises."""
+
+    def mutate(report):
+        report["magi_rs"]["extraction_failures"]["caspar"] = [
+            {"attempt": 1, "cause": magi_rs_cause, "model": "m"}
+        ]
+
+    mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate))
+
+    assert mma.tally["caspar"][tool_cause] == 1
+    assert tool_cause in mma.CAUSES
+
+
+def test_an_unknown_magi_rs_cause_is_rejected_not_dropped(tmp_path):
+    """An unmapped cause raises one line naming it: dropping it would score the seat clean."""
+
+    def mutate(report):
+        report["magi_rs"]["extraction_failures"]["caspar"] = [
+            {"attempt": 1, "cause": "brand-new-cause", "model": "m"}
+        ]
+
+    with pytest.raises(ValueError, match="brand-new-cause"):
+        mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate))
