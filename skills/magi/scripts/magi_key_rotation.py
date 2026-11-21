@@ -35,6 +35,38 @@ where it can be moved back.
 Side effects of :meth:`KeyRotation.rotate`: creates ``<backup root>/<id>/``,
 moves ``<workdir>/.magi`` into it, restricts the backup's permissions, and
 creates a new ``<workdir>/.magi`` through ``init``.
+
+Error paths (state left on disk, the clause of the one-line message, what the
+operator is told to do)::
+
+    stage        state left on disk                       message says           operator verb
+    -----------  ---------------------------------------  ---------------------  --------------
+    pre-move     nothing changed (empty backup dirs this   "nothing was moved"    fix / retry
+                 call created are removed, or named)
+    pre-move     a link in .magi/                          "remove the link"      remove, retry
+    pre-move     an entry that cannot be listed            "fix the cause"        fix, retry
+    move         source unchanged (partial copy removed)   "is unchanged"         retry
+    move         source gone, complete copy in the backup  "holds the complete    move back
+                                                           copy"
+    move         source partly gone, partial copy          "both copies were      compare, move
+                 kept as well                              kept"                  back
+    re-harden    old .magi/ in the backup, maybe exposed,  "may be exposed"       move back
+                 no new .magi/
+    init failed  InitLeftover.REMOVED: no new .magi/       "failed (...)"         move back
+    init failed  KEY_WRITTEN_KEPT / HARDENING_FAILED_KEPT: "was kept"             remove first
+                 the new .magi/ stays (key unprotected
+                 in the second case)
+    init failed  FOREIGN_KEPT: another process made the    "another process"      move aside
+                 .magi/ now there, left in place
+    init failed  HALF_MADE_KEPT: a half-made .magi/ that   "could not be          delete it
+                 could not be removed                      removed"
+    verify new   a .magi/ without a verified key of this   "does not hold a       inspect, move
+                 rotation, left as it is                   verified key"          aside, move back
+    verify new   this rotation's own key could not be      "created by this       fix the cause
+                 verified                                  rotation"              (never move back
+                                                                                  the old one)
+    names        new .magi/ in place, listing the old      "listing ... was       revoke every
+                 vault was interrupted                     interrupted"           key, store new
 """
 
 from __future__ import annotations
