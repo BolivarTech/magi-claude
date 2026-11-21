@@ -71,13 +71,15 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
 
     Returns:
         A message saying ``.magi/`` already exists (nothing was done), or what
-        ``magi-rs init`` printed (stdout, then stderr), relayed verbatim.
+        ``magi-rs init`` printed (stdout, then stderr), relayed verbatim except
+        that the new key is replaced by ``REDACTION_MARKER``.
 
     Raises:
         Any exception from the child launch or the key store: the ``.magi/`` this call
             created is removed first; if that removal fails the message says to delete it by hand.
-        OllamaInitError: ``magi-rs init`` exited non-zero. No key is persisted
-            and the ``.magi/`` this call saw appear is removed.
+        OllamaInitError: ``magi-rs init`` exited non-zero; the message is its
+            output with the new key redacted. No key is persisted and the
+            ``.magi/`` this call saw appear is removed.
         KeyHardeningError: The key could not be restricted to its owner. The
             ``.magi/`` this call created is removed.
         UnsafeBinDirectoryError, DigestMismatchError, VersionMismatchError,
@@ -110,7 +112,9 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
             env=EnvironmentPolicy.build(os.environ, passphrase=key),
             timeout=_INIT_TIMEOUT_SECONDS,
         )
-        output = "".join(part for part in (completed.stdout, completed.stderr) if part)
+        # The new key is in the child's environment: whatever it printed is redacted
+        # before it is returned or raised (BDD-22).
+        output = key.redact("".join(part for part in (completed.stdout, completed.stderr) if part))
         if completed.returncode != 0:
             raise OllamaInitError(output)
         store.persist(workdir, key)

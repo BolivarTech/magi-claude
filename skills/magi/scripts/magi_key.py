@@ -163,12 +163,42 @@ class MagiKey:
     __str__ = __repr__
 
     def redact(self, text: str) -> str:
-        """Replace every occurrence of the key in ``text`` with ``REDACTION_MARKER``."""
-        raise NotImplementedError
+        """Replace every occurrence of the key in ``text`` with ``REDACTION_MARKER``.
+
+        Scope: only the key's exact text is replaced. A transformed copy (split
+        across lines, re-encoded, with whitespace collapsed inside it) is not
+        recognised, so redact BEFORE any such transformation.
+
+        Args:
+            text: Text that may echo the key, e.g. a child's output.
+
+        Returns:
+            ``text`` with the key replaced; unchanged when it does not occur.
+
+        Complexity:
+            O(n) in the length of ``text``.
+
+        Example:
+            >>> MagiKey("c2VjcmV0").redact("got c2VjcmV0")
+            'got <redacted>'
+        """
+        return text.replace(self._value, REDACTION_MARKER)
 
     def redact_bytes(self, data: bytes) -> bytes:
-        """Replace every occurrence of the key in ``data`` with ``REDACTION_MARKER``."""
-        raise NotImplementedError
+        """Replace every occurrence of the key's UTF-8 bytes in ``data`` with ``REDACTION_MARKER``.
+
+        Same exact-bytes scope as :meth:`redact`.
+
+        Args:
+            data: Bytes that may echo the key, e.g. a child's captured stream.
+
+        Returns:
+            ``data`` with the key replaced; unchanged when it does not occur.
+
+        Complexity:
+            O(n) in the length of ``data``.
+        """
+        return data.replace(self._value.encode(KEY_ENCODING), REDACTION_MARKER.encode(KEY_ENCODING))
 
     def __eq__(self, other: object) -> bool:
         """Compare two keys by value, in constant time.
