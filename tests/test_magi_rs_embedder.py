@@ -154,4 +154,3 @@ def test_a_client_side_invalid_url_is_fatal_not_an_answer(tmp_path):
     with pytest.raises(EmbedderUnreachableError) as exc:
         EmbedderProbe(opener=opener).check(config)
     assert config in str(exc.value)
-

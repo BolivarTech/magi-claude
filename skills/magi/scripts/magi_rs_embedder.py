@@ -142,6 +142,11 @@ class EmbedderProbe:
                 response.read()
         except urllib.error.HTTPError as error:
             error.close()
+        except http.client.InvalidURL as error:
+            # A client-side URL error: the request never left, nobody answered.
+            raise EmbedderUnreachableError(
+                f"{config_path} declares an unusable embedder URL: {one_line(str(error))}"
+            ) from error
         except http.client.HTTPException:
             return  # someone answered, just not in valid HTTP (DIR-2)
         except (urllib.error.URLError, OSError) as error:
