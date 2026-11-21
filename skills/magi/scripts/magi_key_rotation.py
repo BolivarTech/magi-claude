@@ -187,6 +187,31 @@ class RotationReport:
     listing_detail: str = ""
 
 
+def magi_dir_problem(workdir: str) -> str | None:
+    """Say why ``workdir`` has no ``.magi/`` that can be rotated, or ``None`` when it has one.
+
+    The one precondition shared by the CLI (before it prompts or verifies the binary) and
+    :meth:`KeyRotation.rotate`: the entry must exist, be a real directory and not be a link.
+
+    Args:
+        workdir: The project root.
+
+    Returns:
+        A one-line message, or ``None`` when ``<workdir>/.magi`` is a real directory.
+    """
+    magi_dir = os.path.join(workdir, MAGI_DIR)
+    try:
+        if os.path.lexists(magi_dir):
+            refusal = link_refusal(magi_dir)
+            if refusal is not None:
+                return refusal
+        if not os.path.isdir(magi_dir):
+            return f"no {MAGI_DIR}/ directory in {workdir}: there is nothing to rotate"
+    except OSError as error:
+        return f"cannot inspect {magi_dir}: {one_line(str(error))}"
+    return None
+
+
 def rotation_backup_root() -> str:
     """Return the per-user directory that holds rotation backups, outside every working tree.
 
@@ -424,10 +449,11 @@ class KeyRotation:
                 f"the rotation backup root {self._backup_root} is not an absolute path: nothing was done; "
                 "point the state directory at an absolute path"
             )
+        problem = magi_dir_problem(workdir)
+        if problem is not None:
+            raise RotationFailedError(problem)
         self._authorise(workdir, assume_yes, is_tty, confirm)
         magi_dir = os.path.join(workdir, MAGI_DIR)
-        if not os.path.isdir(magi_dir):
-            raise RotationFailedError(f"no {MAGI_DIR}/ in {workdir}: there is nothing to rotate")
         if _is_within(self._backup_root, workdir):
             raise RotationFailedError(
                 f"the rotation backup root {self._backup_root} is inside the working tree {workdir}: "
