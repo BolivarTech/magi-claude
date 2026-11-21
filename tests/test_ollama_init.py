@@ -420,3 +420,22 @@ def test_an_unreadable_key_file_is_treated_as_another_process_key_and_kept(monke
     assert (tmp_path / ".magi" / ".secret" / "magi.key").exists() and "another process" in str(
         exc.value
     )
+
+
+def test_an_interrupt_propagates_as_itself_even_when_a_cleanup_note_is_needed(
+    monkeypatch, tmp_path, capsys
+):
+    # [n-1] Ctrl-C stays an interrupt; the note that the .magi/ could not be removed goes to stderr, one line.
+    def run(argv, **kwargs):
+        os.makedirs(os.path.join(argv[argv.index("-w") + 1], ".magi"))
+        raise KeyboardInterrupt
+
+    def boom(*args, **kwargs):
+        raise OSError("locked")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", run)
+    monkeypatch.setattr("ollama_init.shutil.rmtree", boom)
+    with pytest.raises(KeyboardInterrupt):
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    err = capsys.readouterr().err
+    assert "delete it by hand" in err and err.count("\n") == 1

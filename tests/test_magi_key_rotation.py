@@ -1064,3 +1064,72 @@ def test_a_relative_backup_root_is_refused_before_anything_happens(tmp_path):
         )
     assert asked == [] and (work / ".magi" / "magi.toml").read_text() == "old"
     assert "absolute" in str(exc.value)
+
+
+def _real_init_whose_cleanup_fails(tmp_path, monkeypatch, work, failure):
+    """The REAL run_ollama_init: the child succeeds, hardening the new key raises ``failure``, and neither
+    the key's discard nor the removal of the new .magi/ succeeds (so the key stays on disk)."""
+    new_key_file = os.path.normcase(os.path.join(str(work), ".magi", ".secret", "magi.key"))
+    new_magi_dir = os.path.normcase(os.path.join(str(work), ".magi"))
+
+    def _run(argv, **kwargs):
+        os.makedirs(os.path.join(argv[argv.index("-w") + 1], ".magi"))
+        return SimpleNamespace(returncode=0, stdout="initialised", stderr="")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", _run)
+    monkeypatch.setattr(
+        "ollama_init.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(
+            ensure=lambda: "/bin/magi-rs", verify=lambda: "/bin/magi-rs"
+        ),
+    )
+    real_remove, real_rmtree = os.remove, shutil.rmtree
+
+    def _remove(path, *args, **kwargs):
+        if os.path.normcase(str(path)) == new_key_file:
+            raise OSError("file in use")
+        return real_remove(path, *args, **kwargs)
+
+    def _rmtree(path, *args, **kwargs):
+        if os.path.normcase(str(path)) == new_magi_dir:
+            raise OSError("directory in use")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr("magi_key.os.remove", _remove)
+    monkeypatch.setattr("ollama_init.shutil.rmtree", _rmtree)
+
+    class _FailingNewKeyGuard(_NoopGuard):
+        def harden(self, path, directory):
+            if os.path.normcase(path) == new_key_file:
+                raise failure
+
+    return _FailingNewKeyGuard()
+
+
+def test_a_hardening_failure_inside_the_real_init_keeps_the_hardening_wording(
+    tmp_path, monkeypatch
+):
+    # [n-1] run_ollama_init folds its cleanup note into an OllamaInitError chained from the KeyHardeningError:
+    # the rotation still says the key may be readable by others.
+    work = _project(tmp_path)
+    guard = _real_init_whose_cleanup_fails(
+        tmp_path, monkeypatch, work, KeyHardeningError("cannot harden")
+    )
+    rotation, _ = _rotation(tmp_path, init=run_ollama_init, guard=guard)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert "may be readable by others" in message and "interrupted" not in message
+
+
+def test_an_interrupt_inside_the_real_init_reaches_the_rotation_as_an_interrupt(
+    tmp_path, monkeypatch
+):
+    # [n-1] a KeyboardInterrupt is never turned into OllamaInitError on the way out of run_ollama_init.
+    work = _project(tmp_path)
+    guard = _real_init_whose_cleanup_fails(tmp_path, monkeypatch, work, KeyboardInterrupt())
+    rotation, _ = _rotation(tmp_path, init=run_ollama_init, guard=guard)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert isinstance(exc.value.__cause__, KeyboardInterrupt)
+    assert "interrupted after its key was written" in str(exc.value)
