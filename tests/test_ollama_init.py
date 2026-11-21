@@ -559,3 +559,20 @@ def test_a_kept_magi_dir_holding_this_calls_key_reports_why(monkeypatch, tmp_pat
     with pytest.raises(OllamaInitError) as exc:
         run_ollama_init(str(tmp_path), key_store=_WritesThenRaises(error))
     assert exc.value.leftover is leftover
+
+
+def test_an_empty_key_file_left_by_a_failed_removal_is_half_made_not_a_written_key(
+    monkeypatch, tmp_path
+):
+    # [n-2] an empty key file holds no key: the kept .magi/ is half made, never "this call's key was written".
+    def run(argv, **kwargs):
+        secret = os.path.join(argv[argv.index("-w") + 1], ".magi", ".secret")
+        os.makedirs(secret)
+        open(os.path.join(secret, "magi.key"), "w").close()
+        return _Completed(returncode=1, stdout="", stderr="error: init died")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", run)
+    _rmtree_fails(monkeypatch)
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    assert exc.value.leftover is InitLeftover.HALF_MADE_KEPT
