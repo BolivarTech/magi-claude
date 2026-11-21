@@ -38,7 +38,7 @@ from magi_rs_trio import (
     _stderr_tail,
     redact_captured,
 )
-from subprocess_utils import PROC_WAIT_REAP_TIMEOUT
+from subprocess_utils import reap_and_drain_stderr
 from trio_executor import TrioExecutor
 
 __all__ = [
@@ -269,8 +269,11 @@ class MagiRsCodeReview(TrioExecutor):
             await asyncio.wait_for(_finish(), timeout=self._timeout + HISTORY_WINDOW_SECONDS)
         except (asyncio.TimeoutError, TimeoutError):
             overran = True
-            process.kill()  # only past the history window: PM-S-2
-            await asyncio.wait_for(process.wait(), timeout=PROC_WAIT_REAP_TIMEOUT)
+            # Only past the history window (PM-S-2). The helper kills the whole
+            # tree on Windows (git children of magi-rs can hold the pipes), reaps
+            # with a bounded wait that warns instead of raising, and hands back
+            # what stderr still held.
+            err.extend(await reap_and_drain_stderr(process))
             _emit(on_state, _TRIO_NODE, "timeout")
         stdout, stderr = (
             redact_captured(self._key, bytes(out)),
