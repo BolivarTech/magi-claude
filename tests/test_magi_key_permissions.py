@@ -534,3 +534,19 @@ def test_powershell_gets_the_allowlist_plus_only_its_one_variable(monkeypatch):
     expected = EnvironmentPolicy.build(os.environ)
     expected["MAGI_ACL_PATH"] = "k"
     assert env == expected
+
+
+def test_a_guard_asks_whoami_once_however_many_paths_it_checks():
+    # [I-b] the SID does not change within a process: one whoami per guard, not per harden/verify.
+    calls = []
+
+    def runner(argv):
+        calls.append(argv[0])
+        return _fixture("whoami-nh.txt") if argv[0].lower().endswith("whoami.exe") else ""
+
+    guard = WindowsPermissionGuard(runner=runner)
+    guard.read_sddl = lambda path: f"D:PAI(A;;FA;;;{ME})"
+    guard.harden("k", directory=False)
+    guard.verify("k", directory=False)
+    guard.verify("d", directory=True)
+    assert sum(1 for tool in calls if tool.lower().endswith("whoami.exe")) == 1
