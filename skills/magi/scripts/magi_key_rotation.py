@@ -43,7 +43,6 @@ import hashlib
 import itertools
 import os
 import shutil
-import stat
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -57,6 +56,7 @@ from magi_key import (
     KeyStoreError,
     MagiKey,
 )
+from magi_key_permissions import is_link
 from magi_rs_vault import VAULT_KEY_NAMES
 from ollama_init import InitLeftover, MagiDirExistsError, OllamaInitError
 from one_line import one_line
@@ -198,25 +198,6 @@ def _is_within(path: str, parent: str) -> bool:
         return os.path.commonpath([candidate, root]) == root
     except ValueError:
         return False
-
-
-def _is_link(path: str) -> bool:
-    """Tell whether ``path`` itself is a symbolic link or a Windows reparse point (a junction included).
-
-    Decided from ``os.lstat``, so the link is never followed.
-
-    Args:
-        path: The entry to inspect.
-
-    Returns:
-        True for a link or reparse point.
-
-    Raises:
-        OSError: The entry cannot be inspected.
-    """
-    status = os.lstat(path)
-    attributes = getattr(status, "st_file_attributes", 0)
-    return stat.S_ISLNK(status.st_mode) or bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _raise_walk_error(error: OSError) -> None:
@@ -690,7 +671,7 @@ class KeyRotation:
         backup_dir = os.path.dirname(magi_dir)
 
         def _refuse_link(path: str) -> None:
-            if _is_link(path):
+            if is_link(path):
                 raise _LinkInBackupError(
                     f"{os.path.relpath(path, backup_dir)} is a link or reparse point and was not followed"
                 )

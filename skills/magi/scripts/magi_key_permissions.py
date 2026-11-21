@@ -59,6 +59,7 @@ __all__ = [
     "PosixPermissionGuard",
     "WindowsPermissionGuard",
     "default_key_store",
+    "is_link",
 ]
 
 _GROUP_AND_OTHER_BITS = stat.S_IRWXG | stat.S_IRWXO
@@ -434,6 +435,45 @@ def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
     return _PROTECTED_FLAG in flags, aces
 
 
+def is_link(path: str) -> bool:
+    """Tell whether ``path`` itself is a symbolic link or a Windows reparse point (a junction included).
+
+    Decided from ``os.lstat``, so the link is never followed.
+
+    Args:
+        path: The entry to inspect.
+
+    Returns:
+        True for a link or reparse point.
+
+    Raises:
+        OSError: The entry cannot be inspected.
+    """
+    status = os.lstat(path)
+    attributes = getattr(status, "st_file_attributes", 0)
+    return stat.S_ISLNK(status.st_mode) or bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _refuse_link(path: str) -> None:
+    """Refuse a key path that is itself a link: its permissions would be its target's.
+
+    Args:
+        path: The key directory or key file about to be verified.
+
+    Raises:
+        KeyUnverifiableError: ``path`` is a link or reparse point, or cannot be inspected
+            (an absent path is left to the caller's own permission read).
+    """
+    try:
+        linked = is_link(path)
+    except FileNotFoundError:
+        return  # the permission read that follows reports an absent path with its own message
+    except OSError as error:
+        raise KeyUnverifiableError(f"cannot read the permissions of {path}: {error}") from error
+    if linked:
+        raise KeyUnverifiableError(f"{path} is a link: replace it with a real file/directory")
+
+
 class PermissionGuard(ABC):
     """Restricts and verifies owner-only permissions on the key and its directory.
 
@@ -508,13 +548,14 @@ class PosixPermissionGuard(PermissionGuard):
             directory: True when ``path`` is a directory (same rule for both).
 
         Raises:
-            KeyUnverifiableError: ``path`` cannot be inspected, this is Windows,
+            KeyUnverifiableError: ``path`` is a link, cannot be inspected, this is Windows,
                 or another user owns it (a UID mismatch, e.g. a container mount
                 or a file created under sudo, is not proof of exposure).
             KeyExposedError: A group or other bit is set.
         """
         if sys.platform == "win32":
             raise KeyUnverifiableError("POSIX permissions cannot be verified on Windows")
+        _refuse_link(path)
         try:
             status = os.stat(path)
         except OSError as error:
@@ -713,8 +754,8 @@ class WindowsPermissionGuard(PermissionGuard):
             directory: True when ``path`` is a directory (same rule for both).
 
         Raises:
-            KeyUnverifiableError: The DACL, the current SID or an alias could
-                not be read or parsed; or every foreign entry is a deny entry
+            KeyUnverifiableError: ``path`` is a link or reparse point; the DACL, the
+                current SID or an alias could not be read or parsed; or every foreign entry is a deny entry
                 (it takes access away, so it is not an exposure; remove it).
             KeyExposedError: The DACL inherits, or holds a non-deny entry for
                 another SID. The message is one line naming the foreign SIDs
@@ -723,6 +764,7 @@ class WindowsPermissionGuard(PermissionGuard):
         Any foreign ACE fails verification whatever its type: the type only
         chooses between the two failures and their wording.
         """
+        _refuse_link(path)
         try:
             sid = self.current_sid()
             protected, aces = _parse_dacl_aces(self.read_sddl(path))
