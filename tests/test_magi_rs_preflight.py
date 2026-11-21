@@ -83,3 +83,27 @@ def test_an_uninitialised_project_stops_before_the_key_is_read(tmp_path):
     with pytest.raises(ProjectNotInitialisedError):
         ProjectPreflight.require_ready(str(tmp_path), _Recorder(order, "key"))
     assert order == []
+
+
+def _names_the_whole_regeneration(message):
+    """REQ-12's three steps: move .magi/ aside, --ollama-init, reload each API key with --ollama-vault-set."""
+    return (
+        "move the existing .magi/ aside" in message
+        and "--ollama-init" in message
+        and "--ollama-vault-set" in message
+    )
+
+
+def test_a_magi_dir_without_its_config_names_the_whole_regeneration(tmp_path):
+    # [S3] --ollama-init refuses an existing .magi/: "run --ollama-init" alone would send the operator in a circle.
+    (tmp_path / ".magi").mkdir()
+    with pytest.raises(ProjectNotInitialisedError) as exc:
+        ProjectPreflight.require_initialised(str(tmp_path))
+    assert _names_the_whole_regeneration(str(exc.value))
+
+
+def test_a_project_without_any_magi_dir_is_told_only_to_run_init(tmp_path):
+    with pytest.raises(ProjectNotInitialisedError) as exc:
+        ProjectPreflight.require_initialised(str(tmp_path))
+    message = str(exc.value)
+    assert "--ollama-init" in message and "move the existing" not in message

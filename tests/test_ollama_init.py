@@ -465,3 +465,25 @@ def test_a_hardening_failure_reaches_the_init_fatal_line_with_the_tool_and_its_e
     err = capsys.readouterr().err
     assert exc.value.code == 1 and err.startswith("[FATAL]") and err.count("\n") == 1
     assert "icacls.exe" in err and "exit code 5" in err and "Access is denied." in err
+
+
+def _names_the_whole_regeneration(message):
+    """REQ-12's three steps: move .magi/ aside, --ollama-init, reload each API key with --ollama-vault-set."""
+    return (
+        "move the existing .magi/ aside" in message
+        and "--ollama-init" in message
+        and "--ollama-vault-set" in message
+    )
+
+
+def test_an_existing_magi_dir_names_the_whole_regeneration(tmp_path):
+    # [S3] the message of MagiDirExistsError reuses the one recovery procedure.
+    (tmp_path / ".magi").mkdir()
+    with pytest.raises(MagiDirExistsError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    message = str(exc.value)
+    assert (
+        "already exists" in message
+        and "untouched" in message
+        and _names_the_whole_regeneration(message)
+    )

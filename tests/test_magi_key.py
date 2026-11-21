@@ -337,3 +337,27 @@ def test_a_key_is_never_usable_as_a_dict_key_or_set_member():
     # secret is never hashed, so it cannot become a dict key or a set member by accident.
     with pytest.raises(TypeError):
         hash(MagiKey("c2VjcmV0"))
+
+
+def _names_the_whole_regeneration(message):
+    """REQ-12's three steps: move .magi/ aside, --ollama-init, reload each API key with --ollama-vault-set."""
+    return (
+        "move the existing .magi/ aside" in message
+        and "--ollama-init" in message
+        and "--ollama-vault-set" in message
+    )
+
+
+def test_a_missing_key_names_the_whole_regeneration(tmp_path):
+    # [S3] REQ-12's third step (reload each API key) is part of the recovery.
+    class _Guard:
+        def harden(self, path, directory):
+            pass
+
+        def verify(self, path, directory):
+            pass
+
+    (tmp_path / ".magi" / ".secret").mkdir(parents=True)
+    with pytest.raises(KeyMissingError) as exc:
+        KeyStore(_Guard()).load(str(tmp_path))
+    assert _names_the_whole_regeneration(str(exc.value))
