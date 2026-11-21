@@ -49,7 +49,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from magi_key import DIR_MODE, KEY_DIR_PARTS, KeyStore, KeyStoreError, MagiKey
+from magi_key import DIR_MODE, KEY_DIR_PARTS, KeyGuard, KeyStore, KeyStoreError, MagiKey
 from magi_rs_vault import VAULT_KEY_NAMES
 from ollama_init import MagiDirExistsError
 from one_line import one_line
@@ -221,84 +221,36 @@ def _reason(error: BaseException) -> str:
 
 
 class _RecordingKeyStore(KeyStore):
-    """The store handed to ``init``: delegates everything and remembers the keys it was asked to persist.
+    """The store handed to ``init``: a ``KeyStore`` that remembers the keys it was asked to persist.
 
     Lets the rotation tell its own just-written key from one another process
-    wrote, when ``init`` is interrupted after the key reached the disk.
+    wrote, after ``init`` failed or was interrupted.
     """
 
-    def __init__(self, inner: KeyStore) -> None:
-        """Wrap ``inner``.
+    def __init__(self, guard: KeyGuard) -> None:
+        """Bind the store to the rotation's permission guard.
 
         Args:
-            inner: The rotation's store; every call is delegated to it.
+            guard: The guard of the rotation's store.
         """
-        super().__init__(inner.guard)
-        self._inner = inner
+        super().__init__(guard)
         self._written: list[MagiKey] = []
 
-    def key_path(self, workdir: str) -> str:
-        """Delegate to the wrapped store.
-
-        Args:
-            workdir: The project working directory.
-
-        Returns:
-            The wrapped store's key path.
-        """
-        return self._inner.key_path(workdir)
-
-    def new_key(self) -> MagiKey:
-        """Delegate to the wrapped store.
-
-        Returns:
-            A new key from the wrapped store.
-        """
-        return self._inner.new_key()
-
     def persist(self, workdir: str, key: MagiKey) -> str:
-        """Record ``key`` (before the write, so a write that fails halfway still counts), then delegate.
+        """Record ``key`` (before the write, so a write that fails halfway still counts), then persist it.
 
         Args:
             workdir: The project working directory.
             key: The key to write.
 
         Returns:
-            The wrapped store's result.
+            The path of the key file written.
 
         Raises:
-            Whatever the wrapped store's ``persist`` raises.
+            Whatever ``KeyStore.persist`` raises.
         """
         self._written.append(key)
-        return self._inner.persist(workdir, key)
-
-    def load(self, workdir: str) -> MagiKey:
-        """Delegate to the wrapped store.
-
-        Args:
-            workdir: The project working directory.
-
-        Returns:
-            The wrapped store's verified key.
-
-        Raises:
-            Whatever the wrapped store's ``load`` raises.
-        """
-        return self._inner.load(workdir)
-
-    def read_unverified(self, key_file: str) -> MagiKey:
-        """Delegate to the wrapped store.
-
-        Args:
-            key_file: The key file path.
-
-        Returns:
-            The wrapped store's unverified read.
-
-        Raises:
-            Whatever the wrapped store's ``read_unverified`` raises.
-        """
-        return self._inner.read_unverified(key_file)
+        return super().persist(workdir, key)
 
     def holds_written_key(self, workdir: str) -> bool:
         """Tell whether the key now at ``workdir`` is one this store was asked to persist.
@@ -311,7 +263,7 @@ class _RecordingKeyStore(KeyStore):
             absent, empty or unreadable file is not this store's.
         """
         try:
-            current = self._inner.read_unverified(self._inner.key_path(workdir))
+            current = self.read_unverified(self.key_path(workdir))
         except (KeyStoreError, OSError):
             return False
         return any(current == key for key in self._written)
@@ -395,7 +347,8 @@ class KeyRotation:
         self._secure_backup_dir(backup_dir)
         self._move(magi_dir, backup_dir)
         self._reharden(backup_dir, workdir)
-        self._create_new(workdir, backup_dir, old_key)
+        new_store = _RecordingKeyStore(self._store.guard)
+        self._create_new(workdir, backup_dir, old_key, new_store)
         self._verify_new(workdir, backup_dir, old_key)
         names, from_vault = self._names_to_revoke(workdir, backup_dir, old_key)
         return RotationReport(backup_dir, names, from_vault)
@@ -644,7 +597,9 @@ class KeyRotation:
                 entries.append((path, False))
         return entries
 
-    def _create_new(self, workdir: str, backup_dir: str, old_key: MagiKey) -> None:
+    def _create_new(
+        self, workdir: str, backup_dir: str, old_key: MagiKey, store: _RecordingKeyStore
+    ) -> None:
         """Create the new ``.magi/``; on any failure, leave none of this rotation's at the root.
 
         A ``.magi/`` that ``init`` found already there (``MagiDirExistsError``),
@@ -657,13 +612,13 @@ class KeyRotation:
             workdir: The project root.
             backup_dir: ``<backup root>/<id>``, named in the recovery instruction.
             old_key: Redacted from the failure detail.
+            store: The store handed to ``init``; it records the keys persisted.
 
         Raises:
             RotationFailedError: ``init`` failed with any exception,
                 ``KeyboardInterrupt`` and ``SystemExit`` included.
         """
         magi_dir = os.path.join(workdir, MAGI_DIR)
-        store = _RecordingKeyStore(self._store)
         try:
             self._init(workdir, store)
         except MagiDirExistsError as error:
