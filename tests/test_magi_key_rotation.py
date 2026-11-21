@@ -1748,3 +1748,26 @@ def test_a_backup_root_inside_the_project_is_refused_before_the_confirmation_pro
     with pytest.raises(RotationFailedError) as exc:
         rotation.rotate(str(work), assume_yes=False, is_tty=True, confirm=_asked)
     assert "is inside the working tree" in str(exc.value)
+
+
+def test_a_partial_copy_that_cannot_be_removed_also_names_the_parents_left_in_place(
+    tmp_path, monkeypatch
+):
+    # [O1] the branch that keeps a partial copy must not leave the created parents unnamed.
+    work = _project(tmp_path)
+
+    def _move(src, dst):
+        raise OSError("rename refused")
+
+    def _rmtree(path, *args, **kwargs):
+        raise OSError("in use")
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move)
+    monkeypatch.setattr("magi_key_rotation.shutil.rmtree", _rmtree)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert "a partial copy was left in" in message
+    assert "left in place" in message and str(tmp_path / "rotated") in message
+    assert "\n" not in message.strip()
