@@ -484,6 +484,30 @@ class KeyRotation:
                 f"cannot read the current key at {key_file} ({self._reason(error)}): nothing was moved"
             ) from error
 
+    @staticmethod
+    def _remove_created(created: list[str]) -> str:
+        """Remove the empty directories a failed backup creation made, innermost first, best effort.
+
+        Args:
+            created: The directories the call created, outermost first; one that
+                does not exist is skipped.
+
+        Returns:
+            An empty string when all were removed; otherwise a clause naming
+            those that could not be (non-empty or in use) so the operator can delete them.
+        """
+        stuck = []
+        for directory in reversed(created):
+            try:
+                os.rmdir(directory)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                stuck.append(directory)
+        if not stuck:
+            return ""
+        return f" (these empty directories could not be removed, delete them: {', '.join(stuck)})"
+
     def _create_backup_dir(self, workdir: str) -> tuple[str, list[str]]:
         """Create ``<backup root>/<id>`` with owner-only mode, never reusing an existing one.
 
@@ -500,7 +524,9 @@ class KeyRotation:
             ``(the created directory, the parents this call created, outermost first)``.
 
         Raises:
-            RotationFailedError: The directory could not be created; nothing was moved.
+            RotationFailedError: The directory could not be created, or creation was
+                interrupted; the empty directories this call made are removed (any
+                that cannot be are named) and nothing was moved.
         """
         fingerprint = hashlib.sha256(_canonical(workdir).encode("utf-8")).hexdigest()
         stamp = self._clock().astimezone(timezone.utc).strftime(_TIMESTAMP_FORMAT)
@@ -516,9 +542,11 @@ class KeyRotation:
             parent = os.path.dirname(parent)
         try:
             os.makedirs(candidate, mode=DIR_MODE)
-        except OSError as error:
+        except BaseException as error:  # noqa: BLE001 - before the move, even an interrupt must end described
+            leftover = self._remove_created([*created_parents, candidate])
             raise RotationFailedError(
-                f"cannot create the rotation backup {candidate} ({self._reason(error)}): nothing was moved"
+                f"cannot create the rotation backup {candidate} ({self._reason(error)}){leftover}: "
+                "nothing was moved"
             ) from error
         return candidate, created_parents
 
@@ -534,8 +562,8 @@ class KeyRotation:
         Raises:
             RotationFailedError: Hardening or verification failed, or was
                 interrupted (``KeyboardInterrupt``, ``SystemExit``); the empty
-                directory is removed (or the message says it was left) and
-                nothing was moved.
+                directories this rotation created are removed (any that cannot be
+                are named) and nothing was moved.
         """
         guard = self._store.guard
         directory = backup_dir
@@ -544,11 +572,7 @@ class KeyRotation:
                 guard.harden(directory, True)
                 guard.verify(directory, True)
         except BaseException as error:  # noqa: BLE001 - before the move, even an interrupt must end described
-            leftover = ""
-            try:
-                shutil.rmtree(backup_dir)
-            except OSError:
-                leftover = f" (the empty {backup_dir} could not be removed: delete it)"
+            leftover = self._remove_created([*created_parents, backup_dir])
             raise RotationFailedError(
                 f"cannot restrict the rotation backup directory {directory} to its owner "
                 f"({self._reason(error)}){leftover}: nothing was moved"
