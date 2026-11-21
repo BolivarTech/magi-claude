@@ -6054,6 +6054,16 @@ def test_a_complete_review_is_not_degraded_by_the_lost_context_checks(monkeypatc
     assert "degraded_causes" not in report
 
 
+def test_the_native_review_never_claims_a_definite_unverified_context_flag(monkeypatch, tmp_path):
+    # Loop 1 m1: the code-review envelope carries no ran_unmeasured, so the marker is
+    # unknown (null), never a definite false.
+    report = _run_main_with_fake_review(
+        monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
+    )
+    assert "gate_ran_on_unverified_context" in report["magi_rs"]
+    assert report["magi_rs"]["gate_ran_on_unverified_context"] is None
+
+
 def test_an_agent_that_breaks_the_seven_key_contract_degrades_the_run(monkeypatch, tmp_path):
     # [CP2-M8] BDD-08: the seven-key validation runs on the code-review path too.
     envelope = json.loads(_cr_payload())
