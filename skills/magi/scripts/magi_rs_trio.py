@@ -29,7 +29,7 @@ from magi_rs_bootstrap import (
     VersionMismatchError,
     verified_executable,
 )
-from magi_rs_env import EnvironmentPolicy
+from magi_rs_env import PASSPHRASE_VARIABLE, EnvironmentPolicy
 from magi_rs_paths import PluginRootError
 from magi_rs_pin import Pin, PinFormatError, UnsupportedPlatformError
 from magi_rs_preflight import ProjectNotInitialisedError, ProjectPreflight
@@ -554,9 +554,13 @@ class MagiRsTrio(TrioExecutor):
 
         Returns:
             One sentence naming the allowlist as a suspect and listing the
-            parent variables (names only, never values) that did not travel.
+            parent variables (names only, never values) that did not travel;
+            ``MAGI_PASSPHRASE`` is excluded because the plugin injects it.
         """
-        withheld = EnvironmentPolicy.withheld(os.environ)
+        # The plugin injects MAGI_PASSPHRASE itself, so it is never "withheld" from the child.
+        withheld = [
+            name for name in EnvironmentPolicy.withheld(os.environ) if name != PASSPHRASE_VARIABLE
+        ]
         return (
             "The child ran with an allowlisted environment (see magi_rs_env.py); if the "
             "failure looks like a missing certificate, proxy or host, the allowlist is "
