@@ -498,7 +498,7 @@ class KeyRotation:
             advice = (
                 "remove the link and retry"
                 if isinstance(error, _LinkInBackupError)
-                else f"fix the cause ({self._reason(error)}) and retry"
+                else "fix the cause and retry"
             )
             raise RotationFailedError(
                 f"the {MAGI_DIR}/ at {magi_dir} cannot be rotated safely ({self._reason(error)}): nothing was "

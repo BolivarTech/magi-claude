@@ -1554,7 +1554,8 @@ def test_an_unlistable_source_entry_is_not_told_to_remove_a_link(tmp_path, monke
     with pytest.raises(RotationFailedError) as exc:
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     message = str(exc.value)
-    assert "fix the cause (denied) and retry" in message and "remove the link" not in message
+    assert "(denied): nothing was moved; fix the cause and retry" in message
+    assert message.count("denied") == 1 and "remove the link" not in message
     assert "nothing was moved" in message and "\n" not in message.strip()
 
 

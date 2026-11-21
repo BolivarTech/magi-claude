@@ -426,7 +426,7 @@ class MagiRsTrio(TrioExecutor):
             DownloadError, UnsupportedPlatformError: The binary could not be
                 obtained or did not verify. It is NOT executed.
             ProjectNotInitialisedError: No ``.magi/magi.toml`` under the
-                workdir. Names ``/magi --ollama-init``; never initialises.
+                workdir. Names ``run_magi.py --ollama-init``; never initialises.
             KeyMissingError, KeyUnverifiableError, KeyExposedError: The key is
                 absent, its permissions could not be verified, or they are
                 loosened (not owner-only). Fail-closed.
