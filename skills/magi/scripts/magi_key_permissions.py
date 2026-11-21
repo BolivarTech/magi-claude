@@ -47,6 +47,7 @@ from magi_key import (
     KeyUnverifiableError,
 )
 from magi_rs_env import EnvironmentPolicy
+from one_line import one_line
 
 __all__ = [
     "DIR_MODE",
@@ -148,7 +149,7 @@ def _stderr_excerpt(error: subprocess.SubprocessError) -> str:
     stderr = getattr(error, "stderr", None) or ""
     if isinstance(stderr, bytes):
         stderr = stderr.decode(errors="replace")
-    return " ".join(stderr.split())[:_STDERR_EXCERPT_CHARS]
+    return one_line(stderr)[:_STDERR_EXCERPT_CHARS]
 
 
 def _tool_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:

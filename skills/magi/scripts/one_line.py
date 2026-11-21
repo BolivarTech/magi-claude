@@ -15,4 +15,4 @@ def one_line(text: str) -> str:
     Returns:
         ``text`` on a single line, without leading or trailing whitespace.
     """
-    raise NotImplementedError
+    return " ".join(text.split())

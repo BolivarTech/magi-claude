@@ -52,6 +52,7 @@ from datetime import datetime, timezone
 from magi_key import DIR_MODE, KEY_DIR_PARTS, KeyStore, KeyStoreError, MagiKey
 from magi_rs_vault import VAULT_KEY_NAMES
 from ollama_init import MagiDirExistsError
+from one_line import one_line
 
 MAGI_DIR = KEY_DIR_PARTS[0]
 """The project directory that a rotation moves aside and recreates."""
@@ -205,18 +206,6 @@ def _raise_walk_error(error: OSError) -> None:
     raise error
 
 
-def _one_line(text: str) -> str:
-    """Collapse every run of whitespace, newlines included, into one space.
-
-    Args:
-        text: Any message.
-
-    Returns:
-        ``text`` on a single line.
-    """
-    return " ".join(text.split())
-
-
 def _reason(error: BaseException) -> str:
     """Return the one-line, key-free reason of a guard or filesystem failure.
 
@@ -228,7 +217,7 @@ def _reason(error: BaseException) -> str:
     Returns:
         Its message on one line, or its class name when the message is empty.
     """
-    return _one_line(str(error)) or type(error).__name__
+    return one_line(str(error)) or type(error).__name__
 
 
 class KeyRotation:
@@ -362,7 +351,7 @@ class KeyRotation:
             return self._store.read_unverified(key_file)
         except (KeyStoreError, OSError) as error:
             raise RotationFailedError(
-                f"cannot read the current key at {key_file} ({_one_line(str(error))}): nothing was moved"
+                f"cannot read the current key at {key_file} ({one_line(str(error))}): nothing was moved"
             ) from error
 
     def _create_backup_dir(self, workdir: str) -> str:
@@ -391,7 +380,7 @@ class KeyRotation:
             os.makedirs(candidate, mode=DIR_MODE)
         except OSError as error:
             raise RotationFailedError(
-                f"cannot create the rotation backup {candidate} ({_one_line(str(error))}): nothing was moved"
+                f"cannot create the rotation backup {candidate} ({one_line(str(error))}): nothing was moved"
             ) from error
         return candidate
 
@@ -465,7 +454,7 @@ class KeyRotation:
         try:
             shutil.move(magi_dir, target)
         except OSError as error:
-            reason = _one_line(str(error))
+            reason = one_line(str(error))
             if not cls._source_still_complete(magi_dir, target):
                 raise RotationFailedError(
                     f"moving {magi_dir} to {target} failed ({reason}) after files were removed from the source: "
@@ -585,7 +574,7 @@ class KeyRotation:
             ) from error
         except BaseException as error:  # noqa: BLE001 - any init failure, an interrupt included, ends in the described state
             raw = " ".join([str(error), *getattr(error, "__notes__", [])])
-            detail = _one_line(old_key.redact(raw)) or type(error).__name__
+            detail = one_line(old_key.redact(raw)) or type(error).__name__
             leftover = ""
             if os.path.lexists(self._store.key_path(workdir)):
                 leftover = (

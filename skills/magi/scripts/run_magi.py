@@ -85,6 +85,7 @@ from magi_key_rotation import (  # noqa: E402
 )
 from magi_rs_vault import VAULT_KEY_NAMES, VaultClient  # noqa: E402
 from ollama_init import MagiDirExistsError, run_ollama_init  # noqa: E402
+from one_line import one_line  # noqa: E402
 from run_lock import (  # noqa: E402
     refresh_lock,
     remove_lock,
@@ -1361,7 +1362,7 @@ def _render_fatal(exc: BaseException) -> str:
         ``"[FATAL] <message> <notes...>"`` on a single line, without a newline.
     """
     detail = " ".join([str(exc), *getattr(exc, "__notes__", [])])
-    return f"[FATAL] {' '.join(detail.split())}"
+    return f"[FATAL] {one_line(detail)}"
 
 
 def check_prompts(agents_dir: str) -> None:
@@ -2210,7 +2211,7 @@ def vault_set_main(argv: list[str], stdin: IO[str], is_tty: bool) -> int:
             return 1
         VaultClient(executable, workdir, key).set(name, value)
     except ValidationError as exc:
-        print(f"ERROR: {' '.join(str(exc).split())}", file=sys.stderr)
+        print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 - every key/bootstrap error is fail-closed here
         print(_render_fatal(exc), file=sys.stderr)
@@ -2257,7 +2258,7 @@ def rotate_main(argv: list[str], is_tty: bool) -> int:
     try:
         report = rotation.rotate(os.getcwd(), assume_yes=argv == [_YES_FLAG], is_tty=is_tty)
     except (RotationNotAuthorisedError, RotationFailedError) as exc:
-        print(f"ERROR: {' '.join(str(exc).split())}", file=sys.stderr)
+        print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
         return 1
     print(
         f"Key rotated. The old .magi/ is in {report.backup_dir}: destroy it once you no longer need it."

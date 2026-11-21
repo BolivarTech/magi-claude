@@ -18,6 +18,7 @@ from collections.abc import Callable
 
 from magi_key import REDACTION_MARKER, MagiKey
 from magi_rs_env import EnvironmentPolicy
+from one_line import one_line
 from validate import ValidationError
 
 VAULT_KEY_NAMES: tuple[str, ...] = (
@@ -178,7 +179,7 @@ class VaultClient:
         """
         # Redact BEFORE collapsing whitespace: collapsing can alter a secret that contains
         # runs of whitespace so that it no longer matches; the second pass covers the rest.
-        detail = " ".join(self._redact(completed.stderr or "", secrets).split())
+        detail = one_line(self._redact(completed.stderr or "", secrets))
         return self._redact(f"{label} failed (exit {completed.returncode}): {detail}", secrets)
 
     def _redact(self, text: str, secrets: tuple[str, ...]) -> str:

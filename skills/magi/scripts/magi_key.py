@@ -23,6 +23,8 @@ import os
 import secrets
 from typing import Protocol
 
+from one_line import one_line
+
 KEY_DIR_PARTS = (".magi", ".secret")
 """The key's directory, relative to the working directory."""
 
@@ -55,18 +57,6 @@ _REGENERATION_GUIDANCE = (
     f"({_REGENERATE_COMMAND} leaves an existing .magi/ untouched)"
 )
 """How to recover from a missing or empty key: the one way forward, stated once."""
-
-
-def _one_line(error: BaseException) -> str:
-    """Return the message of ``error`` with every run of whitespace collapsed to one space.
-
-    Args:
-        error: A guard failure; its message carries paths and SIDs, never the key.
-
-    Returns:
-        The message on one line.
-    """
-    return " ".join(str(error).split())
 
 
 class KeyStoreError(Exception):
@@ -359,14 +349,14 @@ class KeyStore:
             self.guard.verify(key_file, False)
         except KeyUnverifiableError as error:
             raise KeyUnverifiableError(
-                f"the permissions of {key_file} could not be verified ({_one_line(error)}); "
+                f"the permissions of {key_file} could not be verified ({one_line(str(error))}); "
                 f"fix the cause before considering {_ROTATE_COMMAND}"
             ) from error
         except KeyExposedError as error:
             raise KeyExposedError(
                 f"the key at {key_file} or its directory is readable by others: it may have been "
                 f"compromised, so treat the memory database and the vault secrets as compromised "
-                f"and rotate the key with {_ROTATE_COMMAND} ({_one_line(error)})"
+                f"and rotate the key with {_ROTATE_COMMAND} ({one_line(str(error))})"
             ) from error
         return self.read_unverified(key_file)
 
