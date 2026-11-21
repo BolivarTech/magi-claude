@@ -20,7 +20,7 @@ from magi_key_rotation import (
     RotationNotAuthorisedError,
     rotation_backup_root,
 )
-from magi_rs_vault import VAULT_KEY_NAMES, VaultCommandError
+from magi_rs_vault import VAULT_KEY_NAMES, VaultClient, VaultCommandError
 
 OLD = MagiKey("old-key-DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=")
 
@@ -1279,3 +1279,18 @@ def test_a_copy_whose_directory_cannot_be_listed_is_never_proven_complete(tmp_pa
         tmp_path / "rotated" / backup / ".magi" / "index" / "chunks.bin"
     ).read_bytes() == b"chunks"
     assert "both copies were kept" in str(exc.value)
+
+
+def test_a_rotation_whose_vault_ls_prints_nothing_lists_the_whole_closed_list(tmp_path):
+    # [U2] the real client over a child that exits 0 and prints nothing: never "no API keys to revoke".
+    work = _project(tmp_path)
+
+    def _vault_ls(backup_workdir, key):
+        def runner(argv, **kwargs):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        return VaultClient("/bin/magi-rs", backup_workdir, key, runner=runner).ls()
+
+    rotation, _ = _rotation(tmp_path, vault_ls=_vault_ls)
+    report = rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert report.names_to_revoke == list(VAULT_KEY_NAMES) and report.names_from_vault is False

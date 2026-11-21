@@ -140,3 +140,10 @@ def test_an_ls_line_whose_name_is_not_a_vault_name_is_never_reported_as_one(firs
         captured = first_line + "\n" + handle.read()
     with pytest.raises(VaultCommandError):
         _client([], _Completed(stdout=captured)).ls()
+
+
+@pytest.mark.parametrize("stdout", ["", "\n", "   \n"], ids=["empty", "newline", "blank"])
+def test_an_ls_that_prints_nothing_is_a_vault_command_error_never_an_empty_vault(stdout):
+    # [U2] only the measured "(vault empty)" sentinel means "no API keys": silence is not a claim.
+    with pytest.raises(VaultCommandError):
+        _client([], _Completed(stdout=stdout)).ls()
