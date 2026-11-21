@@ -37,6 +37,7 @@ import hashlib
 import itertools
 import os
 import shutil
+import stat
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -79,6 +80,10 @@ _CONFIRM_PROMPT = (
 
 class RotationNotAuthorisedError(Exception):
     """The rotation was not authorised; nothing changed (a sibling of ``ValidationError``)."""
+
+
+class _LinkInBackupError(Exception):
+    """A link or reparse point was found in the moved ``.magi/``; it is never followed or hardened."""
 
 
 class RotationFailedError(Exception):
@@ -160,6 +165,37 @@ def _is_within(path: str, parent: str) -> bool:
         return os.path.commonpath([candidate, root]) == root
     except ValueError:
         return False
+
+
+def _is_link(path: str) -> bool:
+    """Tell whether ``path`` itself is a symbolic link or a Windows reparse point (a junction included).
+
+    Decided from ``os.lstat``, so the link is never followed.
+
+    Args:
+        path: The entry to inspect.
+
+    Returns:
+        True for a link or reparse point.
+
+    Raises:
+        OSError: The entry cannot be inspected.
+    """
+    status = os.lstat(path)
+    attributes = getattr(status, "st_file_attributes", 0)
+    return stat.S_ISLNK(status.st_mode) or bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _raise_walk_error(error: OSError) -> None:
+    """Re-raise a listing failure of ``os.walk``, which would otherwise skip the directory silently.
+
+    Args:
+        error: The failure ``os.walk`` reports.
+
+    Raises:
+        OSError: Always, ``error`` itself.
+    """
+    raise error
 
 
 def _one_line(text: str) -> str:
@@ -445,7 +481,10 @@ class KeyRotation:
 
         No path relies on inheritance: a move across volumes does not carry the
         ACL, and a same-volume rename keeps each child's own, possibly loosened
-        one. One walk of the moved tree, O(n) in its entries (a handful).
+        one. The tree is listed first, without following links, and any link or
+        reparse point stops the rotation before anything is hardened: hardening
+        it would change the permissions of its target, outside the backup. One
+        walk of the moved tree, O(n) in its entries (a handful).
 
         Args:
             backup_dir: ``<backup root>/<id>``.
@@ -457,20 +496,58 @@ class KeyRotation:
         """
         guard = self._store.guard
         try:
+            entries = self._backup_entries(os.path.join(backup_dir, MAGI_DIR))
             guard.harden(backup_dir, True)
-            for current, _dirs, files in os.walk(os.path.join(backup_dir, MAGI_DIR)):
-                guard.harden(current, True)
-                guard.verify(current, True)
-                for name in files:
-                    path = os.path.join(current, name)
-                    guard.harden(path, False)
-                    guard.verify(path, False)
-        except (KeyStoreError, OSError) as error:
+            for path, directory in entries:
+                guard.harden(path, directory)
+                guard.verify(path, directory)
+        except (KeyStoreError, OSError, _LinkInBackupError) as error:
             raise RotationFailedError(
                 f"the old {MAGI_DIR}/ was moved to {os.path.join(backup_dir, MAGI_DIR)} but could not be "
                 f"restricted to its owner ({_reason(error)}), so it may be exposed; no new "
                 f"{MAGI_DIR}/ was created: move it back to {os.path.join(workdir, MAGI_DIR)} to retry"
             ) from error
+
+    @staticmethod
+    def _backup_entries(magi_dir: str) -> list[tuple[str, bool]]:
+        """List every directory and file of the moved ``.magi/``, refusing any link or reparse point.
+
+        Walks with ``followlinks=False`` and inspects every entry with
+        ``os.lstat`` before it is listed, so nothing outside the tree is ever
+        reached. O(n) in the number of entries.
+
+        Args:
+            magi_dir: ``<backup root>/<id>/.magi``.
+
+        Returns:
+            ``(path, is_directory)`` pairs, ``magi_dir`` first.
+
+        Raises:
+            _LinkInBackupError: An entry (``magi_dir`` included) is a link or a
+                reparse point; the message names its path relative to the backup.
+            OSError: An entry could not be inspected or a directory listed (a
+                directory the walk cannot list is never skipped silently).
+        """
+        backup_dir = os.path.dirname(magi_dir)
+
+        def _refuse_link(path: str) -> None:
+            if _is_link(path):
+                raise _LinkInBackupError(
+                    f"{os.path.relpath(path, backup_dir)} is a link or reparse point and was not followed"
+                )
+
+        _refuse_link(magi_dir)
+        entries = [(magi_dir, True)]
+        for current, dirs, files in os.walk(magi_dir, onerror=_raise_walk_error, followlinks=False):
+            for name in dirs:
+                path = os.path.join(current, name)
+                _refuse_link(path)
+                entries.append((path, True))
+            for name in files:
+                path = os.path.join(current, name)
+                _refuse_link(path)
+                entries.append((path, False))
+        return entries
 
     def _create_new(self, workdir: str, backup_dir: str, old_key: MagiKey) -> None:
         """Create the new ``.magi/``; on any failure, leave none at the root.
