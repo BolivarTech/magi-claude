@@ -422,3 +422,8 @@ def test_persist_refuses_a_linked_key_directory_before_writing_anything(tmp_path
         store.persist(str(work), store.new_key())
     assert "is a link" in str(exc.value) and "\n" not in str(exc.value)
     assert os.listdir(outside) == []
+
+
+def test_redact_bytes_with_an_unencodable_key_returns_the_input_unchanged():
+    # [M7] like __eq__, redaction never raises on odd key text: nothing can echo what cannot be encoded.
+    assert MagiKey("\u00f1" * 44).redact_bytes(b"some child output") == b"some child output"
