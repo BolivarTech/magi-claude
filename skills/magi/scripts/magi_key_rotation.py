@@ -482,15 +482,18 @@ class KeyRotation:
     def _refuse_links_in_source(self, magi_dir: str) -> None:
         """Refuse a source ``.magi/`` that holds a link or reparse point, before anything moves.
 
-        Across volumes ``shutil.move`` copies with ``symlinks=False`` and would
-        follow such a link into whatever it points at; the walk itself never
+        A same-volume rename keeps every entry as it is; across volumes
+        ``shutil.move`` falls back to ``copytree(..., symlinks=True)``, which
+        recreates a link as a link and does not follow it. Either way a link
+        would end up inside the backup, and the post-move re-hardening would
+        then change the permissions of whatever it points at, outside the
+        backup: so it is refused before anything moves. The walk itself never
         follows one (``_backup_entries``). O(n) in the entries of ``.magi/``.
 
-        Residual, declared: a link planted between this scan and a
-        cross-volume move is still followed by ``copytree``. That needs a local
-        process racing the rotation inside the owner's own ``.magi/``, which is
-        outside the threat model (DIR-4); the post-move walk then refuses to
-        harden it.
+        Residual, declared: a link planted between this scan and the move is
+        carried into the backup. That needs a local process racing the rotation
+        inside the owner's own ``.magi/``, which is outside the threat model
+        (DIR-4); the post-move walk then refuses to harden it.
 
         Args:
             magi_dir: ``<workdir>/.magi``.

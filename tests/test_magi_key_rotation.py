@@ -1016,7 +1016,7 @@ def test_a_backup_dir_creation_failure_without_a_message_still_names_its_cause(
 def test_a_link_inside_the_source_magi_dir_stops_the_rotation_before_anything_moves(
     tmp_path, kind, monkeypatch
 ):
-    # [R3] across volumes shutil.move copies with symlinks=False and would FOLLOW the link before any guard ran.
+    # [R3] a link in .magi/ would reach the backup and be re-hardened through; refuse it before anything moves.
     work = _project(tmp_path)
     _require_links(tmp_path, kind)
     victim = _link_victim_into_magi(tmp_path, work, kind)
