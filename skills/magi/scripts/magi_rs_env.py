@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from magi_key import MagiKey
+
 _PLATFORM_VARIABLES = (
     "PATH",
     "HOME",
@@ -103,16 +105,19 @@ class EnvironmentPolicy:
     """
 
     @staticmethod
-    def build(parent_env: Mapping[str, str]) -> dict[str, str]:
+    def build(parent_env: Mapping[str, str], passphrase: MagiKey | None = None) -> dict[str, str]:
         """Project the parent environment onto the allowlist.
 
         Args:
             parent_env: Usually ``os.environ``.
+            passphrase: The key to hand the child as ``MAGI_PASSPHRASE``, or
+                ``None`` to hand it none.
 
         Returns:
             A new dict holding only the declared variables that were present.
-            ``MAGI_PASSPHRASE`` is absent by construction -- it is not declared,
-            so it is never copied.
+            ``MAGI_PASSPHRASE`` is the injected key or absent -- never the
+            parent's value, since it is not allowlisted. No API-key variable
+            is allowlisted either: the vault is their only source.
 
         Side effects:
             None. The parent environment is not modified.
@@ -120,7 +125,10 @@ class EnvironmentPolicy:
         Complexity:
             O(n) in the number of variables in ``parent_env``, once per launch.
         """
-        return {name: value for name, value in parent_env.items() if name in ALLOWED_VARIABLES}
+        child_env = {name: value for name, value in parent_env.items() if name in ALLOWED_VARIABLES}
+        if passphrase is not None:
+            child_env[PASSPHRASE_VARIABLE] = passphrase.reveal()
+        return child_env
 
     @staticmethod
     def withheld(parent_env: Mapping[str, str]) -> list[str]:
