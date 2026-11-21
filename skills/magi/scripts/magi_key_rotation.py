@@ -231,20 +231,6 @@ def _raise_walk_error(error: OSError) -> None:
     raise error
 
 
-def _reason(error: BaseException) -> str:
-    """Return the one-line, key-free reason of a guard or filesystem failure.
-
-    Guard and ``OSError`` messages carry paths and SIDs, never a key.
-
-    Args:
-        error: The failure.
-
-    Returns:
-        Its message on one line, or its class name when the message is empty.
-    """
-    return one_line(str(error)) or type(error).__name__
-
-
 class _RecordingKeyStore(KeyStore):
     """The store handed to ``init``: a ``KeyStore`` that remembers the keys it was asked to persist.
 
@@ -345,6 +331,25 @@ class KeyRotation:
         self._vault_ls = vault_ls
         self._backup_root = backup_root if backup_root is not None else rotation_backup_root()
         self._clock = clock
+        self._redactors: list[Callable[[str], str]] = []
+
+    def _reason(self, error: BaseException) -> str:
+        """Return the one-line, key-free reason of a guard or filesystem failure.
+
+        Every key this rotation has handled so far (the old one once read, each
+        one the new store persisted) is redacted first, so the discipline does
+        not depend on each message being key-free.
+
+        Args:
+            error: The failure.
+
+        Returns:
+            Its redacted message on one line, or its class name when the message is empty.
+        """
+        text = str(error)
+        for redact in self._redactors:
+            text = redact(text)
+        return one_line(text) or type(error).__name__
 
     def rotate(
         self,
@@ -385,13 +390,16 @@ class KeyRotation:
                 f"the rotation backup root {self._backup_root} is inside the working tree {workdir}: "
                 "nothing was moved; point the state directory outside the project"
             )
+        self._redactors = []
         self._refuse_links_in_source(magi_dir)
         old_key = self._read_old_key(workdir)
+        self._redactors.append(old_key.redact)
         backup_dir, created_parents = self._create_backup_dir(workdir)
         self._secure_backup_dir(backup_dir, created_parents)
         self._move(magi_dir, backup_dir)
         self._reharden(backup_dir, workdir)
         new_store = _RecordingKeyStore(self._store.guard)
+        self._redactors.append(new_store.redact)
         self._create_new(workdir, backup_dir, old_key, new_store)
         self._verify_new(workdir, backup_dir, old_key, new_store)
         names, from_vault = self._names_to_revoke(workdir, backup_dir, old_key)
@@ -428,8 +436,7 @@ class KeyRotation:
                 "the key rotation was not confirmed (nothing was changed)"
             )
 
-    @classmethod
-    def _refuse_links_in_source(cls, magi_dir: str) -> None:
+    def _refuse_links_in_source(self, magi_dir: str) -> None:
         """Refuse a source ``.magi/`` that holds a link or reparse point, before anything moves.
 
         Across volumes ``shutil.move`` copies with ``symlinks=False`` and would
@@ -450,10 +457,10 @@ class KeyRotation:
                 inspected; nothing was moved.
         """
         try:
-            cls._backup_entries(magi_dir)
+            self._backup_entries(magi_dir)
         except (_LinkInBackupError, OSError) as error:
             raise RotationFailedError(
-                f"the {MAGI_DIR}/ at {magi_dir} cannot be rotated safely ({_reason(error)}): nothing was "
+                f"the {MAGI_DIR}/ at {magi_dir} cannot be rotated safely ({self._reason(error)}): nothing was "
                 "moved; remove the link and retry"
             ) from error
 
@@ -474,7 +481,7 @@ class KeyRotation:
             return self._store.read_unverified(key_file)
         except (KeyStoreError, OSError) as error:
             raise RotationFailedError(
-                f"cannot read the current key at {key_file} ({_reason(error)}): nothing was moved"
+                f"cannot read the current key at {key_file} ({self._reason(error)}): nothing was moved"
             ) from error
 
     def _create_backup_dir(self, workdir: str) -> tuple[str, list[str]]:
@@ -511,7 +518,7 @@ class KeyRotation:
             os.makedirs(candidate, mode=DIR_MODE)
         except OSError as error:
             raise RotationFailedError(
-                f"cannot create the rotation backup {candidate} ({_reason(error)}): nothing was moved"
+                f"cannot create the rotation backup {candidate} ({self._reason(error)}): nothing was moved"
             ) from error
         return candidate, created_parents
 
@@ -543,7 +550,7 @@ class KeyRotation:
                 leftover = f" (the empty {backup_dir} could not be removed: delete it)"
             raise RotationFailedError(
                 f"cannot restrict the rotation backup directory {directory} to its owner "
-                f"({_reason(error)}){leftover}: nothing was moved"
+                f"({self._reason(error)}){leftover}: nothing was moved"
             ) from error
 
     @staticmethod
@@ -577,8 +584,7 @@ class KeyRotation:
             return False
         return True
 
-    @classmethod
-    def _move(cls, magi_dir: str, backup_dir: str) -> None:
+    def _move(self, magi_dir: str, backup_dir: str) -> None:
         """Move ``.magi/`` into ``backup_dir``; on failure, keep whichever copy is complete.
 
         Across volumes ``shutil.move`` copies and then deletes the source, so a
@@ -602,13 +608,13 @@ class KeyRotation:
         try:
             shutil.move(magi_dir, target)
         except BaseException as error:  # noqa: BLE001 - an interrupted copy must end in the described state
-            reason = _reason(error)
+            reason = self._reason(error)
             if not os.path.lexists(magi_dir):
                 raise RotationFailedError(
                     f"moving {magi_dir} to {target} failed ({reason}) after the copy finished: the source is "
                     f"gone and {target} holds the complete copy; move it back to {magi_dir} to retry"
                 ) from error
-            if not cls._source_still_complete(magi_dir, target):
+            if not self._source_still_complete(magi_dir, target):
                 raise RotationFailedError(
                     f"moving {magi_dir} to {target} failed ({reason}) after files were removed from the source: "
                     f"both copies were kept and nothing was deleted; {target} holds what was copied, compare it "
@@ -656,7 +662,7 @@ class KeyRotation:
         except BaseException as error:  # noqa: BLE001 - after the move, even an interrupt must name the backup
             raise RotationFailedError(
                 f"the old {MAGI_DIR}/ was moved to {os.path.join(backup_dir, MAGI_DIR)} but could not be "
-                f"restricted to its owner ({_reason(error)}), so it may be exposed; no new "
+                f"restricted to its owner ({self._reason(error)}), so it may be exposed; no new "
                 f"{MAGI_DIR}/ was created: move it back to {os.path.join(workdir, MAGI_DIR)} to retry"
             ) from error
 
@@ -736,7 +742,7 @@ class KeyRotation:
                 f"the old one back to {magi_dir} to retry"
             ) from error
         except BaseException as error:  # noqa: BLE001 - any init failure, an interrupt included, ends in the described state
-            detail = one_line(store.redact(old_key.redact(str(error)))) or type(error).__name__
+            detail = self._reason(error)
             if isinstance(error, (KeyboardInterrupt, SystemExit)) and store.holds_written_key(
                 workdir
             ):
@@ -816,11 +822,11 @@ class KeyRotation:
             if store.holds_written_key(workdir):
                 raise RotationFailedError(
                     f"the new {MAGI_DIR}/ at {magi_dir} was created by this rotation but its key could not be "
-                    f"verified ({_reason(error)}); fix the cause, then run any --ollama command (its preflight "
+                    f"verified ({self._reason(error)}); fix the cause, then run any --ollama command (its preflight "
                     f"verifies the key); the old one is at "
                     f"{os.path.join(backup_dir, MAGI_DIR)}: do not move the exposed backup back"
                 ) from error
-            raise _failure(_reason(error)) from error
+            raise _failure(self._reason(error)) from error
         if new_key == old_key:
             raise _failure("it holds the old key")
 
@@ -851,6 +857,6 @@ class KeyRotation:
             raise RotationFailedError(
                 f"the new {MAGI_DIR}/ is in place at {os.path.join(workdir, MAGI_DIR)} and the old one is at "
                 f"{os.path.join(backup_dir, MAGI_DIR)}, but listing the old vault was interrupted "
-                f"({_reason(error)}): treat every API key it may have held as compromised, revoke each one "
+                f"({self._reason(error)}): treat every API key it may have held as compromised, revoke each one "
                 f"at its provider ({', '.join(VAULT_KEY_NAMES)}) and store the new values"
             ) from error
