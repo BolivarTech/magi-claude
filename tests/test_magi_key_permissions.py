@@ -66,7 +66,11 @@ def test_sddl_parser_rejects_a_malformed_ace():
         parse_sddl_dacl(f"D:PAI(A;;FA;;;{ME})(A;;FA)")
 
 
-def _windows_guard(sddl):
+_ALIASES = {"SY": "S-1-5-18", "BA": "S-1-5-32-544", "AU": "S-1-5-11", "WD": "S-1-1-0"}
+"""M10: what resolve_alias answers for the aliases the fixtures carry; never a process in a unit test."""
+
+
+def _windows_guard(sddl, aliases=None):
     def runner(argv):
         if argv[0].lower().endswith("whoami.exe"):
             return _fixture("whoami-nh.txt")  # [CP2-M45] the real /nh shape
@@ -76,6 +80,7 @@ def _windows_guard(sddl):
 
     guard = WindowsPermissionGuard(runner=runner)
     guard.read_sddl = lambda path: sddl
+    guard.resolve_alias = {**_ALIASES, **(aliases or {})}.__getitem__
     return guard
 
 
@@ -370,3 +375,60 @@ def test_windows_verify_that_cannot_read_names_the_cause_in_the_message():
     with pytest.raises(KeyExposedError) as raised:
         guard.verify("k", directory=False)
     assert "Get-Acl : access denied" in str(raised.value)
+
+
+def test_windows_verify_accepts_the_current_user_rendered_as_an_alias():
+    # M10: on windows-latest runneradmin is the built-in Administrator and its own SID reads back as LA.
+    _windows_guard("D:PAI(A;;FA;;;LA)", aliases={"LA": ME}).verify("k", directory=False)
+
+
+def test_windows_verify_names_an_alias_that_resolves_to_someone_else():
+    with pytest.raises(KeyExposedError) as raised:
+        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;FA;;;LA)", aliases={"LA": OTHER}).verify(
+            "k", directory=False
+        )
+    assert "LA" in str(raised.value)
+
+
+def test_windows_verify_that_cannot_resolve_an_alias_is_exposed():
+    guard = _windows_guard("D:PAI(A;;FA;;;LA)")
+
+    def _fail(alias):
+        raise OSError("powershell.exe failed with exit code 1: invalid SID")
+
+    guard.resolve_alias = _fail
+    with pytest.raises(KeyExposedError):
+        guard.verify("k", directory=False)
+
+
+def test_windows_verify_of_numeric_sids_never_resolves_an_alias():
+    guard = _windows_guard(_fixture("sddl-file-hardened.txt").strip())
+
+    def _never(alias):
+        raise AssertionError(alias)
+
+    guard.resolve_alias = _never
+    guard.verify("k", directory=False)
+
+
+def test_windows_resolve_alias_passes_the_alias_only_through_a_clean_env(monkeypatch):
+    seen = {}
+
+    def _fake_run(argv, **kwargs):
+        seen.update(argv=argv, env=kwargs["env"])
+        return SimpleNamespace(stdout="S-1-5-18\r\n")
+
+    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
+    monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
+    assert WindowsPermissionGuard().resolve_alias("SY") == "S-1-5-18"
+    assert seen["env"]["MAGI_SID_ALIAS"] == "SY"
+    assert not any(name.upper() == "PSMODULEPATH" for name in seen["env"])
+    assert not any("SY" == part for part in seen["argv"])
+
+
+def test_windows_resolve_alias_rejects_output_that_is_not_a_sid(monkeypatch):
+    monkeypatch.setattr(
+        "magi_key_permissions.subprocess.run", lambda argv, **kwargs: SimpleNamespace(stdout="")
+    )
+    with pytest.raises(OSError):
+        WindowsPermissionGuard().resolve_alias("ZZ")
