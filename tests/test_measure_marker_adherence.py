@@ -857,7 +857,10 @@ def test_check_rejects_an_artifact_of_the_7x_series(tmp_path):
 # --- magi-rs per-attempt tally (Loop 1, C1) ------------------------------------------
 
 _MAGI_RS_FIXTURE = (
-    Path(__file__).resolve().parent / "fixtures" / "magi-rs-run-reports" / "extraction-failures.json"
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "magi-rs-run-reports"
+    / "extraction-failures.json"
 )
 
 

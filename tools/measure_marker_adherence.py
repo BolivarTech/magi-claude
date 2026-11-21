@@ -137,6 +137,22 @@ OK_TALLY_KEY = "ok"
 #: exact blindness this instrument exists to prevent.
 CAUSES: tuple[str, ...] = tuple(FEEDBACK_TEMPLATES)
 
+#: The CLOSED mapping from the cause labels magi-rs serialises (magi-core 4.2.0
+#: ``ExtractionFailureCause``, kebab-case; ``report["magi_rs"]["extraction_failures"]``) into
+#: :data:`CAUSES`. ``malformed-object`` (valid JSON that is not a verdict object) has no column
+#: of its own here: it is the schema contract failing, so it counts as ``schema``. A label NOT
+#: in this table raises -- dropping it would score the seat clean.
+MAGI_RS_CAUSE_MAP: Mapping[str, str] = {
+    "missing-markers": "missing_markers",
+    "unterminated": "unterminated_block",
+    "ambiguous": "ambiguous_markers",
+    "invalid-json": "invalid_json",
+    "malformed-object": "schema",
+    "schema": "schema",
+    "echoed-example": "echoed_example",
+    "agent-identity": "agent_identity",
+}
+
 #: How many runs had to be measured through the BLIND fallback (no ``magi-report.json``,
 #: so only each mage's last attempt is on disk). It is carried INTO the artifact and it
 #: forbids a green verdict: ``make release-check`` reads the artifact and nothing else, so
@@ -343,20 +359,37 @@ def measure_run_report(report_path: Path) -> None:
     numbers is therefore the marker-omission rate per PARSED attempt, which is the quantity
     R17 is about; counting a timed-out attempt as a clean one would understate it.
 
+    The magi-rs path keeps the same tally under ``magi_rs.extraction_failures`` (a list of
+    ``{attempt, cause, model}`` records per mage); each record is folded in under its mapped
+    cause (:data:`MAGI_RS_CAUSE_MAP`).
+
     Args:
         report_path: Path to a run's ``magi-report.json``.
 
     Raises:
         json.JSONDecodeError: If the report is not valid JSON -- an infrastructure problem
             with the sample, never silently swallowed into a zero.
+        ValueError: If a magi-rs record carries a cause missing from the mapping.
     """
     report: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
     failures: Mapping[str, Mapping[str, int]] = report.get("extraction_failures", {})
     delivered = {agent.get("agent") for agent in report.get("agents", [])}
 
+    magi_rs_failures: Mapping[str, list[Mapping[str, Any]]] = (report.get("magi_rs") or {}).get(
+        "extraction_failures"
+    ) or {}
+
     for agent in AGENT_NAMES:
         for cause, count in failures.get(agent, {}).items():
             tally[agent][cause] += count
+        for record in magi_rs_failures.get(agent, []):
+            label = str(record.get("cause"))
+            if label not in MAGI_RS_CAUSE_MAP:
+                raise ValueError(
+                    f"magi-rs extraction_failures carries the unmapped cause {label!r} for "
+                    f"{agent}: add it to MAGI_RS_CAUSE_MAP"
+                )
+            tally[agent][MAGI_RS_CAUSE_MAP[label]] += 1
         if agent in delivered:
             tally[agent][OK_TALLY_KEY] += 1
 
