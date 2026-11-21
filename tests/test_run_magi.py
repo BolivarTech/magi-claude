@@ -5392,6 +5392,20 @@ def test_vault_set_refuses_a_value_with_an_interior_line_break(monkeypatch, caps
     assert "\n" not in captured.err.strip()
 
 
+def test_vault_set_refuses_a_value_that_is_not_encodable_as_utf8(monkeypatch, capsys):
+    # [Z1] a lone surrogate cannot reach the binary's stdin; refuse it by name, never echo it.
+    stored = []
+    monkeypatch.setattr("run_magi.VaultClient.set", lambda self, name, value: stored.append(value))
+    _stub_vault_preflight(monkeypatch)
+    value = "sk-\ud800-tail"
+    code = run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(value + "\n"), is_tty=False)
+    captured = capsys.readouterr()
+    assert code == 2 and stored == []
+    assert "OPENAI_API_KEY" in captured.err and "UTF-8" in captured.err
+    assert "sk-" not in captured.out + captured.err and "tail" not in captured.out + captured.err
+    assert "\n" not in captured.err.strip()
+
+
 def test_vault_set_preflights_the_production_store_in_the_working_directory(monkeypatch, tmp_path):
     # [CP2-M46] [CP2-B13] the production store, the cwd, and the verified binary is the one handed the key.
     built = {}
