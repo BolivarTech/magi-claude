@@ -772,7 +772,7 @@ class KeyRotation:
             try:
                 shutil.rmtree(magi_dir)
             except OSError:
-                return f" (and the half-made {magi_dir} could not be removed: delete it first)"
+                return _LEFTOVER_CLAUSES[InitLeftover.HALF_MADE_KEPT].format(magi_dir=magi_dir)
         return ""
 
     def _verify_new(

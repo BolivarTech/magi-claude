@@ -55,13 +55,10 @@ from magi_rs_env import EnvironmentPolicy
 from one_line import one_line
 
 __all__ = [
-    "DIR_MODE",
-    "FILE_MODE",
     "PermissionGuard",
     "PosixPermissionGuard",
     "WindowsPermissionGuard",
     "default_key_store",
-    "parse_sddl_dacl",
 ]
 
 _GROUP_AND_OTHER_BITS = stat.S_IRWXG | stat.S_IRWXO
@@ -397,18 +394,25 @@ def _system_tool(parts: tuple[str, ...]) -> str:
 def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
     """Return whether the DACL is protected and the ``(type, sid)`` of every ACE.
 
-    The parsing rules of :func:`parse_sddl_dacl`, which is built on it. O(n)
-    over the SDDL length.
+    The one DACL parser. Fail-closed: every ACE counts whatever its type
+    (``A``, ``D``, ...) or its flags (``OICI``, ``ID``); a SID alias (``AU``,
+    ``WD``, ``BA``, ...) is returned as written. O(n) over the SDDL length.
 
     Args:
         sddl: A security descriptor in SDDL form.
 
     Returns:
-        ``(protected, aces)``; ``aces`` lists each ACE's type field (``A``,
-        ``D``, ...) and SID field, in order.
+        ``(protected, aces)``: ``protected`` is True iff the DACL flags include
+        ``P``; ``aces`` lists each ACE's type field and SID field, in order.
 
     Raises:
-        ValueError: As :func:`parse_sddl_dacl`.
+        ValueError: The DACL is absent, is ``NO_ACCESS_CONTROL`` (a NULL DACL
+            grants everyone access), has unknown flags, or holds an ACE without
+            its six fields.
+
+    Example:
+        >>> _parse_dacl_aces("D:PAI(A;;FA;;;S-1-5-18)")
+        (True, [('A', 'S-1-5-18')])
     """
     descriptor = sddl.strip()
     # Assumes the section order O:, G:, D:, then S: as Get-Acl emits it.
@@ -428,33 +432,6 @@ def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
             raise ValueError("the DACL holds a malformed ACE")
         aces.append((fields[_ACE_TYPE_INDEX], fields[_ACE_SID_INDEX]))
     return _PROTECTED_FLAG in flags, aces
-
-
-def parse_sddl_dacl(sddl: str) -> tuple[bool, list[str]]:
-    """Return whether the DACL is protected and the SID of every ACE.
-
-    Fail-closed: every ACE counts whatever its type (``A``, ``D``, ...) or its
-    flags (``OICI``, ``ID``); a SID alias (``AU``, ``WD``, ``BA``, ...) is
-    returned as written. Runs in O(n) over the SDDL length.
-
-    Args:
-        sddl: A security descriptor in SDDL form.
-
-    Returns:
-        ``(protected, sids)``: ``protected`` is True iff the DACL flags include
-        ``P``; ``sids`` lists each ACE's SID field in order.
-
-    Raises:
-        ValueError: The DACL is absent, is ``NO_ACCESS_CONTROL`` (a NULL DACL
-            grants everyone access), has unknown flags, or holds an ACE without
-            its six fields.
-
-    Example:
-        >>> parse_sddl_dacl("D:PAI(A;;FA;;;S-1-5-18)")
-        (True, ['S-1-5-18'])
-    """
-    protected, aces = _parse_dacl_aces(sddl)
-    return protected, [sid for _, sid in aces]
 
 
 class PermissionGuard(ABC):

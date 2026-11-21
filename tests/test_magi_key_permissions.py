@@ -6,15 +6,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from magi_key import KeyExposedError, KeyHardeningError, KeyStore, KeyUnverifiableError
-from magi_key_permissions import (
+from magi_key import (
     DIR_MODE,
     FILE_MODE,
+    KeyExposedError,
+    KeyHardeningError,
+    KeyStore,
+    KeyUnverifiableError,
+)
+from magi_key_permissions import (
     PermissionGuard,
     PosixPermissionGuard,
     WindowsPermissionGuard,
     default_key_store,
-    parse_sddl_dacl,
+    _parse_dacl_aces,
 )
 from magi_key_permissions import _NativeSecurity
 from magi_rs_env import EnvironmentPolicy
@@ -26,32 +31,38 @@ _ACL = os.path.join(
 )  # [CP2-M45] the M9 capture
 
 
+def _protection_and_sids(sddl):
+    """``(protected, sids)`` through the one parser, for the SID-only assertions below [U3]."""
+    protected, aces = _parse_dacl_aces(sddl)
+    return protected, [sid for _, sid in aces]
+
+
 def _fixture(name):
     return open(os.path.join(_ACL, name), encoding="utf-8").read()
 
 
 def test_sddl_parser_reads_protection_and_every_ace_sid():
-    protected, sids = parse_sddl_dacl(f"O:{ME}G:{ME}D:PAI(A;;FA;;;{ME})")
+    protected, sids = _protection_and_sids(f"O:{ME}G:{ME}D:PAI(A;;FA;;;{ME})")
     assert protected is True
     assert sids == [ME]
 
 
 def test_sddl_parser_sees_an_inherited_extra_ace():
-    protected, sids = parse_sddl_dacl(f"D:AI(A;;FA;;;{ME})(A;ID;0x1301bf;;;{OTHER})")
+    protected, sids = _protection_and_sids(f"D:AI(A;;FA;;;{ME})(A;ID;0x1301bf;;;{OTHER})")
     assert protected is False
     assert sids == [ME, OTHER]
 
 
 def test_sddl_parser_returns_aliases_and_container_aces_as_sids():
     # [CP2-M3] fail-closed: an alias and an OICI-flagged ACE are ACEs too.
-    protected, sids = parse_sddl_dacl(f"D:PAI(A;OICI;FA;;;{ME})(A;;FR;;;AU)")
+    protected, sids = _protection_and_sids(f"D:PAI(A;OICI;FA;;;{ME})(A;;FR;;;AU)")
     assert protected is True
     assert sids == [ME, "AU"]
 
 
 def test_sddl_parser_reads_a_flagless_dacl_as_unprotected():
     # [CP2-M24]
-    protected, sids = parse_sddl_dacl(f"D:(A;;FA;;;{ME})")
+    protected, sids = _protection_and_sids(f"D:(A;;FA;;;{ME})")
     assert protected is False
     assert sids == [ME]
 
@@ -60,12 +71,12 @@ def test_sddl_parser_reads_a_flagless_dacl_as_unprotected():
 def test_sddl_parser_rejects_an_absent_or_null_dacl(sddl):
     # [CP2-C38] a NULL or missing DACL grants everyone full access: never "protected, no ACEs".
     with pytest.raises(ValueError):
-        parse_sddl_dacl(sddl)
+        _protection_and_sids(sddl)
 
 
 def test_sddl_parser_rejects_a_malformed_ace():
     with pytest.raises(ValueError):
-        parse_sddl_dacl(f"D:PAI(A;;FA;;;{ME})(A;;FA)")
+        _protection_and_sids(f"D:PAI(A;;FA;;;{ME})(A;;FA)")
 
 
 _ALIASES = {"SY": "S-1-5-18", "BA": "S-1-5-32-544", "AU": "S-1-5-11", "WD": "S-1-1-0"}
@@ -860,7 +871,7 @@ def test_windows_real_file_with_an_allow_and_a_deny_for_users_hardens_to_owner_o
     guard = WindowsPermissionGuard()
     guard.harden(str(path), directory=False)
     guard.verify(str(path), directory=False)
-    _, sids = parse_sddl_dacl(guard.read_sddl(str(path)))
+    _, sids = _protection_and_sids(guard.read_sddl(str(path)))
     assert sids and all(sid in (guard.current_sid(), "LA") for sid in sids)
 
 
