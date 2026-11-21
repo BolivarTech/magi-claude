@@ -527,12 +527,18 @@ def test_no_permission_tool_inherits_an_api_key_or_a_passphrase(monkeypatch):
 
 
 def test_powershell_gets_the_allowlist_plus_only_its_one_variable(monkeypatch):
-    # [W6] the one variable carrying the input is the only addition to the allowlisted environment.
+    # [W6] the one variable carrying the input, and PowerShell's cache dirs [W6b], are the only additions.
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\u\AppData\Local")
+    monkeypatch.setenv("APPDATA", r"C:\Users\u\AppData\Roaming")
     seen = _capture_tool_envs(monkeypatch)
     WindowsPermissionGuard().read_sddl("k")
     ((_, env),) = [entry for entry in seen if entry[0] == "powershell.exe"]
     expected = EnvironmentPolicy.build(os.environ)
-    expected["MAGI_ACL_PATH"] = "k"
+    expected.update(
+        LOCALAPPDATA=r"C:\Users\u\AppData\Local",
+        APPDATA=r"C:\Users\u\AppData\Roaming",
+        MAGI_ACL_PATH="k",
+    )
     assert env == expected
 
 
@@ -550,3 +556,31 @@ def test_a_guard_asks_whoami_once_however_many_paths_it_checks():
     guard.verify("k", directory=False)
     guard.verify("d", directory=True)
     assert sum(1 for tool in calls if tool.lower().endswith("whoami.exe")) == 1
+
+
+def test_the_permission_tools_get_the_powershell_cache_dirs_and_nothing_secret(monkeypatch):
+    # [W6b] without LOCALAPPDATA a cold Windows PowerShell 5.1 cannot use its module-analysis cache and
+    # a first start outlived the 30 s bound on CI: the cache dirs travel, secrets and PSModulePath never do.
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\u\AppData\Local")
+    monkeypatch.setenv("APPDATA", r"C:\Users\u\AppData\Roaming")
+    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
+    seen = _capture_tool_envs(monkeypatch)
+    guard = WindowsPermissionGuard()
+    guard.harden("k", directory=False)
+    guard.read_sddl("k")
+    assert {"whoami.exe", "icacls.exe", "powershell.exe"} <= {tool for tool, _ in seen}
+    for tool, env in seen:
+        names = {name.upper() for name in env}
+        assert env["LOCALAPPDATA"] == r"C:\Users\u\AppData\Local", tool
+        assert env["APPDATA"] == r"C:\Users\u\AppData\Roaming", tool
+        assert not names & {"OPENAI_API_KEY", "MAGI_PASSPHRASE", "PSMODULEPATH"}, tool
+
+
+def test_the_cache_dirs_are_added_only_when_the_parent_has_them(monkeypatch):
+    # [W6b] absent in the parent means absent in the child: nothing is invented.
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    seen = _capture_tool_envs(monkeypatch)
+    WindowsPermissionGuard().read_sddl("k")
+    ((_, env),) = [entry for entry in seen if entry[0] == "powershell.exe"]
+    assert "LOCALAPPDATA" not in env and "APPDATA" not in env
