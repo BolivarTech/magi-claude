@@ -94,6 +94,7 @@ from datetime import datetime, timezone
 from cli_commands import YES_FLAG
 from magi_key import (
     DIR_MODE,
+    EmptyKeyError,
     KEY_DIR_PARTS,
     KeyGuard,
     KeyStore,
@@ -950,7 +951,7 @@ class KeyRotation:
         Returns:
             The parenthetical clause of the failure message; empty when nothing is left.
         """
-        if os.path.lexists(self._store.key_path(workdir)):
+        if self._holds_a_key(workdir):
             return f" (a {magi_dir} holding a key was left as it is: move it aside first)"
         if os.path.lexists(magi_dir):
             try:
@@ -958,6 +959,30 @@ class KeyRotation:
             except OSError:
                 return _LEFTOVER_CLAUSES[InitLeftover.HALF_MADE_KEPT].format(magi_dir=magi_dir)
         return ""
+
+    def _holds_a_key(self, workdir: str) -> bool:
+        """Tell whether the key file under ``workdir`` holds a key, as the init cleanup does.
+
+        An absent or empty key file (``EmptyKeyError``) holds no key; one that
+        exists but cannot be read counts as a key, so a cleanup never deletes
+        what it cannot prove is empty.
+
+        Args:
+            workdir: The project root.
+
+        Returns:
+            False when there is no key file or it is empty; True otherwise.
+        """
+        key_file = self._store.key_path(workdir)
+        if not os.path.lexists(key_file):
+            return False
+        try:
+            self._store.read_unverified(key_file)
+        except EmptyKeyError:
+            return False
+        except (KeyStoreError, OSError):
+            return True
+        return True
 
     def _verify_new(
         self, workdir: str, backup_dir: str, old_key: MagiKey, store: _RecordingKeyStore
