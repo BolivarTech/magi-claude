@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import tomllib
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit, urlunsplit
 from typing import Any, Callable
 
 from one_line import one_line
@@ -19,6 +21,7 @@ _EMBEDDING_TABLE = "embedding"
 _BASE_URL_KEY = "base_url"
 _MODEL_KEY = "model"
 _PROBE_INPUT = "ping"
+_HTTP_SCHEMES = ("http", "https")
 _JSON_CONTENT_TYPE = {"Content-Type": "application/json"}
 
 Opener = Callable[..., Any]
@@ -80,13 +83,39 @@ class EmbedderProbe:
                 f"cannot read the embedder config {config_path}: {one_line(str(error))}"
             ) from error
         table = config.get(_EMBEDDING_TABLE, {})
+        if not isinstance(table, dict):
+            raise EmbedderUnreachableError(
+                f"{config_path} declares [{_EMBEDDING_TABLE}] as something other than a table"
+            )
         base_url = table.get(_BASE_URL_KEY) or config.get(_BASE_URL_KEY)
         model = table.get(_MODEL_KEY)
         if not base_url or not model:
             raise EmbedderUnreachableError(
                 f"{config_path} declares no embedder base_url or [{_EMBEDDING_TABLE}] model"
             )
-        return str(base_url).rstrip("/") + EMBEDDINGS_PATH, str(model)
+        return self._credential_free_url(config_path, base_url) + EMBEDDINGS_PATH, str(model)
+
+    @staticmethod
+    def _credential_free_url(config_path: str, base_url: object) -> str:
+        """Validate an http(s) base URL and drop any ``user:pass@`` part.
+
+        Raises:
+            EmbedderUnreachableError: Not a string, or no http(s) scheme and host.
+        """
+        try:
+            parts = urlsplit(str(base_url))
+            host = parts.hostname
+            port = parts.port
+        except ValueError:
+            host, parts, port = None, urlsplit(""), None
+        if parts.scheme not in _HTTP_SCHEMES or not host:
+            raise EmbedderUnreachableError(
+                f"{config_path} declares an embedder base_url that is not an http(s) URL"
+            )
+        netloc = f"[{host}]" if ":" in host else host
+        if port is not None:
+            netloc += f":{port}"
+        return urlunsplit((parts.scheme, netloc, parts.path, "", "")).rstrip("/")
 
     def check(self, config_path: str) -> None:
         """Send one minimal embedding request.
@@ -100,12 +129,21 @@ class EmbedderProbe:
         """
         url, model = self.endpoint(config_path)
         body = json.dumps({"model": model, "input": _PROBE_INPUT}).encode("utf-8")
-        request = urllib.request.Request(url, data=body, headers=_JSON_CONTENT_TYPE, method="POST")
+        try:
+            request = urllib.request.Request(
+                url, data=body, headers=_JSON_CONTENT_TYPE, method="POST"
+            )
+        except ValueError as error:
+            raise EmbedderUnreachableError(
+                f"{config_path} declares an unusable embedder URL: {one_line(str(error))}"
+            ) from error
         try:
             with self._opener(request, timeout=self._timeout) as response:
                 response.read()
-        except urllib.error.HTTPError:
-            return
+        except urllib.error.HTTPError as error:
+            error.close()
+        except http.client.HTTPException:
+            return  # someone answered, just not in valid HTTP (DIR-2)
         except (urllib.error.URLError, OSError) as error:
             raise EmbedderUnreachableError(
                 f"embedder {model} is unreachable at {url}: {one_line(str(error))}"
