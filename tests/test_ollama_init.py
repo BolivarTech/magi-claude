@@ -459,6 +459,12 @@ def test_a_hardening_failure_reaches_the_init_fatal_line_with_the_tool_and_its_e
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("ollama_init.subprocess.run", _run)
     monkeypatch.setattr("ollama_init.default_key_store", lambda: KeyStore(WindowsPermissionGuard()))
+    # The guard reads the DACL natively (advapi32) before icacls; stubbed so harden reaches the faked icacls on
+    # every platform (on POSIX there is no advapi32 to read with).
+    monkeypatch.setattr(
+        "magi_key_permissions.WindowsPermissionGuard.read_sddl",
+        lambda self, path: "D:PAI(A;;FA;;;S-1-5-21-1111-2222-3333-1001)",
+    )
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
     with pytest.raises(SystemExit) as exc:
         run_magi.main()
