@@ -41,6 +41,8 @@ _LS_SEPARATOR = " · "
 _LS_MIN_COLUMNS = 3
 """``NAME``, created, updated."""
 _LS_NAME_PATTERN = re.compile(r"[A-Za-z0-9_]+")
+_LS_EMPTY_VAULT = "(vault empty)"
+"""What magi-rs 0.25.0 prints, with exit 0, when the vault holds nothing (measurement M1)."""
 _REDACTED = "<redacted>"
 
 
@@ -124,6 +126,8 @@ class VaultClient:
         completed = self._run([_LS_ACTION], "vault ls", None, secrets=())
         if completed.returncode != 0:
             raise VaultCommandError(self._failure("vault ls", completed, ()))
+        if completed.stdout.strip() == _LS_EMPTY_VAULT:
+            return []
         return [self._parse_ls_line(line) for line in completed.stdout.splitlines() if line.strip()]
 
     def _run(
@@ -173,7 +177,9 @@ class VaultClient:
         Returns:
             A one-line message.
         """
-        detail = " ".join((completed.stderr or "").split())
+        # Redact BEFORE collapsing whitespace: collapsing can alter a secret that contains
+        # runs of whitespace so that it no longer matches; the second pass covers the rest.
+        detail = " ".join(self._redact(completed.stderr or "", secrets).split())
         return self._redact(f"{label} failed (exit {completed.returncode}): {detail}", secrets)
 
     def _redact(self, text: str, secrets: tuple[str, ...]) -> str:
