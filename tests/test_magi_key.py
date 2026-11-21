@@ -450,3 +450,40 @@ def test_redaction_also_scrubs_the_json_escaped_forms_of_the_key(escape):
     as_bytes = _SLASHY_KEY.redact_bytes(leaked.encode("ascii")).decode("ascii")
     assert "aB" not in as_bytes and "cD" not in as_bytes and REDACTION_MARKER in as_bytes
     assert _SLASHY_KEY.redact("plain " + value) == "plain " + REDACTION_MARKER
+
+
+BS = chr(92)
+
+
+def _mixed(slash, plus, equals):
+    return lambda v: v.replace("/", slash).replace("+", plus).replace("=", equals)
+
+
+@pytest.mark.parametrize(
+    "escape",
+    [
+        _mixed("/", BS + "u002b", "="),  # "+" escaped, "/" literal (.NET System.Text.Json default)
+        _mixed(BS + "u002f", "+", "="),  # "/" escaped, "+" literal
+        _mixed(BS + "/", BS + "u002B", "="),  # "/" as a backslash pair, "+" as a unicode escape
+        _mixed("/", "+", BS + "u003d"),  # "=" padding escaped
+        _mixed("/", "+", "="),  # the plain key
+        _mixed(BS + "/", "+", "="),  # the full backslash-slash form
+    ],
+    ids=[
+        "plus-escaped",
+        "slash-u-escaped",
+        "mixed-slash-plus",
+        "equals-escaped",
+        "plain",
+        "backslash-slash",
+    ],
+)
+def test_redaction_scrubs_a_key_whose_json_escapes_are_mixed_in_any_combination(escape):
+    # [N1] one pattern covers every independent choice of escaping "/", "+" and "=".
+    value = _SLASHY_KEY.reveal()
+    leaked = 'x {"detail": "' + escape(value) + '"} y'
+    expected = 'x {"detail": "' + REDACTION_MARKER + '"} y'
+    assert _SLASHY_KEY.redact(leaked) == expected
+    assert _SLASHY_KEY.redact_bytes(leaked.encode("ascii")) == expected.encode("ascii")
+    unrelated = "nothing of the key here: aB cD"
+    assert _SLASHY_KEY.redact(unrelated) == unrelated
