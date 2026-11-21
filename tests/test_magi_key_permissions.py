@@ -488,46 +488,16 @@ def test_no_permission_tool_inherits_an_api_key_or_a_passphrase(monkeypatch):
         assert not any(value in env.values() for value in _PARENT_SECRETS.values()), tool
 
 
-_WINDOWS_SYSTEM_VARIABLES = (
-    "LOCALAPPDATA",
-    "APPDATA",
-    "WINDIR",
-    "SYSTEMDRIVE",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PROGRAMW6432",
-    "PROGRAMDATA",
-    "COMMONPROGRAMFILES",
-    "COMMONPROGRAMFILES(X86)",
-    "COMMONPROGRAMW6432",
-    "PATHEXT",
-    "PROCESSOR_ARCHITECTURE",
-    "NUMBER_OF_PROCESSORS",
-    "OS",
-    "ALLUSERSPROFILE",
-    "PUBLIC",
-    "COMPUTERNAME",
-    "USERNAME",
-    "USERDOMAIN",
-    "HOMEDRIVE",
-    "HOMEPATH",
-)
-"""[W6c] The ruling's enumerated, non-secret Windows system variables, pinned here as the contract."""
-
-
-def test_icacls_gets_the_allowlist_plus_only_the_windows_system_variables(monkeypatch):
-    # [W6c] the enumerated Windows system variables are the only addition to the allowlisted environment
-    # [W6d: no tool takes an input variable any more]: an exact equality, so any other addition fails.
-    for name in _WINDOWS_SYSTEM_VARIABLES:
-        monkeypatch.setenv(name, f"value-of-{name}")
+def test_icacls_gets_exactly_the_allowlist(monkeypatch):
+    # [n-3] whoami and icacls need only the allowlist (at a132856 they ran with it alone; only PowerShell, now
+    # gone, failed): an exact equality, so a Windows system variable or any other addition fails it.
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\u\AppData\Local")
+    monkeypatch.setenv("WINDIR", r"C:\Windows")
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE")
     seen = _capture_tool_envs(monkeypatch)
     WindowsPermissionGuard().harden("k", directory=False)
     ((_, env),) = [entry for entry in seen if entry[0] == "icacls.exe"]
-    expected = EnvironmentPolicy.build(os.environ)
-    expected.update({name: f"value-of-{name}" for name in _WINDOWS_SYSTEM_VARIABLES})
-    assert {name.upper(): value for name, value in env.items()} == {
-        name.upper(): value for name, value in expected.items()
-    }
+    assert env == EnvironmentPolicy.build(os.environ)
 
 
 def test_a_guard_asks_whoami_once_however_many_paths_it_checks():
@@ -546,11 +516,8 @@ def test_a_guard_asks_whoami_once_however_many_paths_it_checks():
     assert sum(1 for tool in calls if tool.lower().endswith("whoami.exe")) == 1
 
 
-def test_the_permission_tools_get_the_powershell_cache_dirs_and_nothing_secret(monkeypatch):
-    # [W6b] without LOCALAPPDATA a cold Windows PowerShell 5.1 cannot use its module-analysis cache and
-    # a first start outlived the 30 s bound on CI: the cache dirs travel, secrets and PSModulePath never do.
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\u\AppData\Local")
-    monkeypatch.setenv("APPDATA", r"C:\Users\u\AppData\Roaming")
+def test_the_permission_tools_never_get_an_api_key_a_passphrase_or_psmodulepath(monkeypatch):
+    # [W6b/n-3] secrets and PSModulePath never reach whoami or icacls.
     monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
     seen = _capture_tool_envs(monkeypatch)
     guard = WindowsPermissionGuard()
@@ -558,46 +525,7 @@ def test_the_permission_tools_get_the_powershell_cache_dirs_and_nothing_secret(m
     assert {"whoami.exe", "icacls.exe"} <= {tool for tool, _ in seen}
     for tool, env in seen:
         names = {name.upper() for name in env}
-        assert env["LOCALAPPDATA"] == r"C:\Users\u\AppData\Local", tool
-        assert env["APPDATA"] == r"C:\Users\u\AppData\Roaming", tool
         assert not names & {"OPENAI_API_KEY", "MAGI_PASSPHRASE", "PSMODULEPATH"}, tool
-
-
-def test_the_cache_dirs_are_added_only_when_the_parent_has_them(monkeypatch):
-    # [W6b] absent in the parent means absent in the child: nothing is invented.
-    monkeypatch.delenv("LOCALAPPDATA", raising=False)
-    monkeypatch.delenv("APPDATA", raising=False)
-    seen = _capture_tool_envs(monkeypatch)
-    WindowsPermissionGuard().harden("k", directory=False)
-    ((_, env),) = [entry for entry in seen if entry[0] == "icacls.exe"]
-    assert "LOCALAPPDATA" not in env and "APPDATA" not in env
-
-
-def test_every_permission_tool_gets_the_windows_system_variables(monkeypatch):
-    # [W6c] CI windows-latest: a cold Windows PowerShell 5.1 needed a system variable the allowlist lacked.
-    for name in _WINDOWS_SYSTEM_VARIABLES:
-        monkeypatch.setenv(name, f"value-of-{name}")
-    seen = _capture_tool_envs(monkeypatch)
-    guard = WindowsPermissionGuard()
-    guard.harden("k", directory=False)
-    assert {"whoami.exe", "icacls.exe"} <= {tool for tool, _ in seen}
-    for tool, env in seen:
-        upper = {name.upper(): value for name, value in env.items()}
-        for name in _WINDOWS_SYSTEM_VARIABLES:
-            assert upper.get(name) == f"value-of-{name}", (tool, name)
-
-
-def test_windows_system_variables_are_matched_case_insensitively(monkeypatch):
-    # [W6c] Windows spells them in mixed case (``ProgramFiles(x86)``, ``windir``); the match ignores case.
-    monkeypatch.setenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    monkeypatch.setenv("windir", r"C:\Windows")
-    seen = _capture_tool_envs(monkeypatch)
-    WindowsPermissionGuard().harden("k", directory=False)
-    ((_, env),) = [entry for entry in seen if entry[0] == "icacls.exe"]
-    upper = {name.upper(): value for name, value in env.items()}
-    assert (
-        upper["PROGRAMFILES(X86)"] == r"C:\Program Files (x86)" and upper["WINDIR"] == r"C:\Windows"
-    )
 
 
 def _no_process(*args, **kwargs):
