@@ -798,9 +798,12 @@ class KeyRotation:
             try:
                 shutil.rmtree(backup_dir)
             except OSError:
+                parents = (
+                    f" (left in place: {', '.join(created_parents)})" if created_parents else ""
+                )
                 raise RotationFailedError(
                     f"moving {magi_dir} to {target} failed ({reason}): {magi_dir} is unchanged; a partial "
-                    f"copy was left in {backup_dir}, delete it"
+                    f"copy was left in {backup_dir}, delete it{parents}"
                 ) from error
             leftover = self._remove_created(created_parents)
             raise RotationFailedError(
