@@ -637,8 +637,13 @@ class KeyRotation:
         try:
             os.makedirs(candidate, mode=DIR_MODE)
         except BaseException as error:  # noqa: BLE001 - before the move, even an interrupt must end described
-            # A FileExistsError means another process made the leaf (and so its parents): nothing here is ours.
-            ours = [] if isinstance(error, FileExistsError) else [*created_parents, candidate]
+            # A FileExistsError means another process made the leaf: it is never touched; only the
+            # parents this call created are removed (rmdir, innermost first) or named.
+            ours = (
+                created_parents
+                if isinstance(error, FileExistsError)
+                else [*created_parents, candidate]
+            )
             leftover = self._remove_created(ours)
             raise RotationFailedError(
                 f"cannot create the rotation backup {candidate} ({self._reason(error)}){leftover}: "
