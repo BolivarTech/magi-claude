@@ -20,7 +20,9 @@ from __future__ import annotations
 import base64
 import hmac
 import os
+import re
 import secrets
+from functools import cached_property
 from typing import Protocol
 
 from link_guard import link_refusal
@@ -48,6 +50,13 @@ KEY_ENCODING = "ascii"
 
 REDACTION_MARKER = "<redacted>"
 """Replaces the key wherever text captured from a child echoes it (BDD-22)."""
+
+_ESCAPE_ALTERNATIVES = {
+    "/": r"(?:/|\\/|\\u002[fF])",
+    "+": r"(?:\+|\\u002[bB])",
+    "=": r"(?:=|\\u003[dD])",
+}
+"""The base64 characters a JSON encoder may escape, each as its literal or any escape (N1)."""
 
 _EXCLUSIVE_CREATE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
 """Create-or-fail, write-only; binary on Windows so no newline translation happens."""
@@ -149,11 +158,14 @@ class MagiKey:
     def redact(self, text: str) -> str:
         """Replace every occurrence of the key in ``text`` with ``REDACTION_MARKER``.
 
-        Scope: the key's exact text and its JSON-escaped forms (``/`` and ``+``
-        escaped) are replaced. Any other transformed copy (split across lines,
-        percent- or otherwise re-encoded, with whitespace collapsed inside it) is
-        not recognised, so redact BEFORE any such transformation. The plugin never
-        forwards the key to such a sink, and magi-rs never prints it.
+        Scope: the key's exact text and every JSON-escaped rendering of it, where
+        each ``/``, ``+`` and ``=`` of the key may independently appear literally
+        or as a JSON escape (a backslash before the slash, or the ``u002f`` /
+        ``u002b`` / ``u003d`` unicode escapes in either hex case). Any other
+        transformed copy (split across lines, percent- or otherwise re-encoded,
+        with whitespace collapsed inside it) is outside the guarantee, so redact
+        BEFORE any such transformation. The plugin never forwards the key to such
+        a sink, and magi-rs never prints it.
 
         Args:
             text: Text that may echo the key, e.g. a child's output.
@@ -163,7 +175,7 @@ class MagiKey:
             or the key is empty (an empty pattern would match everywhere).
 
         Complexity:
-            O(n) in the length of ``text``.
+            O(n) in the length of ``text`` for a key of fixed length.
 
         Example:
             >>> MagiKey("c2VjcmV0").redact("got c2VjcmV0")
@@ -171,32 +183,37 @@ class MagiKey:
         """
         if not self._value:
             return text
-        for form in self._escaped_forms():
-            text = text.replace(form, REDACTION_MARKER)
-        return text.replace(self._value, REDACTION_MARKER)
+        return self._text_pattern.sub(lambda _match: REDACTION_MARKER, text)
 
-    def _escaped_forms(self) -> tuple[str, ...]:
-        """Return the forms of the key a JSON encoder may emit for its ``/`` and ``+``.
+    def _pattern_source(self) -> str:
+        """Build the regular expression matching the key under any combination of JSON escapes.
 
-        Base64 keys contain ``/`` and ``+``, which some encoders escape (a backslash before the
-        slash, or the ``u002f`` / ``u002b`` unicode escapes in either hex case). Forms identical
-        to the key (it contains neither character) are left out.
+        Every ``/``, ``+`` and ``=`` becomes the alternation of its literal and its JSON
+        escapes; every other character is matched literally.
 
         Returns:
-            The distinct escaped renderings, never the plain key.
+            The pattern source, ASCII when the key is.
         """
-        value = self._value
-        forms = (
-            value.replace("/", "\\/"),
-            value.replace("/", "\\u002f").replace("+", "\\u002b"),
-            value.replace("/", "\\u002F").replace("+", "\\u002B"),
-        )
-        return tuple(dict.fromkeys(form for form in forms if form != value))
+        return "".join(_ESCAPE_ALTERNATIVES.get(char) or re.escape(char) for char in self._value)
+
+    @cached_property
+    def _text_pattern(self) -> re.Pattern[str]:
+        """The compiled pattern for ``str`` input, built once per key."""
+        return re.compile(self._pattern_source())
+
+    @cached_property
+    def _bytes_pattern(self) -> re.Pattern[bytes]:
+        """The compiled pattern for ``bytes`` input, built once per key.
+
+        Raises:
+            UnicodeEncodeError: The key text cannot be encoded with ``KEY_ENCODING``.
+        """
+        return re.compile(self._pattern_source().encode(KEY_ENCODING))
 
     def redact_bytes(self, data: bytes) -> bytes:
         """Replace every occurrence of the key's ASCII bytes in ``data`` with ``REDACTION_MARKER``.
 
-        Same scope as :meth:`redact` (exact bytes and the JSON-escaped forms).
+        Same scope as :meth:`redact` (exact bytes and every combination of JSON escapes).
 
         Args:
             data: Bytes that may echo the key, e.g. a child's captured stream.
@@ -206,18 +223,16 @@ class MagiKey:
             the key is empty or its text cannot be encoded with ``KEY_ENCODING``.
 
         Complexity:
-            O(n) in the length of ``data``.
+            O(n) in the length of ``data`` for a key of fixed length.
         """
         if not self._value:
             return data
         try:
-            needle = self._value.encode(KEY_ENCODING)
+            pattern = self._bytes_pattern
         except UnicodeEncodeError:
             return data  # a key that cannot be encoded cannot appear in the bytes either
         marker = REDACTION_MARKER.encode(KEY_ENCODING)
-        for form in self._escaped_forms():
-            data = data.replace(form.encode(KEY_ENCODING), marker)
-        return data.replace(needle, marker)
+        return pattern.sub(lambda _match: marker, data)
 
     def __eq__(self, other: object) -> bool:
         """Compare two keys by value, in constant time.
