@@ -984,3 +984,12 @@ def test_windows_verify_of_an_inheriting_dacl_with_only_a_foreign_deny_is_expose
         _windows_guard(f"D:AI(D;;FA;;;{OTHER})(A;;FA;;;{ME})").verify("k", directory=False)
     assert not isinstance(raised.value, KeyUnverifiableError)
     assert "inherits" in str(raised.value)
+
+
+@pytest.mark.parametrize("sddl", [f"O:{ME}G:{ME}", "D:NO_ACCESS_CONTROL"])
+def test_windows_verify_of_a_null_or_absent_dacl_is_exposed_not_unverifiable(sddl):
+    # [Z5] a NULL DACL grants everyone full access: that is an exposure, not an unreadable descriptor.
+    with pytest.raises(KeyExposedError) as raised:
+        _windows_guard(sddl).verify("k", directory=False)
+    assert not isinstance(raised.value, KeyUnverifiableError)
+    assert "full access" in str(raised.value) and "\n" not in str(raised.value)
