@@ -264,10 +264,14 @@ class KeyStore:
     def persist(self, workdir: str, key: MagiKey) -> str:
         """Write ``key`` under ``workdir``, restricted from creation, then harden and verify it.
 
-        The directory is created with ``DIR_MODE`` and the file with
-        ``FILE_MODE`` through an exclusive create, so there is no window in
-        which either is readable by others and no check-then-write race: an
-        existing key makes the create itself fail.
+        The directory is created with ``DIR_MODE`` and hardened by the guard
+        BEFORE the file exists, so on every platform and Python build the file
+        is created inside an owner-only directory (on Windows ``os.makedirs``
+        honours ``mode`` only on CPython builds with the CVE-2024-4030 fix; the
+        guard's inheritable owner-only grant covers the others). The file is
+        then created with ``FILE_MODE`` through an exclusive create, so there is
+        no check-then-write race: an existing key makes the create itself fail.
+        Directory and file are hardened and verified again after the write.
 
         Args:
             workdir: The project working directory.
@@ -279,12 +283,19 @@ class KeyStore:
         Raises:
             FileExistsError: A key already exists; it is left untouched.
             KeyHardeningError: Hardening or verification failed; the file this
-                call created is removed.
+                call created is removed (none exists when the directory could
+                not be hardened first).
             OSError: The directory or the file could not be created.
         """
         key_file = self.key_path(workdir)
         secret_dir = os.path.dirname(key_file)
         os.makedirs(secret_dir, mode=DIR_MODE, exist_ok=True)
+        try:
+            self.guard.harden(secret_dir, True)
+        except KeyStoreError as error:
+            raise KeyHardeningError(
+                f"could not restrict the key directory {secret_dir} to its owner: no key was written"
+            ) from error
         descriptor = os.open(key_file, _EXCLUSIVE_CREATE_FLAGS, FILE_MODE)
         try:
             with os.fdopen(descriptor, "wb") as handle:
