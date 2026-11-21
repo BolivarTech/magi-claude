@@ -5904,3 +5904,9 @@ def test_rotate_main_with_a_regular_file_named_magi_says_nothing_to_rotate_befor
     assert run_magi.rotate_main(False, is_tty=True) == 1
     err = capsys.readouterr().err
     assert "nothing to rotate" in err and "\n" not in err.strip()
+
+
+def test_render_fatal_names_the_error_class_when_the_message_is_empty():
+    # [O6] a bare EOFError (an exhausted stdin) must never render as a bare "[FATAL]".
+    assert run_magi._render_fatal(EOFError()) == "[FATAL] EOFError"
+    assert run_magi._render_fatal(ValueError("one\ntwo")) == "[FATAL] one two"
