@@ -210,14 +210,17 @@ class MagiKey:
             other: The object to compare with.
 
         Returns:
-            True when ``other`` is a ``MagiKey`` holding the same text;
+            True when ``other`` is a ``MagiKey`` holding the same text; False when
+            either text cannot be encoded with ``KEY_ENCODING`` (never raises);
             ``NotImplemented`` for any other type.
         """
         if not isinstance(other, MagiKey):
             return NotImplemented
-        return hmac.compare_digest(
-            self._value.encode(KEY_ENCODING), other._value.encode(KEY_ENCODING)
-        )
+        try:
+            mine, theirs = self._value.encode(KEY_ENCODING), other._value.encode(KEY_ENCODING)
+        except UnicodeEncodeError:
+            return False  # a key that cannot be written to the key file never equals anything
+        return hmac.compare_digest(mine, theirs)
 
     def __hash__(self) -> int:
         """Refuse to hash a key: a secret must not become a dict key or a set member by accident.
