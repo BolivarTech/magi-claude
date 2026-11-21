@@ -1,28 +1,106 @@
 # Author: Julian Bolivar
 # Version: 7.1.0
 # Date: 2026-11-19
-"""Full rotation of an exposed magi-rs memory key (REQ-13e-h)."""
+"""Full rotation of an exposed magi-rs memory key (REQ-13e-h).
+
+A key whose permissions were loosened may have been copied, and with it the
+memory database and every secret in the vault. Re-wrapping the database key
+(``vault passwd``) does not protect a copy that already left, so the rotation
+replaces everything:
+
+1. it is authorised explicitly (``--yes``, or ``y`` at a terminal prompt);
+2. the old key is read (unverified: it is exposed by definition) before
+   anything moves;
+3. the old ``.magi/`` is moved to ``<backup root>/<id>/.magi``, outside every
+   working tree, and the backup is restricted to its owner again (a move across
+   volumes does not carry the ACL);
+4. a new ``.magi/`` is created by the injected ``init`` (new key, new database);
+5. the old key is used once more, only for ``vault ls`` on the backup, so the
+   operator learns which API keys to revoke (names only, never values).
+
+Every failure leaves a described state in one line and never prints either
+key. A hard stop (killed process, power loss) between steps 3 and 4 prints
+nothing: the root then has no ``.magi/`` and the old one is intact in the
+backup, from where it can be moved back.
+
+Side effects of :meth:`KeyRotation.rotate`: creates ``<backup root>/<id>/``,
+moves ``<workdir>/.magi`` into it, restricts the backup's permissions, and
+creates a new ``<workdir>/.magi`` through ``init``.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import itertools
+import os
+import shutil
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from magi_key import KeyStore, MagiKey
+from magi_key import DIR_MODE, KEY_DIR_PARTS, KEY_FILENAME, KeyStore, KeyStoreError, MagiKey
+from magi_rs_vault import VAULT_KEY_NAMES
+
+MAGI_DIR = KEY_DIR_PARTS[0]
+"""The project directory that a rotation moves aside and recreates."""
+
+_CONFIG_FILENAME = "magi.toml"
+"""The ``magi-rs`` configuration that, with the key, marks a complete ``.magi/``."""
+
+_BACKUP_PARTS = ("magi", "rotated")
+"""The backup root, relative to the platform's per-user state directory."""
+
+_WINDOWS_STATE_VARIABLE = "LOCALAPPDATA"
+_WINDOWS_STATE_FALLBACK_PARTS = ("AppData", "Local")
+"""``%LOCALAPPDATA%`` relative to the profile, used only when the variable is unset."""
+
+_POSIX_STATE_VARIABLE = "XDG_STATE_HOME"
+_POSIX_STATE_FALLBACK_PARTS = (".local", "state")
+"""The XDG default of ``$XDG_STATE_HOME``, relative to ``$HOME``."""
+
+_FINGERPRINT_HEX_CHARS = 16
+"""Length of the project fingerprint in a backup id."""
+
+_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+"""UTC timestamp of a backup id, e.g. ``20261120T120000Z``."""
+
+_FIRST_COLLISION_SUFFIX = 2
+"""The suffix of the second backup created within the same second (``-2``)."""
+
+_AUTHORISING_ANSWERS = frozenset({"y", "Y"})
+"""The only answers to the confirmation prompt that authorise a rotation."""
+
+_CONFIRM_PROMPT = (
+    "Rotate the magi-rs key of {workdir}? The current .magi/ is moved to a backup and its memory "
+    "and history are lost. [y/N] "
+)
+_REDACTED = "<redacted>"
 
 
 class RotationNotAuthorisedError(Exception):
-    """The rotation was not authorised; nothing changed."""
+    """The rotation was not authorised; nothing changed (a sibling of ``ValidationError``)."""
 
 
 class RotationFailedError(Exception):
-    """The rotation stopped; the message describes the state left behind in one line."""
+    """The rotation stopped; the message describes, in one line, the state left behind.
+
+    A sibling of ``ValidationError``: a stopped rotation is never something a
+    retry handler may consume.
+    """
 
 
 @dataclass
 class RotationReport:
-    """What a completed rotation did."""
+    """What a completed rotation did.
+
+    Attributes:
+        backup_dir: ``<backup root>/<id>``, the parent of the old ``.magi/``.
+        names_to_revoke: The API key names to revoke at their providers.
+        names_from_vault: True when the names were read from the old vault;
+            False when it could not be read and the names are the whole closed
+            list (``VAULT_KEY_NAMES``).
+    """
 
     backup_dir: str
     names_to_revoke: list[str]
@@ -30,17 +108,82 @@ class RotationReport:
 
 
 def rotation_backup_root() -> str:
-    """Return the platform directory that holds rotation backups."""
-    raise NotImplementedError
+    """Return the per-user directory that holds rotation backups, outside every working tree.
+
+    Returns:
+        On Windows ``%LOCALAPPDATA%\\magi\\rotated`` (``~\\AppData\\Local`` when the
+        variable is unset); elsewhere ``$XDG_STATE_HOME/magi/rotated``, or
+        ``~/.local/state/magi/rotated`` when the variable is unset or empty.
+        Never fails for a missing variable.
+    """
+    if sys.platform == "win32":
+        variable, fallback = _WINDOWS_STATE_VARIABLE, _WINDOWS_STATE_FALLBACK_PARTS
+    else:
+        variable, fallback = _POSIX_STATE_VARIABLE, _POSIX_STATE_FALLBACK_PARTS
+    state = os.environ.get(variable) or os.path.join(os.path.expanduser("~"), *fallback)
+    return os.path.join(state, *_BACKUP_PARTS)
 
 
 def _utc_now() -> datetime:
-    """Return the current UTC time."""
+    """Return the current time, timezone-aware, in UTC.
+
+    Returns:
+        ``datetime.now(timezone.utc)``.
+    """
     return datetime.now(timezone.utc)
 
 
+def _canonical(path: str) -> str:
+    """Return ``path`` resolved and case-normalised, for containment checks.
+
+    Args:
+        path: Any path; it need not exist.
+
+    Returns:
+        The real, normalised path.
+    """
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _is_within(path: str, parent: str) -> bool:
+    """Tell whether ``path`` is ``parent`` or lies under it.
+
+    Args:
+        path: The candidate path.
+        parent: The directory it may lie in.
+
+    Returns:
+        True when ``path`` resolves inside ``parent``; False otherwise,
+        including when the two are on different drives.
+    """
+    candidate, root = _canonical(path), _canonical(parent)
+    try:
+        return os.path.commonpath([candidate, root]) == root
+    except ValueError:
+        return False
+
+
+def _one_line(text: str) -> str:
+    """Collapse every run of whitespace, newlines included, into one space.
+
+    Args:
+        text: Any message.
+
+    Returns:
+        ``text`` on a single line.
+    """
+    return " ".join(text.split())
+
+
 class KeyRotation:
-    """Moves an exposed ``.magi/`` aside and creates a new one."""
+    """Moves an exposed ``.magi/`` to a backup and creates a new one.
+
+    Example:
+        >>> rotation = KeyRotation(default_key_store(), run_ollama_init, list_vault_names)
+        >>> report = rotation.rotate(os.getcwd(), assume_yes=True, is_tty=False)
+        >>> report.names_to_revoke
+        ['OPENAI_API_KEY']
+    """
 
     def __init__(
         self,
@@ -51,8 +194,23 @@ class KeyRotation:
         *,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
-        """Bind the rotation to its collaborators."""
-        raise NotImplementedError
+        """Bind the rotation to its collaborators.
+
+        Args:
+            key_store: Reads the old key; its ``guard`` re-hardens the backup.
+            init: Creates a new ``.magi/`` (with a new key) in a working
+                directory; ``run_ollama_init`` in production.
+            vault_ls: Lists the vault names of the ``.magi/`` under a directory,
+                opened with a key; it receives the backup directory and the old key.
+            backup_root: Where backups go; ``None`` selects
+                :func:`rotation_backup_root`.
+            clock: Returns the current UTC time; it names the backup.
+        """
+        self._store = key_store
+        self._init = init
+        self._vault_ls = vault_ls
+        self._backup_root = backup_root if backup_root is not None else rotation_backup_root()
+        self._clock = clock
 
     def rotate(
         self,
@@ -61,5 +219,231 @@ class KeyRotation:
         is_tty: bool,
         confirm: Callable[[str], str] = input,
     ) -> RotationReport:
-        """Rotate the key of ``workdir``."""
-        raise NotImplementedError
+        """Rotate the key of ``workdir``: backup, new ``.magi/``, names to revoke.
+
+        Args:
+            workdir: The project root whose ``.magi/`` is rotated.
+            assume_yes: True when ``--yes`` was given; it authorises without asking.
+            is_tty: True when ``confirm`` can ask an operator.
+            confirm: Asks the confirmation question and returns the answer.
+
+        Returns:
+            The report of the completed rotation.
+
+        Raises:
+            RotationNotAuthorisedError: Neither ``--yes`` nor a ``y``/``Y``
+                answer; nothing changed.
+            RotationFailedError: The rotation stopped; the one-line message
+                describes the state left behind and names the backup when one
+                exists. Neither key ever appears in it.
+        """
+        self._authorise(workdir, assume_yes, is_tty, confirm)
+        magi_dir = os.path.join(workdir, MAGI_DIR)
+        if not os.path.isdir(magi_dir):
+            raise RotationFailedError(f"no {MAGI_DIR}/ in {workdir}: there is nothing to rotate")
+        if _is_within(self._backup_root, workdir):
+            raise RotationFailedError(
+                f"the rotation backup root {self._backup_root} is inside the working tree {workdir}: "
+                "nothing was moved; point the state directory outside the project"
+            )
+        old_key = self._read_old_key(workdir)
+        backup_dir = self._create_backup_dir(workdir)
+        self._move(magi_dir, backup_dir)
+        self._reharden(backup_dir, workdir)
+        self._create_new(workdir, backup_dir, old_key)
+        names, from_vault = self._names_to_revoke(backup_dir, old_key)
+        return RotationReport(backup_dir, names, from_vault)
+
+    @staticmethod
+    def _authorise(
+        workdir: str, assume_yes: bool, is_tty: bool, confirm: Callable[[str], str]
+    ) -> None:
+        """Require ``--yes`` or, at a terminal, a ``y``/``Y`` answer.
+
+        Args:
+            workdir: The project root, named in the question.
+            assume_yes: ``--yes`` was given.
+            is_tty: An operator can be asked.
+            confirm: Asks the question once.
+
+        Raises:
+            RotationNotAuthorisedError: The rotation is not authorised.
+        """
+        if assume_yes:
+            return
+        if not is_tty:
+            raise RotationNotAuthorisedError(
+                "the key rotation needs authorisation: without a terminal, rerun with --yes "
+                "(nothing was changed)"
+            )
+        if confirm(_CONFIRM_PROMPT.format(workdir=workdir)).strip() not in _AUTHORISING_ANSWERS:
+            raise RotationNotAuthorisedError(
+                "the key rotation was not confirmed (nothing was changed)"
+            )
+
+    def _read_old_key(self, workdir: str) -> MagiKey:
+        """Read the exposed key, without verifying it, before anything moves.
+
+        Args:
+            workdir: The project root.
+
+        Returns:
+            The old key.
+
+        Raises:
+            RotationFailedError: The key cannot be read; nothing was moved.
+        """
+        key_file = self._store.key_path(workdir)
+        try:
+            return self._store.read_unverified(key_file)
+        except (KeyStoreError, OSError) as error:
+            raise RotationFailedError(
+                f"cannot read the current key at {key_file} ({_one_line(str(error))}): nothing was moved"
+            ) from error
+
+    def _create_backup_dir(self, workdir: str) -> str:
+        """Create ``<backup root>/<id>`` with owner-only mode, never reusing an existing one.
+
+        ``<id>`` is ``<16 hex of the project path's sha256>-<UTC timestamp>``;
+        a collision within the same second gets ``-2``, ``-3``, ... appended.
+
+        Args:
+            workdir: The project root, fingerprinted into the id.
+
+        Returns:
+            The created directory.
+
+        Raises:
+            RotationFailedError: The directory could not be created; nothing was moved.
+        """
+        fingerprint = hashlib.sha256(_canonical(workdir).encode("utf-8")).hexdigest()
+        stamp = self._clock().astimezone(timezone.utc).strftime(_TIMESTAMP_FORMAT)
+        base = os.path.join(self._backup_root, f"{fingerprint[:_FINGERPRINT_HEX_CHARS]}-{stamp}")
+        suffixed = (f"{base}-{n}" for n in itertools.count(_FIRST_COLLISION_SUFFIX))
+        candidate = next(
+            path for path in itertools.chain([base], suffixed) if not os.path.lexists(path)
+        )
+        try:
+            os.makedirs(candidate, mode=DIR_MODE)
+        except OSError as error:
+            raise RotationFailedError(
+                f"cannot create the rotation backup {candidate} ({_one_line(str(error))}): nothing was moved"
+            ) from error
+        return candidate
+
+    @staticmethod
+    def _move(magi_dir: str, backup_dir: str) -> None:
+        """Move ``.magi/`` into ``backup_dir``; on failure, keep whichever copy is complete.
+
+        Across volumes ``shutil.move`` copies and then deletes the source, so a
+        failure may leave the source partly deleted. The partial backup is
+        removed only when the source is still complete (its config and its key
+        exist); otherwise nothing is deleted and both paths are named.
+
+        Args:
+            magi_dir: ``<workdir>/.magi``.
+            backup_dir: ``<backup root>/<id>``.
+
+        Raises:
+            RotationFailedError: The move failed; the message says where the
+                old ``.magi/`` is.
+        """
+        target = os.path.join(backup_dir, MAGI_DIR)
+        try:
+            shutil.move(magi_dir, target)
+        except OSError as error:
+            reason = _one_line(str(error))
+            source_complete = os.path.isfile(
+                os.path.join(magi_dir, _CONFIG_FILENAME)
+            ) and os.path.isfile(os.path.join(magi_dir, *KEY_DIR_PARTS[1:], KEY_FILENAME))
+            if not source_complete:
+                raise RotationFailedError(
+                    f"moving {magi_dir} to {target} failed ({reason}) after part of it was copied: nothing was "
+                    f"deleted; the copy in {target} is the complete one, move it back to {magi_dir} to retry"
+                ) from error
+            try:
+                shutil.rmtree(backup_dir)
+            except OSError:
+                raise RotationFailedError(
+                    f"moving {magi_dir} to {target} failed ({reason}): {magi_dir} is unchanged; a partial "
+                    f"copy was left in {backup_dir}, delete it"
+                ) from error
+            raise RotationFailedError(
+                f"moving {magi_dir} to {target} failed ({reason}): {magi_dir} is unchanged"
+            ) from error
+
+    def _reharden(self, backup_dir: str, workdir: str) -> None:
+        """Restrict the backup, its key directory and its key to the owner, then verify.
+
+        The backup directory itself is hardened here, after the move, so that a
+        guard failure always leaves the backup where it is.
+
+        Args:
+            backup_dir: ``<backup root>/<id>``.
+            workdir: The project root, named in the recovery instruction.
+
+        Raises:
+            RotationFailedError: Hardening or verification failed; the backup
+                is kept and no new ``.magi/`` is created.
+        """
+        secret_dir = os.path.join(backup_dir, *KEY_DIR_PARTS)
+        key_file = os.path.join(secret_dir, KEY_FILENAME)
+        guard = self._store.guard
+        try:
+            guard.harden(backup_dir, True)
+            guard.harden(secret_dir, True)
+            guard.harden(key_file, False)
+            guard.verify(secret_dir, True)
+            guard.verify(key_file, False)
+        except (KeyStoreError, OSError) as error:
+            raise RotationFailedError(
+                f"the old {MAGI_DIR}/ was moved to {os.path.join(backup_dir, MAGI_DIR)} but could not be "
+                f"restricted to its owner ({_one_line(type(error).__name__)}), so it may be exposed; no new "
+                f"{MAGI_DIR}/ was created: move it back to {os.path.join(workdir, MAGI_DIR)} to retry"
+            ) from error
+
+    def _create_new(self, workdir: str, backup_dir: str, old_key: MagiKey) -> None:
+        """Create the new ``.magi/``; on any failure, leave none at the root.
+
+        Args:
+            workdir: The project root.
+            backup_dir: ``<backup root>/<id>``, named in the recovery instruction.
+            old_key: Redacted from the failure detail.
+
+        Raises:
+            RotationFailedError: ``init`` failed with any exception.
+        """
+        magi_dir = os.path.join(workdir, MAGI_DIR)
+        try:
+            self._init(workdir, self._store)
+        except Exception as error:  # noqa: BLE001 - any init failure must end in the described state
+            detail = _one_line(" ".join([str(error), *getattr(error, "__notes__", [])]))
+            detail = detail.replace(old_key.reveal(), _REDACTED) or type(error).__name__
+            leftover = ""
+            if os.path.lexists(magi_dir):
+                try:
+                    shutil.rmtree(magi_dir)
+                except OSError:
+                    leftover = (
+                        f" (and the half-made {magi_dir} could not be removed: delete it first)"
+                    )
+            raise RotationFailedError(
+                f"creating the new {MAGI_DIR}/ failed ({detail}){leftover}: the old one is intact at "
+                f"{os.path.join(backup_dir, MAGI_DIR)}; move it back to {magi_dir} to retry"
+            ) from error
+
+    def _names_to_revoke(self, backup_dir: str, old_key: MagiKey) -> tuple[list[str], bool]:
+        """List the old vault's names with the old key: the key's only use after the move.
+
+        Args:
+            backup_dir: ``<backup root>/<id>``, the backup's working directory.
+            old_key: The exposed key.
+
+        Returns:
+            ``(names, True)`` from the vault, or ``(list(VAULT_KEY_NAMES), False)``
+            when the vault cannot be read for any reason.
+        """
+        try:
+            return list(self._vault_ls(backup_dir, old_key)), True
+        except Exception:  # noqa: BLE001 - an unreadable old vault falls back to the closed list, reported
+            return list(VAULT_KEY_NAMES), False

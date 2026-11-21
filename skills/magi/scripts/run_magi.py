@@ -77,7 +77,12 @@ from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E40
 from magi_key_permissions import default_key_store  # noqa: E402
 from magi_rs_bootstrap import BinaryBootstrap  # noqa: E402
 from magi_rs_preflight import ProjectPreflight  # noqa: E402
-from magi_key_rotation import KeyRotation  # noqa: E402, F401
+from magi_key import MagiKey  # noqa: E402
+from magi_key_rotation import (  # noqa: E402
+    KeyRotation,
+    RotationFailedError,
+    RotationNotAuthorisedError,
+)
 from magi_rs_vault import VAULT_KEY_NAMES, VaultClient  # noqa: E402
 from ollama_init import run_ollama_init  # noqa: E402
 from run_lock import (  # noqa: E402
@@ -2093,6 +2098,9 @@ _VAULT_SET_FLAG = "--ollama-vault-set"
 _ROTATE_KEY_FLAG = "--ollama-rotate-key"
 _VAULT_VALUE_PROMPT = "API key value (input hidden): "
 _LINE_ENDINGS = "\r\n"
+_YES_FLAG = "--yes"
+_BOOTSTRAP_ERRORS: tuple[type[Exception], ...] = (*FAIL_CLOSED_ERRORS, OSError)
+"""What verifying the binary may raise: a fail-closed error, or a launch failure of the digest check."""
 
 
 def vault_set_main(argv: list[str], stdin: IO[str], is_tty: bool) -> int:
@@ -2140,7 +2148,62 @@ def vault_set_main(argv: list[str], stdin: IO[str], is_tty: bool) -> int:
 
 
 def rotate_main(argv: list[str], is_tty: bool) -> int:
-    raise NotImplementedError
+    """``--ollama-rotate-key [--yes]``: replace an exposed key, its database and its vault.
+
+    The binary is verified first, before anything moves, because the rotation
+    ends by running ``magi-rs init`` and ``magi-rs vault ls``. The rotation
+    itself (:class:`magi_key_rotation.KeyRotation`) moves the current
+    ``.magi/`` to a backup outside the working tree and creates a new one; this
+    handler prints where the backup went and which API keys to revoke (names,
+    never values). Neither key is ever printed.
+
+    Args:
+        argv: The arguments after the flag: nothing, or ``--yes``.
+        is_tty: True when stdin is a terminal; without ``--yes`` the operator
+            is then asked to confirm.
+
+    Returns:
+        0 on success; 1 when the binary does not verify, the rotation is not
+        authorised or it stopped (one line on stderr, never a traceback);
+        2 for unknown arguments.
+    """
+    if argv not in ([], [_YES_FLAG]):
+        print(f"ERROR: {_ROTATE_KEY_FLAG} accepts only {_YES_FLAG}", file=sys.stderr)
+        return 2
+    try:
+        root = plugin_root()
+        executable = BinaryBootstrap(Pin.load(pin_path(root)), bin_dir(root)).ensure()
+    except _BOOTSTRAP_ERRORS as exc:
+        print(f"[FATAL] {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+
+    def _vault_ls(workdir: str, key: MagiKey) -> list[str]:
+        """List the vault names under ``workdir`` with the verified binary."""
+        return VaultClient(executable, workdir, key).ls()
+
+    rotation = KeyRotation(default_key_store(), run_ollama_init, _vault_ls)
+    try:
+        report = rotation.rotate(os.getcwd(), assume_yes=argv == [_YES_FLAG], is_tty=is_tty)
+    except (RotationNotAuthorisedError, RotationFailedError) as exc:
+        print(f"ERROR: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    print(
+        f"Key rotated. The old .magi/ is in {report.backup_dir}: destroy it once you no longer need it."
+    )
+    if not report.names_from_vault:
+        print("The old vault could not be read, so every name it may have held is listed.")
+    if report.names_to_revoke:
+        print(
+            "Treat these API keys as compromised: revoke each one at its provider, then store the new value"
+        )
+        print(f"with run_magi.py {_VAULT_SET_FLAG} <NAME>:")
+        for name in report.names_to_revoke:
+            print(f"  {name}")
+    else:
+        print(
+            f"The old vault held no API keys; store new ones with run_magi.py {_VAULT_SET_FLAG} <NAME>."
+        )
+    return 0
 
 
 def main() -> None:
