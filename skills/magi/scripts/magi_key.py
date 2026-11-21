@@ -51,12 +51,16 @@ _EXCLUSIVE_CREATE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_
 
 _REGENERATE_COMMAND = "--ollama-init"
 _ROTATE_COMMAND = "--ollama-rotate-key"
+_VAULT_SET_COMMAND = "--ollama-vault-set"
 
-_REGENERATION_GUIDANCE = (
-    f"move the existing .magi/ aside to a backup, then run {_REGENERATE_COMMAND} to create a new one "
-    f"({_REGENERATE_COMMAND} leaves an existing .magi/ untouched)"
+REGENERATION_GUIDANCE = (
+    f"move the existing .magi/ aside to a backup, run {_REGENERATE_COMMAND} (it leaves an existing .magi/ "
+    f"untouched), then reload each API key with {_VAULT_SET_COMMAND} <NAME>"
 )
-"""How to recover from a missing or empty key: the one way forward, stated once."""
+"""How to regenerate a ``.magi/`` that cannot be used (REQ-12): the one procedure, stated once.
+
+Used by a missing or empty key, by a ``.magi/`` without its config, and by an
+``--ollama-init`` that finds a ``.magi/`` already there."""
 
 
 class KeyStoreError(Exception):
@@ -355,7 +359,7 @@ class KeyStore:
         """
         key_file = self.key_path(workdir)
         if not os.path.exists(key_file):
-            raise KeyMissingError(f"no magi-rs memory key at {key_file}: {_REGENERATION_GUIDANCE}")
+            raise KeyMissingError(f"no magi-rs memory key at {key_file}: {REGENERATION_GUIDANCE}")
         try:
             self.guard.verify(os.path.dirname(key_file), True)
             self.guard.verify(key_file, False)
@@ -394,6 +398,6 @@ class KeyStore:
             raise KeyMissingError(f"cannot read the magi-rs memory key at {key_file}") from error
         if not value:
             raise KeyMissingError(
-                f"the magi-rs memory key at {key_file} is empty: {_REGENERATION_GUIDANCE}"
+                f"the magi-rs memory key at {key_file} is empty: {REGENERATION_GUIDANCE}"
             )
         return MagiKey(value)

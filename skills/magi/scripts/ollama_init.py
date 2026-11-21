@@ -20,7 +20,14 @@ import shutil
 import subprocess
 import sys
 
-from magi_key import KEY_DIR_PARTS, KeyMissingError, KeyStore, KeyStoreError, MagiKey
+from magi_key import (
+    KEY_DIR_PARTS,
+    REGENERATION_GUIDANCE,
+    KeyMissingError,
+    KeyStore,
+    KeyStoreError,
+    MagiKey,
+)
 from magi_key_permissions import default_key_store
 from magi_rs_bootstrap import BinaryBootstrap, verified_plugin_executable
 from magi_rs_env import EnvironmentPolicy
@@ -36,7 +43,7 @@ far beyond any healthy run and only bounds a hung child."""
 _MAGI_DIR = KEY_DIR_PARTS[0]
 _ALREADY_INITIALISED = (
     f"{_MAGI_DIR}/ already exists in {{workdir}}: left untouched (nothing was initialised, "
-    "no key was created)."
+    f"no key was created). To start over: {REGENERATION_GUIDANCE}."
 )
 
 

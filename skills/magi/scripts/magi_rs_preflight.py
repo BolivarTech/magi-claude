@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 
-from magi_key import KEY_DIR_PARTS, KeyStore, MagiKey
+from magi_key import KEY_DIR_PARTS, REGENERATION_GUIDANCE, KeyStore, MagiKey
 
 _CONFIG_RELATIVE_PATH = os.path.join(KEY_DIR_PARTS[0], "magi.toml")
 _INIT_COMMAND = "/magi --ollama-init"
@@ -44,14 +44,21 @@ class ProjectPreflight:
             Absolute path of ``.magi/magi.toml``.
 
         Raises:
-            ProjectNotInitialisedError: The file is absent. The message names
-                the exact command that creates it.
+            ProjectNotInitialisedError: The file is absent. Without a ``.magi/``
+                the message names the command that creates it; with a
+                ``.magi/`` that lacks its config (which ``--ollama-init``
+                refuses to touch) it gives the whole regeneration procedure.
 
         Side effects:
             Reads the filesystem. Writes NOTHING -- a gate run never
             initialises a project on the fly.
         """
         config = os.path.join(workdir, _CONFIG_RELATIVE_PATH)
+        if not os.path.isfile(config) and os.path.lexists(os.path.join(workdir, KEY_DIR_PARTS[0])):
+            raise ProjectNotInitialisedError(
+                f"{workdir} has a {KEY_DIR_PARTS[0]}/ without its config ({config} is absent): "
+                f"{REGENERATION_GUIDANCE}. A gate run never initialises a project on its own."
+            )
         if not os.path.isfile(config):
             raise ProjectNotInitialisedError(
                 f"{workdir} is not initialised for magi-rs ({config} is absent); "
