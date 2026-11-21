@@ -55,18 +55,18 @@ class ProjectPreflight:
             initialises a project on the fly.
         """
         config = os.path.join(workdir, _CONFIG_RELATIVE_PATH)
-        if not os.path.isfile(config) and os.path.lexists(os.path.join(workdir, KEY_DIR_PARTS[0])):
+        if os.path.isfile(config):
+            return config
+        if os.path.lexists(os.path.join(workdir, KEY_DIR_PARTS[0])):
             raise ProjectNotInitialisedError(
                 f"{workdir} has a {KEY_DIR_PARTS[0]}/ without its config ({config} is absent): "
                 f"{REGENERATION_GUIDANCE}. A gate run never initialises a project on its own."
             )
-        if not os.path.isfile(config):
-            raise ProjectNotInitialisedError(
-                f"{workdir} is not initialised for magi-rs ({config} is absent); "
-                f"run `{_INIT_COMMAND}` in that project first. A gate run never "
-                "initialises a project on its own."
-            )
-        return config
+        raise ProjectNotInitialisedError(
+            f"{workdir} is not initialised for magi-rs ({config} is absent); "
+            f"run `{_INIT_COMMAND}` in that project first. A gate run never "
+            "initialises a project on its own."
+        )
 
     @staticmethod
     def require_ready(workdir: str, key_store: KeyStore) -> MagiKey:

@@ -215,7 +215,9 @@ class MagiKey:
         """
         if not isinstance(other, MagiKey):
             return NotImplemented
-        return hmac.compare_digest(self._value.encode(), other._value.encode())
+        return hmac.compare_digest(
+            self._value.encode(KEY_ENCODING), other._value.encode(KEY_ENCODING)
+        )
 
     def __hash__(self) -> int:
         """Refuse to hash a key: a secret must not become a dict key or a set member by accident.

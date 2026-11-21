@@ -199,7 +199,9 @@ class VaultClient:
 
         Scope: only exact occurrences are replaced; a secret whose whitespace was
         collapsed or that was split or re-encoded is not recognised, so this runs
-        before any such transformation.
+        before any such transformation. A very short secret also blanks every
+        incidental occurrence of its text: that over-redaction is deliberate, since
+        the cost is a less informative message and never a leaked value.
 
         Args:
             text: Text that may echo a secret.
