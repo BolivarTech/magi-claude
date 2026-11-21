@@ -1654,3 +1654,40 @@ def test_the_feature_owned_root_is_decided_by_exact_trailing_components(tmp_path
     # [m-2] `notmagi/rotated` merely ends with the same characters: it is not the feature's directory.
     rotation = KeyRotation(_Store(), None, None, backup_root=os.path.abspath(root))
     assert os.path.normcase(rotation._feature_root()) == os.path.normcase(os.path.abspath(owned))
+
+
+def test_a_file_exists_error_removes_the_parents_it_created_but_never_the_leaf(
+    tmp_path, monkeypatch
+):
+    # [M2] rmdir-only cleanup, innermost first: an empty created parent goes, the existing leaf is untouched.
+    work = _project(tmp_path)
+    real_makedirs = os.makedirs
+
+    def _makedirs(path, *args, **kwargs):
+        real_makedirs(os.path.dirname(path))  # this call created the (empty) parents
+        raise FileExistsError(path)
+
+    monkeypatch.setattr("magi_key_rotation.os.makedirs", _makedirs)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert "nothing was moved" in str(exc.value) and "\n" not in str(exc.value).strip()
+    assert not (tmp_path / "rotated").exists()
+
+
+def test_a_file_exists_error_names_a_created_parent_that_holds_the_other_leaf(
+    tmp_path, monkeypatch
+):
+    work = _project(tmp_path)
+    real_makedirs = os.makedirs
+
+    def _makedirs(path, *args, **kwargs):
+        real_makedirs(path)  # another process made the leaf under the parents
+        raise FileExistsError(path)
+
+    monkeypatch.setattr("magi_key_rotation.os.makedirs", _makedirs)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert str(tmp_path / "rotated") in str(exc.value) and "delete them" in str(exc.value)
+    assert len(os.listdir(tmp_path / "rotated")) == 1  # the other process's leaf survives
