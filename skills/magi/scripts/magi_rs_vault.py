@@ -112,9 +112,10 @@ class VaultClient:
         """List the names held by the vault (never the values).
 
         Returns:
-            The names, in the order ``magi-rs`` printed them. An empty vault
-            answers ``[]``; a failure never does (an empty answer would read
-            as "nothing to revoke" during a rotation).
+            The names, in the order ``magi-rs`` printed them. ``[]`` only for
+            the measured ``(vault empty)`` answer; a failure, or an exit 0 that
+            printed nothing, never does (an empty answer would read as
+            "nothing to revoke" during a rotation).
 
         Raises:
             VaultCommandError: The command failed, or a line does not have the
@@ -131,7 +132,15 @@ class VaultClient:
             raise VaultCommandError(self._failure("vault ls", completed, ()))
         if completed.stdout.strip() == _LS_EMPTY_VAULT:
             return []
-        return [self._parse_ls_line(line) for line in completed.stdout.splitlines() if line.strip()]
+        names = [
+            self._parse_ls_line(line) for line in completed.stdout.splitlines() if line.strip()
+        ]
+        if not names:
+            # Only the measured sentinel means an empty vault: silence is not a claim that nothing is there.
+            raise VaultCommandError(
+                "vault ls printed nothing; an empty vault answers (vault empty)"
+            )
+        return names
 
     def _run(
         self, action: list[str], label: str, stdin: str | None, secrets: tuple[str, ...]
