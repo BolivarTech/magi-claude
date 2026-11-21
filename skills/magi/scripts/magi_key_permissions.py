@@ -718,7 +718,7 @@ class WindowsPermissionGuard(PermissionGuard):
                     *(f"*{other}" for other in dict.fromkeys(foreign)),
                 ]
             )
-        except (OSError, ValueError, ctypes.ArgumentError) as error:
+        except (OSError, ValueError, AttributeError, ctypes.ArgumentError) as error:
             raise KeyHardeningError(
                 f"cannot restrict {path} to its owner ({one_line(str(error))})"
             ) from error
@@ -776,7 +776,7 @@ class WindowsPermissionGuard(PermissionGuard):
             raise KeyExposedError(
                 f"{path} has no access control ({error}): everyone has full access"
             ) from error
-        except (OSError, ValueError, ctypes.ArgumentError) as error:
+        except (OSError, ValueError, AttributeError, ctypes.ArgumentError) as error:
             raise KeyUnverifiableError(f"cannot read the permissions of {path}: {error}") from error
         protection = f"(DACL protected: {_YES if protected else _NO})"
         with_access = [
