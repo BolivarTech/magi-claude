@@ -68,6 +68,9 @@ _GROUP_AND_OTHER_BITS = stat.S_IRWXG | stat.S_IRWXO
 _COMMAND_TIMEOUT_SECONDS = 30
 """Upper bound on each permission tool run (whoami, icacls)."""
 
+_WINDOWS_TOOL_ENCODING = "oem"
+"""The console code page ``whoami`` and ``icacls`` write in; the ANSI default garbles non-ASCII names."""
+
 _DEFAULT_SYSTEM_ROOT = r"C:\Windows"
 """Fallback when ``SystemRoot`` is absent from the environment."""
 
@@ -171,7 +174,8 @@ def _run(argv: list[str]) -> str:
         argv: The command, as an argument list (never through a shell).
 
     Returns:
-        The decoded standard output.
+        The standard output, decoded with the console code page on Windows and
+        the locale default elsewhere (undecodable bytes are replaced).
 
     Raises:
         OSError: The tool could not start, timed out or exited non-zero; the
@@ -184,6 +188,7 @@ def _run(argv: list[str]) -> str:
             argv,
             capture_output=True,
             text=True,
+            encoding=_WINDOWS_TOOL_ENCODING if sys.platform == "win32" else None,
             errors="replace",
             timeout=_COMMAND_TIMEOUT_SECONDS,
             check=True,
