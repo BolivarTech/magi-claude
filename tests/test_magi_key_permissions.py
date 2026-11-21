@@ -526,20 +526,47 @@ def test_no_permission_tool_inherits_an_api_key_or_a_passphrase(monkeypatch):
         assert not any(value in env.values() for value in _PARENT_SECRETS.values()), tool
 
 
+_WINDOWS_SYSTEM_VARIABLES = (
+    "LOCALAPPDATA",
+    "APPDATA",
+    "WINDIR",
+    "SYSTEMDRIVE",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "PROGRAMDATA",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "COMMONPROGRAMW6432",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "ALLUSERSPROFILE",
+    "PUBLIC",
+    "COMPUTERNAME",
+    "USERNAME",
+    "USERDOMAIN",
+    "HOMEDRIVE",
+    "HOMEPATH",
+)
+"""[W6c] The ruling's enumerated, non-secret Windows system variables, pinned here as the contract."""
+
+
 def test_powershell_gets_the_allowlist_plus_only_its_one_variable(monkeypatch):
-    # [W6] the one variable carrying the input, and PowerShell's cache dirs [W6b], are the only additions.
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\u\AppData\Local")
-    monkeypatch.setenv("APPDATA", r"C:\Users\u\AppData\Roaming")
+    # [W6] the one variable carrying the input and [W6c] the enumerated Windows system variables are the only
+    # additions to the allowlisted environment: an exact equality, so any other addition fails.
+    for name in _WINDOWS_SYSTEM_VARIABLES:
+        monkeypatch.setenv(name, f"value-of-{name}")
     seen = _capture_tool_envs(monkeypatch)
     WindowsPermissionGuard().read_sddl("k")
     ((_, env),) = [entry for entry in seen if entry[0] == "powershell.exe"]
     expected = EnvironmentPolicy.build(os.environ)
-    expected.update(
-        LOCALAPPDATA=r"C:\Users\u\AppData\Local",
-        APPDATA=r"C:\Users\u\AppData\Roaming",
-        MAGI_ACL_PATH="k",
-    )
-    assert env == expected
+    expected.update({name: f"value-of-{name}" for name in _WINDOWS_SYSTEM_VARIABLES})
+    expected["MAGI_ACL_PATH"] = "k"
+    assert {name.upper(): value for name, value in env.items()} == {
+        name.upper(): value for name, value in expected.items()
+    }
 
 
 def test_a_guard_asks_whoami_once_however_many_paths_it_checks():
@@ -584,3 +611,31 @@ def test_the_cache_dirs_are_added_only_when_the_parent_has_them(monkeypatch):
     WindowsPermissionGuard().read_sddl("k")
     ((_, env),) = [entry for entry in seen if entry[0] == "powershell.exe"]
     assert "LOCALAPPDATA" not in env and "APPDATA" not in env
+
+
+def test_every_permission_tool_gets_the_windows_system_variables(monkeypatch):
+    # [W6c] CI windows-latest: a cold Windows PowerShell 5.1 needed a system variable the allowlist lacked.
+    for name in _WINDOWS_SYSTEM_VARIABLES:
+        monkeypatch.setenv(name, f"value-of-{name}")
+    seen = _capture_tool_envs(monkeypatch)
+    guard = WindowsPermissionGuard()
+    guard.harden("k", directory=False)
+    guard.read_sddl("k")
+    assert {"whoami.exe", "icacls.exe", "powershell.exe"} <= {tool for tool, _ in seen}
+    for tool, env in seen:
+        upper = {name.upper(): value for name, value in env.items()}
+        for name in _WINDOWS_SYSTEM_VARIABLES:
+            assert upper.get(name) == f"value-of-{name}", (tool, name)
+
+
+def test_windows_system_variables_are_matched_case_insensitively(monkeypatch):
+    # [W6c] Windows spells them in mixed case (``ProgramFiles(x86)``, ``windir``); the match ignores case.
+    monkeypatch.setenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    monkeypatch.setenv("windir", r"C:\Windows")
+    seen = _capture_tool_envs(monkeypatch)
+    WindowsPermissionGuard().read_sddl("k")
+    ((_, env),) = [entry for entry in seen if entry[0] == "powershell.exe"]
+    upper = {name.upper(): value for name, value in env.items()}
+    assert (
+        upper["PROGRAMFILES(X86)"] == r"C:\Program Files (x86)" and upper["WINDIR"] == r"C:\Windows"
+    )
