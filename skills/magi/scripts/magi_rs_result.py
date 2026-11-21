@@ -213,8 +213,8 @@ class MemoryContractError(MagiRsContractError):
 _REVIEW_FLAGS = ("without_memory", "without_embedder")
 #: ``code_review`` keys copied into :meth:`CodeReviewResult.effort`.
 _EFFORT_FROM_REVIEW = ("batches_planned", "batches_completed", "gate_questions", "judged_fraction")
-#: Per-batch keys copied into ``tokens_by_batch``.
-_BATCH_FIELDS = ("input_tokens", "output_tokens", "ms")
+#: Per-batch keys copied into ``tokens_by_batch`` (``index`` is the batch number, which a failed batch leaves a gap in).
+_BATCH_FIELDS = ("index", "input_tokens", "output_tokens", "ms")
 
 
 @dataclass(frozen=True)
