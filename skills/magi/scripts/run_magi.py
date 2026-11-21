@@ -85,7 +85,7 @@ from magi_key_rotation import (  # noqa: E402
     RotationFailedError,
     RotationNotAuthorisedError,
 )
-from magi_rs_vault import VAULT_KEY_NAMES, VaultClient  # noqa: E402
+from magi_rs_vault import VAULT_KEY_NAMES, VaultClient, VaultValueEncodingError  # noqa: E402
 from cli_commands import (  # noqa: E402
     INIT_FLAG,
     ROTATE_KEY_FLAG,
@@ -2218,15 +2218,10 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
                 file=sys.stderr,
             )
             return _USAGE_EXIT_CODE
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError:
-            print(
-                f"ERROR: the value for {name} is not valid UTF-8 text; nothing was stored.",
-                file=sys.stderr,
-            )
-            return _USAGE_EXIT_CODE
         VaultClient(executable, workdir, key).set(name, value)
+    except VaultValueEncodingError as exc:
+        print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
+        return _USAGE_EXIT_CODE
     except ValidationError as exc:
         print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
         return 1

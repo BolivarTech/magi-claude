@@ -57,6 +57,10 @@ class VaultCommandError(ValidationError):
     """A ``magi-rs vault`` command failed, or answered in an unknown shape."""
 
 
+class VaultValueEncodingError(VaultCommandError):
+    """The value to store is not valid UTF-8 text; nothing was launched or stored."""
+
+
 class VaultClient:
     """Runs ``magi-rs vault set`` and ``vault ls`` for one project.
 
@@ -97,6 +101,8 @@ class VaultClient:
         Raises:
             InvalidVaultNameError: ``name`` is outside the closed list; the
                 binary is not launched.
+            VaultValueEncodingError: ``value`` is not valid UTF-8 text (a lone
+                surrogate, say); nothing is launched.
             VaultCommandError: The command failed. The message names the secret
                 and never carries the value or the key.
 
@@ -107,6 +113,12 @@ class VaultClient:
             raise InvalidVaultNameError(
                 f"{name!r} is not a vault name; expected one of {', '.join(VAULT_KEY_NAMES)}"
             )
+        try:
+            value.encode("utf-8")  # strict: a lone surrogate must not be silently replaced
+        except UnicodeEncodeError as error:
+            raise VaultValueEncodingError(
+                f"the value for {name} is not valid UTF-8 text; nothing was stored"
+            ) from error
         completed = self._run([_SET_ACTION, name], f"vault set {name}", value, secrets=(value,))
         if completed.returncode != 0:
             raise VaultCommandError(self._failure(f"vault set {name}", completed, (value,)))
