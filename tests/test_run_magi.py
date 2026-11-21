@@ -5287,7 +5287,9 @@ def _raise(exception):
 
 def test_a_failed_init_is_one_fatal_line_at_the_cli(monkeypatch, capsys):
     # [CP2-C33] the guard the closed list removed, at the level it belongs to.
-    monkeypatch.setattr("run_magi.run_ollama_init", _raise(OllamaInitError("error: init died")))
+    monkeypatch.setattr(
+        "run_magi.run_ollama_init", _raise(OllamaInitError("error: init died\nsecond line"))
+    )
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
     with pytest.raises(SystemExit) as exc:
         run_magi.main()
@@ -5297,4 +5299,5 @@ def test_a_failed_init_is_one_fatal_line_at_the_cli(monkeypatch, capsys):
         and err.startswith("[FATAL]")
         and "init died" in err
         and "Traceback" not in err
+        and err.count("\n") == 1
     )

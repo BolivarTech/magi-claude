@@ -4,6 +4,7 @@
 """``--ollama-init`` is one ``magi-rs init`` call (MS3 Task 4); nothing else survives here."""
 
 import os
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -201,3 +202,25 @@ def test_ollama_init_child_environment_carries_nothing_beyond_the_allowlist(monk
     assert set(seen["env"]) - {"MAGI_PASSPHRASE"} <= set(EnvironmentPolicy.build(os.environ)) | {
         "PATH"
     }
+
+
+def test_an_interrupted_init_removes_the_magi_dir_it_created(monkeypatch, tmp_path):
+    def run(argv, **kwargs):
+        os.makedirs(os.path.join(argv[argv.index("-w") + 1], ".magi"))
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    monkeypatch.setattr("ollama_init.subprocess.run", run)
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    assert not (tmp_path / ".magi").exists()
+
+
+def test_a_cleanup_that_fails_is_named_so_the_operator_deletes_it_by_hand(monkeypatch, tmp_path):
+    def boom(*args, **kwargs):
+        raise OSError("locked")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run([], returncode=1))
+    monkeypatch.setattr("ollama_init.shutil.rmtree", boom)
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    assert ".magi" in str(exc.value) and "delete" in str(exc.value)
