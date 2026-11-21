@@ -343,7 +343,7 @@ def test_a_key_is_never_usable_as_a_dict_key_or_set_member():
 def _names_the_whole_regeneration(message):
     """REQ-12's three steps: move .magi/ aside, --ollama-init, reload each API key with --ollama-vault-set."""
     return (
-        "move the existing .magi/ aside" in message
+        "move the existing .magi/ aside to a backup outside the project" in message
         and "--ollama-init" in message
         and "--ollama-vault-set" in message
     )
