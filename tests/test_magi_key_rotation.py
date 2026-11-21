@@ -1502,3 +1502,23 @@ def test_a_backup_leaf_that_already_existed_is_never_removed(tmp_path, monkeypat
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert "nothing was moved" in str(exc.value)
     assert os.path.isdir(leaf["path"])
+
+
+def test_a_backup_name_search_that_finds_every_candidate_taken_gives_up(tmp_path, monkeypatch):
+    # [X4] the search is bounded; exhausted -> one line naming the root, nothing moved.
+    work = _project(tmp_path)
+    calls = []
+
+    def _lexists(path):
+        calls.append(path)
+        assert len(calls) < 10_000, "the backup name search is unbounded"
+        return True
+
+    monkeypatch.setattr("magi_key_rotation.os.path.lexists", _lexists)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert str(tmp_path / "rotated") in message and "nothing was moved" in message
+    assert "\n" not in message.strip()
+    assert (work / ".magi" / "magi.toml").read_text() == "old"
