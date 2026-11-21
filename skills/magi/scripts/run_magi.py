@@ -1382,9 +1382,10 @@ def _render_fatal(exc: BaseException) -> str:
         exc: The error to render.
 
     Returns:
-        ``"[FATAL] <message>"`` on a single line, without a newline.
+        ``"[FATAL] <message>"`` on a single line, without a newline; the
+        error's class name stands in for an empty message.
     """
-    return f"[FATAL] {one_line(str(exc))}"
+    return f"[FATAL] {one_line(str(exc)) or type(exc).__name__}"
 
 
 def check_prompts(agents_dir: str) -> None:
