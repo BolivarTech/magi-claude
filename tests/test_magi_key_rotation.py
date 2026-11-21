@@ -1572,3 +1572,30 @@ def test_a_link_in_the_source_is_told_to_remove_the_link(tmp_path, monkeypatch):
     with pytest.raises(RotationFailedError) as exc:
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert "remove the link and retry" in str(exc.value)
+
+
+def test_only_the_feature_owned_backup_dirs_are_hardened_never_the_platform_base(tmp_path):
+    # [Z2] `<base>/magi/rotated/<id>`: the base is the platform's, so it is created but never hardened.
+    work = _project(tmp_path)
+    base = tmp_path / "state-base"
+    guard = _RecordingGuard()
+    store = _Store(guard)
+    rotation = KeyRotation(
+        store,
+        lambda workdir, new_store: _write_new_magi(workdir),
+        lambda workdir, key: [],
+        backup_root=str(base / "magi" / "rotated"),
+    )
+    rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    hardened = {os.path.normcase(path) for call, path, _ in guard.calls if call == "harden"}
+    assert os.path.normcase(str(base)) not in hardened
+    assert os.path.normcase(str(base / "magi")) in hardened
+    assert os.path.normcase(str(base / "magi" / "rotated")) in hardened
+    assert base.is_dir()
+
+
+def _write_new_magi(workdir):
+    os.makedirs(os.path.join(workdir, ".magi", ".secret"))
+    with open(os.path.join(workdir, ".magi", ".secret", "magi.key"), "w", encoding="ascii") as f:
+        f.write(NEW.reveal())
+    return "initialised"
