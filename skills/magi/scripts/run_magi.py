@@ -169,6 +169,8 @@ _ROTATE_KEY_FLAG = "--ollama-rotate-key"
 _YES_FLAG = "--yes"
 """The key subcommands and the flag that authorises a rotation: parse_args, main and the handlers use them."""
 _VAULT_VALUE_PROMPT = "API key value (input hidden): "
+_USAGE_EXIT_CODE = 2
+"""The exit status of an unusable invocation, as argparse uses."""
 _LINE_ENDINGS = "\r\n"
 
 
@@ -2193,7 +2195,8 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
         is_tty: True when stdin is a terminal; the value is then prompted hidden.
 
     Returns:
-        0 on success; 1 for a fail-closed error or an unusable value.
+        0 on success; 1 for a fail-closed error or an empty value; 2 (a usage
+        error) for a value that contains a line break.
     """
     workdir = os.getcwd()
     try:
@@ -2204,6 +2207,13 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
         if not value:
             print(f"ERROR: the value for {name} is empty; nothing was stored.", file=sys.stderr)
             return 1
+        if any(ending in value for ending in _LINE_ENDINGS):
+            print(
+                f"ERROR: the value for {name} contains a line break; nothing was stored "
+                "(pass the key alone, on one line).",
+                file=sys.stderr,
+            )
+            return _USAGE_EXIT_CODE
         VaultClient(executable, workdir, key).set(name, value)
     except ValidationError as exc:
         print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
