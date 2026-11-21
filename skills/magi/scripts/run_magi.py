@@ -72,7 +72,8 @@ from magi_rs_trio import (  # noqa: E402
     MagiRsTrio,
 )
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
-from magi_key_permissions import default_key_store, link_refusal  # noqa: E402
+from link_guard import link_refusal  # noqa: E402
+from magi_key_permissions import default_key_store  # noqa: E402
 from magi_rs_bootstrap import (  # noqa: E402
     plugin_binary_location,
     verified_plugin_executable,

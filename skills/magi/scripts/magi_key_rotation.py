@@ -93,7 +93,7 @@ from magi_key import (
     KeyStoreError,
     MagiKey,
 )
-from magi_key_permissions import link_refusal
+from link_guard import link_refusal
 from magi_rs_vault import VAULT_KEY_NAMES
 from ollama_init import InitLeftover, MagiDirExistsError, OllamaInitError
 from one_line import one_line

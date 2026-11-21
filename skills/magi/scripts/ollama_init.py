@@ -31,7 +31,8 @@ from magi_key import (
     KeyStoreError,
     MagiKey,
 )
-from magi_key_permissions import default_key_store, link_refusal
+from link_guard import link_refusal
+from magi_key_permissions import default_key_store
 from magi_rs_bootstrap import verified_plugin_executable
 from magi_rs_env import EnvironmentPolicy
 from one_line import one_line
