@@ -5552,7 +5552,21 @@ def test_rotate_main_says_when_the_names_are_the_whole_closed_list(monkeypatch, 
         lambda self, *a, **k: RotationReport("/backups/x", ["OPENAI_API_KEY"], False),
     )
     assert run_magi.rotate_main(True, is_tty=False) == 0
-    assert "could not be read" in capsys.readouterr().out
+    assert "could not be listed exactly" in capsys.readouterr().out
+
+
+def test_rotate_main_relays_why_the_vault_listing_fell_back(monkeypatch, capsys):
+    # [Z3] the one-line detail (which entry, never a value) reaches the operator.
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.KeyRotation.rotate",
+        lambda self, *a, **k: RotationReport(
+            "/backups/x", ["OPENAI_API_KEY"], False, "vault ls listed 'STRAY_NAME'"
+        ),
+    )
+    assert run_magi.rotate_main(True, is_tty=False) == 0
+    out = capsys.readouterr().out
+    assert "could not be listed exactly (vault ls listed 'STRAY_NAME')" in out
 
 
 def test_rotate_main_prints_backup_names_and_next_steps_never_values(monkeypatch, capsys):

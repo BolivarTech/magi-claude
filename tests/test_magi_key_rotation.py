@@ -1599,3 +1599,18 @@ def _write_new_magi(workdir):
     with open(os.path.join(workdir, ".magi", ".secret", "magi.key"), "w", encoding="ascii") as f:
         f.write(NEW.reveal())
     return "initialised"
+
+
+def test_a_vault_listing_that_fails_reports_why_in_one_line(tmp_path):
+    # [Z3] the operator learns which entry was not recognised (a name, never a value).
+    work = _project(tmp_path)
+
+    def _ls(*a):
+        raise VaultCommandError(
+            "vault ls listed 'STRAY_NAME', which is not a vault name this plugin uses"
+        )
+
+    rotation, _ = _rotation(tmp_path, vault_ls=_ls)
+    report = rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert report.names_from_vault is False and "STRAY_NAME" in report.listing_detail
+    assert "\n" not in report.listing_detail
