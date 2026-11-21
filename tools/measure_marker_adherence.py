@@ -471,7 +471,7 @@ def run_real_magi(
     entire point of measuring the code that ships.
 
     Args:
-        mode: One of ``run_magi``'s ``VALID_MODES`` (default usage: ``"code-review"``).
+        mode: One of ``run_magi``'s ``VALID_MODES`` (default usage: ``"analysis"``).
         bundle: Path to the input file (a real ``git diff``, not synthetic text).
         ollama: If ``True``, pass ``--ollama``; otherwise the default Claude backend.
         timeout: Per-agent timeout in seconds, forwarded as ``--timeout``.
@@ -570,7 +570,7 @@ def build_artifact(
     agents_dir: Path,
     runs: Mapping[str, int],
     *,
-    mode: str = DEFAULT_MODE,
+    mode: str,
 ) -> dict[str, Any]:
     """Build the release-gate artifact from the accumulated module-level :data:`tally`.
 
@@ -733,14 +733,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="PATH",
-        help="A real code-review bundle (e.g. a git diff) to run via --ollama. Repeatable.",
+        help="A real bundle (e.g. a git diff) to run via --ollama. Repeatable.",
     )
     measure.add_argument(
         "--claude-bundle",
         action="append",
         default=[],
         metavar="PATH",
-        help="A real code-review bundle to run via the default Claude backend. Repeatable.",
+        help="A real bundle to run via the default Claude backend. Repeatable.",
     )
     measure.add_argument(
         "--mode", default=DEFAULT_MODE, help=f"Analysis mode (default: {DEFAULT_MODE})"

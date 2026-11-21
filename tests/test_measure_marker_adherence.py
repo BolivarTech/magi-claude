@@ -261,7 +261,9 @@ def test_a_retry_recovered_omission_is_NOT_measured_as_clean(tmp_path):
 
     assert mma.tally["caspar"]["missing_markers"] == 1, "the first attempt's omission IS VISIBLE"
     assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1, "and so is the retry that got it right"
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
     assert artifact["verdict"] == "red", "a run with an omission is NOT a green run"
 
 
@@ -286,7 +288,9 @@ def test_the_report_carries_the_causes_the_spy_STRUCTURALLY_cannot_see(tmp_path)
 
     mma.measure_output_dir(tmp_path)
 
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
     assert artifact["per_seat"]["caspar"]["echoed_example"] == 1
     assert artifact["per_seat"]["melchior"]["agent_identity"] == 2
     assert artifact["verdict"] == "red"
@@ -324,7 +328,9 @@ def test_a_run_measured_by_the_BLIND_fallback_can_NEVER_certify_green(tmp_path):
     mma.install_spy()
 
     mma.measure_output_dir(tmp_path)
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
 
     assert artifact["fallback_measured"] == 1, "the artifact SAYS it measured blind"
     assert artifact["verdict"] != "green", "a blind measurement certifies nothing"
@@ -352,7 +358,9 @@ def test_every_cause_of_the_retry_contract_has_a_column_in_the_artifact():
     for agent in mma.AGENT_NAMES:
         mma.tally[agent][mma.OK_TALLY_KEY] = 1
 
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
 
     for agent in mma.AGENT_NAMES:
         assert set(artifact["per_seat"][agent]) == {mma.OK_TALLY_KEY, *FEEDBACK_TEMPLATES}
@@ -728,6 +736,14 @@ def test_a_claude_run_keeps_the_repo_root(monkeypatch, tmp_path):
     _, seen, bundle = _record_runs(monkeypatch, tmp_path)
     mma.main(["measure", "--claude-bundle", str(bundle), "--out", str(tmp_path / "out.json")])
     assert seen == [("analysis", False, mma._REPO_ROOT)]
+
+
+def test_a_claude_only_measurement_never_prepares_a_workspace(monkeypatch, tmp_path):
+    _, _, bundle = _record_runs(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(mma, "prepare_workspace", lambda scratch: calls.append(scratch))
+    mma.main(["measure", "--claude-bundle", str(bundle), "--out", str(tmp_path / "out.json")])
+    assert calls == []
 
 
 def test_prepare_workspace_runs_ollama_init_inside_a_fresh_directory(monkeypatch, tmp_path):
