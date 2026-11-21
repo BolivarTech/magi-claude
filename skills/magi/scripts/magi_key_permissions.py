@@ -439,7 +439,10 @@ def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
     if rest and not rest.startswith(_SACL_PREFIX):
         raise ValueError("the DACL holds a malformed ACE")
     flags = match.group("flags")
-    if flags == _NULL_DACL_TOKEN:
+    if flags.endswith(_NULL_DACL_TOKEN) and _DACL_FLAGS_PATTERN.fullmatch(
+        flags[: -len(_NULL_DACL_TOKEN)]
+    ):
+        # the token, alone or after control flags (P, AI, AR): a NULL DACL whatever its flags
         raise _NullDaclError("the DACL is NULL")
     if not _DACL_FLAGS_PATTERN.fullmatch(flags):
         raise ValueError(f"the DACL has unknown flags {flags!r}")
