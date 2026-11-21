@@ -12,9 +12,9 @@ replaces everything:
 2. the old key is read (unverified: it is exposed by definition) before
    anything moves;
 3. ``<backup root>/<id>``, outside every working tree, is created and
-   restricted to its owner; the old ``.magi/`` is moved into it and its key
-   directory and key are restricted again (a move across volumes does not
-   carry the ACL);
+   restricted to its owner; the old ``.magi/`` is moved into it and every
+   directory and file of it is restricted again and verified (a move across
+   volumes does not carry the ACL, a rename keeps each child's own);
 4. a new ``.magi/`` is created by the injected ``init`` (new key, new database),
    and its key is loaded back through the store (present and owner-only), so a
    ``.magi/`` that some other run recreated is never reported as rotated;
@@ -42,7 +42,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from magi_key import DIR_MODE, KEY_DIR_PARTS, KEY_FILENAME, KeyStore, KeyStoreError, MagiKey
+from magi_key import DIR_MODE, KEY_DIR_PARTS, KeyStore, KeyStoreError, MagiKey
 from magi_rs_vault import VAULT_KEY_NAMES
 
 MAGI_DIR = KEY_DIR_PARTS[0]
@@ -441,13 +441,11 @@ class KeyRotation:
             ) from error
 
     def _reharden(self, backup_dir: str, workdir: str) -> None:
-        """Restrict the backup tree, its key directory and its key to the owner again, then verify.
+        """Restrict ``<id>`` and every directory and file of the moved ``.magi/`` to the owner, then verify each.
 
-        A move across volumes does not carry the ACL, and a same-volume rename
-        keeps the old, possibly loosened one without re-propagating inheritance:
-        hardening ``<id>`` again (idempotent) pushes its owner-only inheritable
-        grant onto everything moved under it, and the key directory and key are
-        re-restricted explicitly.
+        No path relies on inheritance: a move across volumes does not carry the
+        ACL, and a same-volume rename keeps each child's own, possibly loosened
+        one. One walk of the moved tree, O(n) in its entries (a handful).
 
         Args:
             backup_dir: ``<backup root>/<id>``.
@@ -457,15 +455,16 @@ class KeyRotation:
             RotationFailedError: Hardening or verification failed; the backup
                 is kept and no new ``.magi/`` is created.
         """
-        secret_dir = os.path.join(backup_dir, *KEY_DIR_PARTS)
-        key_file = os.path.join(secret_dir, KEY_FILENAME)
         guard = self._store.guard
         try:
             guard.harden(backup_dir, True)
-            guard.harden(secret_dir, True)
-            guard.harden(key_file, False)
-            guard.verify(secret_dir, True)
-            guard.verify(key_file, False)
+            for current, _dirs, files in os.walk(os.path.join(backup_dir, MAGI_DIR)):
+                guard.harden(current, True)
+                guard.verify(current, True)
+                for name in files:
+                    path = os.path.join(current, name)
+                    guard.harden(path, False)
+                    guard.verify(path, False)
         except (KeyStoreError, OSError) as error:
             raise RotationFailedError(
                 f"the old {MAGI_DIR}/ was moved to {os.path.join(backup_dir, MAGI_DIR)} but could not be "
