@@ -75,9 +75,9 @@ class ProjectPreflight:
 
         Raises:
             ProjectNotInitialisedError: ``.magi/magi.toml`` is absent.
-            KeyMissingError: The key file is absent or empty.
+            KeyMissingError: The key file is absent, empty or unreadable.
+            KeyUnverifiableError: The key's permissions could not be read.
             KeyExposedError: The key's permissions are looser than owner-only.
-            KeyHardeningError: The permissions could not be verified.
 
         Side effects:
             Reads the filesystem. Writes nothing.

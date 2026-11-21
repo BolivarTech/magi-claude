@@ -54,6 +54,18 @@ _REGENERATION_GUIDANCE = (
 """How to recover from a missing or empty key: the one way forward, stated once."""
 
 
+def _one_line(error: BaseException) -> str:
+    """Return the message of ``error`` with every run of whitespace collapsed to one space.
+
+    Args:
+        error: A guard failure; its message carries paths and SIDs, never the key.
+
+    Returns:
+        The message on one line.
+    """
+    return " ".join(str(error).split())
+
+
 class KeyStoreError(Exception):
     """Base class of every key-custody failure (a sibling of ``ValidationError``)."""
 
@@ -100,6 +112,7 @@ class KeyGuard(Protocol):
             directory: True when ``path`` is a directory.
 
         Raises:
+            KeyUnverifiableError: The permissions of ``path`` could not be read.
             KeyExposedError: Someone other than the owner can access ``path``.
         """
 
@@ -269,8 +282,14 @@ class KeyStore:
         Returns:
             The key.
 
+        The message of a permission failure ends with the guard's own one-line
+        detail (paths and SIDs only, never the key), so the operator sees why.
+
         Raises:
             KeyMissingError: The key is absent, empty or unreadable.
+            KeyUnverifiableError: The permissions could not be read (a tool or
+                read failure); the message says to fix the cause, never that the
+                key is compromised. The file is not read.
             KeyExposedError: The key or its directory is readable by others;
                 the file is not read.
         """
@@ -280,11 +299,16 @@ class KeyStore:
         try:
             self.guard.verify(os.path.dirname(key_file), True)
             self.guard.verify(key_file, False)
+        except KeyUnverifiableError as error:
+            raise KeyUnverifiableError(
+                f"the permissions of {key_file} could not be verified ({_one_line(error)}); "
+                f"fix the cause before considering {_ROTATE_COMMAND}"
+            ) from error
         except KeyExposedError as error:
             raise KeyExposedError(
                 f"the key at {key_file} or its directory is readable by others: it may have been "
                 f"compromised, so treat the memory database and the vault secrets as compromised "
-                f"and rotate the key with {_ROTATE_COMMAND}"
+                f"and rotate the key with {_ROTATE_COMMAND} ({_one_line(error)})"
             ) from error
         return self.read_unverified(key_file)
 

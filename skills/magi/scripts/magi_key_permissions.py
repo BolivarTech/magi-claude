@@ -38,7 +38,14 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 
-from magi_key import DIR_MODE, FILE_MODE, KeyExposedError, KeyHardeningError, KeyStore
+from magi_key import (
+    DIR_MODE,
+    FILE_MODE,
+    KeyExposedError,
+    KeyHardeningError,
+    KeyStore,
+    KeyUnverifiableError,
+)
 
 __all__ = [
     "DIR_MODE",
@@ -299,8 +306,8 @@ class PermissionGuard(ABC):
             directory: True when ``path`` is a directory.
 
         Raises:
-            KeyExposedError: Someone else can access ``path``, or its
-                permissions could not be read.
+            KeyUnverifiableError: The permissions could not be read.
+            KeyExposedError: Someone else can access ``path``.
         """
 
     @staticmethod
@@ -341,15 +348,16 @@ class PosixPermissionGuard(PermissionGuard):
             directory: True when ``path`` is a directory (same rule for both).
 
         Raises:
-            KeyExposedError: Another user owns ``path``, a group or other bit
-                is set, or ``path`` cannot be inspected.
+            KeyUnverifiableError: ``path`` cannot be inspected, or this is Windows.
+            KeyExposedError: Another user owns ``path``, or a group or other bit
+                is set.
         """
         if sys.platform == "win32":
-            raise KeyExposedError("POSIX permissions cannot be verified on Windows")
+            raise KeyUnverifiableError("POSIX permissions cannot be verified on Windows")
         try:
             status = os.stat(path)
         except OSError as error:
-            raise KeyExposedError(f"cannot read the permissions of {path}: {error}") from error
+            raise KeyUnverifiableError(f"cannot read the permissions of {path}: {error}") from error
         if status.st_uid != os.geteuid():
             raise KeyExposedError(f"{path} is owned by another user")
         if status.st_mode & _GROUP_AND_OTHER_BITS:
@@ -496,10 +504,11 @@ class WindowsPermissionGuard(PermissionGuard):
             directory: True when ``path`` is a directory (same rule for both).
 
         Raises:
-            KeyExposedError: The DACL inherits, grants another SID, or could
-                not be read or parsed. The message is one line naming the
-                foreign SIDs (never the current user's) and whether the DACL is
-                protected, or the cause of the read failure.
+            KeyUnverifiableError: The DACL, the current SID or an alias could
+                not be read or parsed; the message names the cause.
+            KeyExposedError: The DACL inherits or grants another SID. The
+                message is one line naming the foreign SIDs (never the current
+                user's) and whether the DACL is protected.
         """
         try:
             sid = self.current_sid()
@@ -511,7 +520,7 @@ class WindowsPermissionGuard(PermissionGuard):
                 if self._is_foreign(ace_sid, sid, resolved)
             ]
         except (OSError, ValueError) as error:
-            raise KeyExposedError(f"cannot read the permissions of {path}: {error}") from error
+            raise KeyUnverifiableError(f"cannot read the permissions of {path}: {error}") from error
         protection = f"(DACL protected: {_YES if protected else _NO})"
         if foreign:
             raise KeyExposedError(f"{path} grants access to {', '.join(foreign)} {protection}")
