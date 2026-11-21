@@ -5821,3 +5821,30 @@ def test_an_abbreviated_rotate_flag_is_expanded_by_argparse(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         run_magi.main()
     assert exc.value.code in (0, None) and seen["args"] is True
+
+
+def test_rotate_main_without_a_magi_dir_says_so_before_any_prompt(monkeypatch, tmp_path, capsys):
+    # [Z7] nothing to rotate: no confirmation question, no binary verification, one line, exit 1.
+    monkeypatch.chdir(tmp_path)
+    _stub_rotation_bootstrap(monkeypatch, fails=True)  # would fail loudly if it were reached
+
+    def _asked(prompt=""):
+        raise AssertionError("the operator was asked before checking there is something to rotate")
+
+    monkeypatch.setattr("builtins.input", _asked)
+    assert run_magi.rotate_main(False, is_tty=True) == 1
+    err = capsys.readouterr().err
+    assert "nothing to rotate" in err and "\n" not in err.strip()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a symlink without privileges")
+def test_rotate_main_refuses_a_magi_entry_that_is_a_link_before_any_prompt(
+    monkeypatch, tmp_path, capsys
+):
+    (tmp_path / "real").mkdir()
+    os.symlink(tmp_path / "real", tmp_path / ".magi", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
+    assert run_magi.rotate_main(False, is_tty=True) == 1
+    assert "is a link" in capsys.readouterr().err
