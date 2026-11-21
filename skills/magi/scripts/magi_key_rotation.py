@@ -567,10 +567,17 @@ class KeyRotation:
         Returns:
             The path of the topmost feature-owned directory.
         """
-        root = self._backup_root
-        if os.path.normcase(root).endswith(os.path.normcase(os.path.join(*_BACKUP_PARTS))):
-            for _ in range(len(_BACKUP_PARTS) - 1):
-                root = os.path.dirname(root)
+        root = os.path.normpath(self._backup_root)
+        owned = root
+        tail: list[str] = []
+        for _ in _BACKUP_PARTS:
+            owned, last = os.path.split(owned)
+            tail.insert(0, last)
+        if [os.path.normcase(part) for part in tail] == [
+            os.path.normcase(part) for part in _BACKUP_PARTS
+        ]:
+            # exact trailing components: ``notmagi/rotated`` merely ends with the same characters
+            return os.path.join(owned, tail[0])
         return root
 
     def _create_backup_dir(self, workdir: str) -> tuple[str, list[str]]:

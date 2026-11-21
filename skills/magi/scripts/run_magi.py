@@ -2264,6 +2264,8 @@ def rotate_main(assume_yes: bool, is_tty: bool) -> int:
             if os.path.lexists(magi_dir)
             else f"no {KEY_DIR_PARTS[0]}/ in {os.getcwd()}: there is nothing to rotate"
         )
+        if refusal is None and not os.path.isdir(magi_dir):
+            refusal = f"{magi_dir} is not a directory: there is nothing to rotate"
     except OSError as exc:
         refusal = f"cannot inspect {magi_dir}: {one_line(str(exc))}"
     if refusal is not None:
