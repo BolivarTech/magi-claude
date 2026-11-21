@@ -398,6 +398,14 @@ def _system_tool(parts: tuple[str, ...]) -> str:
     return ntpath.join(os.environ.get("SystemRoot", _DEFAULT_SYSTEM_ROOT), *parts)
 
 
+class _NullDaclError(ValueError):
+    """The descriptor has no DACL or a NULL one, which grants everyone full access."""
+
+
+_NULL_DACL_TOKEN = "NO_ACCESS_CONTROL"
+"""How SDDL renders a NULL DACL, in the place of the flags."""
+
+
 def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
     """Return whether the DACL is protected and the ``(type, sid)`` of every ACE.
 
@@ -413,8 +421,9 @@ def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
         ``P``; ``aces`` lists each ACE's type field and SID field, in order.
 
     Raises:
-        ValueError: The DACL is absent, is ``NO_ACCESS_CONTROL`` (a NULL DACL
-            grants everyone access), has unknown flags, or holds an ACE without
+        _NullDaclError: The DACL is absent or is ``NO_ACCESS_CONTROL`` (a NULL DACL
+            grants everyone access); a ``ValueError``.
+        ValueError: The DACL has unknown flags, or holds an ACE without
             its six fields.
 
     Example:
@@ -425,11 +434,13 @@ def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
     # Assumes the section order O:, G:, D:, then S: as Get-Acl emits it.
     match = _DACL_PATTERN.search(descriptor)
     if match is None:
-        raise ValueError("the security descriptor has no DACL")
+        raise _NullDaclError("the security descriptor has no DACL")
     rest = descriptor[match.end() :]
     if rest and not rest.startswith(_SACL_PREFIX):
         raise ValueError("the DACL holds a malformed ACE")
     flags = match.group("flags")
+    if flags == _NULL_DACL_TOKEN:
+        raise _NullDaclError("the DACL is NULL")
     if not _DACL_FLAGS_PATTERN.fullmatch(flags):
         raise ValueError(f"the DACL has unknown flags {flags!r}")
     aces = []
@@ -803,6 +814,10 @@ class WindowsPermissionGuard(PermissionGuard):
             for ace_type, ace_sid in aces:
                 if self._is_foreign(ace_sid, sid, resolved):
                     foreign.setdefault(ace_sid, set()).add(ace_type)
+        except _NullDaclError as error:
+            raise KeyExposedError(
+                f"{path} has no access control ({error}): everyone has full access"
+            ) from error
         except (OSError, ValueError) as error:
             raise KeyUnverifiableError(f"cannot read the permissions of {path}: {error}") from error
         protection = f"(DACL protected: {_YES if protected else _NO})"
