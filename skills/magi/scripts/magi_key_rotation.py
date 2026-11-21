@@ -56,7 +56,7 @@ from magi_key import (
     KeyStoreError,
     MagiKey,
 )
-from magi_key_permissions import is_link
+from magi_key_permissions import link_refusal
 from magi_rs_vault import VAULT_KEY_NAMES
 from ollama_init import InitLeftover, MagiDirExistsError, OllamaInitError
 from one_line import one_line
@@ -694,10 +694,9 @@ class KeyRotation:
         backup_dir = os.path.dirname(magi_dir)
 
         def _refuse_link(path: str) -> None:
-            if is_link(path):
-                raise _LinkInBackupError(
-                    f"{os.path.relpath(path, backup_dir)} is a link or reparse point and was not followed"
-                )
+            refusal = link_refusal(path, os.path.relpath(path, backup_dir))
+            if refusal is not None:
+                raise _LinkInBackupError(refusal)
 
         _refuse_link(magi_dir)
         entries = [(magi_dir, True)]

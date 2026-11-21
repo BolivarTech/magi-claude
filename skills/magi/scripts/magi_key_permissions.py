@@ -59,7 +59,7 @@ __all__ = [
     "PosixPermissionGuard",
     "WindowsPermissionGuard",
     "default_key_store",
-    "is_link",
+    "link_refusal",
 ]
 
 _GROUP_AND_OTHER_BITS = stat.S_IRWXG | stat.S_IRWXO
@@ -440,27 +440,46 @@ def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
     return _PROTECTED_FLAG in flags, aces
 
 
-def is_link(path: str) -> bool:
-    """Tell whether ``path`` itself is a symbolic link or a Windows reparse point (a junction included).
+_LINK_REPARSE_TAGS = frozenset({stat.IO_REPARSE_TAG_SYMLINK, stat.IO_REPARSE_TAG_MOUNT_POINT})
+"""The reparse tags of a symbolic link and of a junction: the entries that are links."""
 
-    Decided from ``os.lstat``, so the link is never followed.
+_LINK_REFUSAL = "{path} is a link: replace it with a real file/directory"
+_REPARSE_REFUSAL = (
+    "{path} is a reparse point (for example a cloud-sync placeholder): keep the project's .magi/ "
+    "on a local, non-synced folder"
+)
+
+
+def link_refusal(path: str, display: str | None = None) -> str | None:
+    """Return why ``path`` must not be trusted as a real file or directory, or ``None`` when it may.
+
+    Fails closed for every Windows reparse point, but names what it is: a symlink or junction is
+    "a link", any other reparse point (a cloud-sync placeholder, deduplication) is not. Decided
+    from ``os.lstat``, so nothing is followed.
 
     Args:
         path: The entry to inspect.
+        display: How the message names ``path``; defaults to ``path`` itself.
 
     Returns:
-        True for a link or reparse point.
+        A one-line refusal, or ``None`` for an ordinary entry.
 
     Raises:
         OSError: The entry cannot be inspected.
     """
     status = os.lstat(path)
-    attributes = getattr(status, "st_file_attributes", 0)
-    return stat.S_ISLNK(status.st_mode) or bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    shown = path if display is None else display
+    if stat.S_ISLNK(status.st_mode):
+        return _LINK_REFUSAL.format(path=shown)
+    if getattr(status, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        if getattr(status, "st_reparse_tag", 0) in _LINK_REPARSE_TAGS:
+            return _LINK_REFUSAL.format(path=shown)
+        return _REPARSE_REFUSAL.format(path=shown)
+    return None
 
 
 def _refuse_link(path: str) -> None:
-    """Refuse a key path that is itself a link: its permissions would be its target's.
+    """Refuse a key path that is itself a link or reparse point: its permissions would be another's.
 
     Args:
         path: The key directory or key file about to be verified.
@@ -470,13 +489,13 @@ def _refuse_link(path: str) -> None:
             (an absent path is left to the caller's own permission read).
     """
     try:
-        linked = is_link(path)
+        refusal = link_refusal(path)
     except FileNotFoundError:
         return  # the permission read that follows reports an absent path with its own message
     except OSError as error:
         raise KeyUnverifiableError(f"cannot read the permissions of {path}: {error}") from error
-    if linked:
-        raise KeyUnverifiableError(f"{path} is a link: replace it with a real file/directory")
+    if refusal is not None:
+        raise KeyUnverifiableError(refusal)
 
 
 class PermissionGuard(ABC):
