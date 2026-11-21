@@ -5483,6 +5483,18 @@ def test_a_failed_cleanup_note_reaches_the_one_fatal_line(monkeypatch, capsys):
     assert err.startswith("[FATAL]") and "delete it by hand" in err and err.count(chr(10)) == 1
 
 
+@pytest.fixture(autouse=True)
+def _rotation_project(request, monkeypatch, tmp_path_factory):
+    """[Z7] rotate_main checks there is a .magi/ first: run its tests inside a project that has one."""
+    if (
+        request.node.name.startswith("test_rotate_main")
+        and "without_a_magi_dir" not in request.node.name
+    ):
+        project = tmp_path_factory.mktemp("rotate-project")
+        (project / ".magi").mkdir()
+        monkeypatch.chdir(project)
+
+
 def _stub_rotation_bootstrap(monkeypatch, fails=False):
     """[CP2-M4] Fake the binary verification rotate_main runs before anything moves."""
 

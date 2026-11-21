@@ -72,13 +72,13 @@ from magi_rs_trio import (  # noqa: E402
     MagiRsTrio,
 )
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
-from magi_key_permissions import default_key_store  # noqa: E402
+from magi_key_permissions import default_key_store, link_refusal  # noqa: E402
 from magi_rs_bootstrap import (  # noqa: E402
     plugin_binary_location,
     verified_plugin_executable,
 )
 from magi_rs_preflight import ProjectPreflight  # noqa: E402
-from magi_key import MagiKey  # noqa: E402
+from magi_key import KEY_DIR_PARTS, MagiKey  # noqa: E402
 from magi_key_rotation import (  # noqa: E402
     KeyRotation,
     RotationFailedError,
@@ -2253,8 +2253,22 @@ def rotate_main(assume_yes: bool, is_tty: bool) -> int:
 
     Returns:
         0 on success; 1 when the binary does not verify, the rotation is not
-        authorised or it stopped (one line on stderr, never a traceback).
+        authorised or it stopped, or there is no usable ``.magi/`` to rotate (one
+        line on stderr, never a traceback). The ``.magi/`` is checked first, so an
+        operator is never asked to confirm a rotation that cannot happen.
     """
+    magi_dir = os.path.join(os.getcwd(), KEY_DIR_PARTS[0])
+    try:
+        refusal = (
+            link_refusal(magi_dir)
+            if os.path.lexists(magi_dir)
+            else f"no {KEY_DIR_PARTS[0]}/ in {os.getcwd()}: there is nothing to rotate"
+        )
+    except OSError as exc:
+        refusal = f"cannot inspect {magi_dir}: {one_line(str(exc))}"
+    if refusal is not None:
+        print(f"ERROR: {refusal}", file=sys.stderr)
+        return 1
     try:
         executable = verified_plugin_executable()
     except Exception as exc:  # noqa: BLE001 - as in vault_set_main: every bootstrap error is fail-closed
