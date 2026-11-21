@@ -1262,3 +1262,23 @@ def test_every_new_preflight_error_is_rendered_fatal(error):
 def test_the_hardening_error_is_not_listed_as_a_preflight_error():
     # [I-a] the --ollama preflight never raises it; init, rotation and vault render it through their own handlers.
     assert KeyHardeningError not in FAIL_CLOSED_ERRORS
+
+
+@pytest.mark.asyncio
+async def test_the_hints_follow_the_real_cause_and_never_call_the_passphrase_withheld(
+    monkeypatch, tmp_path
+):
+    # [Z8] the plugin injects MAGI_PASSPHRASE itself, so naming it as withheld would mislead; and the
+    # child's own stderr (the real cause) is stated before any hint.
+    monkeypatch.setenv("MAGI_PASSPHRASE", "hunter2")
+    monkeypatch.setenv("CORP_PROXY_CA_HINT", "x")
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"", stderr=b"certificate verify failed", returncode=1)),
+    )
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    message = str(exc.value)
+    assert "MAGI_PASSPHRASE" not in message and "CORP_PROXY_CA_HINT" in message
+    assert message.index("certificate verify failed") < message.index("allowlist")
+    assert message.index("certificate verify failed") < message.index("--ollama-vault-set")
