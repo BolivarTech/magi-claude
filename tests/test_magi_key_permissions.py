@@ -158,7 +158,9 @@ def test_windows_harden_uses_the_sid_never_a_localised_name():
         seen.append(argv)
         return _fixture("whoami-nh.txt") if argv[0].lower().endswith("whoami.exe") else ""
 
-    WindowsPermissionGuard(runner=runner).harden("k", directory=False)
+    guard = WindowsPermissionGuard(runner=runner)
+    guard.read_sddl = lambda path: f"D:PAI(A;;FA;;;{ME})"  # [S2] harden reads the DACL first
+    guard.harden("k", directory=False)
     # [CP2-M45] whoami by absolute path: on PATH, git-bash would answer with coreutils' whoami (M9).
     assert ntpath.isabs(seen[0][0]) and seen[0][0].lower().endswith("system32\\whoami.exe")
     icacls = next(a for a in seen if "icacls" in a[0].lower())
@@ -472,6 +474,11 @@ def _capture_tool_envs(monkeypatch):
     for name, value in _PARENT_SECRETS.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
+    # [S2] harden reads the DACL natively before icacls; the doubles answer an owner-only one.
+    monkeypatch.setattr(
+        "magi_key_permissions.WindowsPermissionGuard.read_sddl",
+        lambda self, path: f"D:PAI(A;;FA;;;{ME})",
+    )
     return seen
 
 
@@ -723,3 +730,82 @@ def test_group_or_other_bits_on_a_posix_key_stay_exposed(tmp_path, monkeypatch):
     with pytest.raises(KeyExposedError) as raised:
         PosixPermissionGuard().verify(str(path), directory=False)
     assert not isinstance(raised.value, KeyUnverifiableError)
+
+
+EVERYONE = "S-1-1-0"
+
+
+def test_a_foreign_deny_entry_alone_is_unverifiable_and_never_called_compromised(tmp_path):
+    # [S2] a deny entry takes access away: it is not an exposure, so it never routes to a destructive rotation.
+    key_file = tmp_path / ".magi" / ".secret" / "magi.key"
+    key_file.parent.mkdir(parents=True)
+    key_file.write_text("k" * 44, encoding="ascii")
+    store = KeyStore(_windows_guard(f"D:PAI(A;;FA;;;{ME})(D;;FR;;;{EVERYONE})"))
+    with pytest.raises(KeyUnverifiableError) as raised:
+        store.load(str(tmp_path))
+    message = str(raised.value)
+    assert "deny entry" in message and EVERYONE in message and "compromised" not in message
+
+
+def test_a_foreign_allow_entry_is_exposed_and_named_an_access_entry():
+    with pytest.raises(KeyExposedError) as raised:
+        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;FR;;;{OTHER})").verify("k", directory=False)
+    assert not isinstance(raised.value, KeyUnverifiableError)
+    assert f"has an access entry for {OTHER}" in str(raised.value)
+
+
+def test_a_foreign_sid_with_both_a_deny_and_an_allow_entry_is_exposed():
+    # [S2] the ACE type only classifies the message: any non-deny entry of a foreign SID is an exposure.
+    sddl = f"D:PAI(A;;FA;;;{ME})(D;;FW;;;{OTHER})(A;;FR;;;{OTHER})"
+    with pytest.raises(KeyExposedError) as raised:
+        _windows_guard(sddl).verify("k", directory=False)
+    assert not isinstance(raised.value, KeyUnverifiableError)
+
+
+def test_a_deny_only_sid_beside_another_sid_with_access_is_exposed():
+    sddl = f"D:PAI(A;;FA;;;{ME})(D;;FR;;;{EVERYONE})(A;;FR;;;{OTHER})"
+    with pytest.raises(KeyExposedError) as raised:
+        _windows_guard(sddl).verify("k", directory=False)
+    assert not isinstance(raised.value, KeyUnverifiableError) and OTHER in str(raised.value)
+
+
+def test_a_deny_entry_still_fails_verification_whatever_its_flags():
+    # [S2] fail-closed: a deny entry never makes verify pass, inherited or not.
+    for sddl in (
+        f"D:PAI(A;;FA;;;{ME})(D;ID;FR;;;{EVERYONE})",
+        f"D:PAI(A;;FA;;;{ME})(D;OICI;FR;;;WD)",
+    ):
+        with pytest.raises(KeyExposedError):
+            _windows_guard(sddl).verify("k", directory=False)
+
+
+def test_windows_harden_removes_the_deny_entries_it_finds():
+    # [S2] /remove:g alone leaves an explicit deny ACE behind; harden removes it with /remove:d.
+    seen = []
+
+    def runner(argv):
+        seen.append(argv)
+        return _fixture("whoami-nh.txt") if argv[0].lower().endswith("whoami.exe") else ""
+
+    guard = WindowsPermissionGuard(runner=runner)
+    guard.read_sddl = lambda path: f"D:PAI(A;;FA;;;{ME})(D;;FR;;;WD)"
+    guard.resolve_alias = _ALIASES.__getitem__
+    guard.harden("k", directory=False)
+    icacls = next(argv for argv in seen if "icacls" in argv[0].lower())
+    assert "/remove:d" in icacls
+    assert f"*{EVERYONE}" in icacls[icacls.index("/remove:d") + 1 :]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real ACLs")
+def test_windows_real_directory_with_a_deny_entry_hardens_and_verifies(tmp_path):
+    # [S2] real icacls: an explicit deny for Everyone survives /remove:g; harden must remove it. (W), not (R):
+    # tmp_path is a 0o700 directory whose inherited OWNER RIGHTS entry cancels the owner's implicit
+    # READ_CONTROL, so a deny of (R) makes the DACL unreadable and harden fails closed instead.
+    secret = tmp_path / ".secret"
+    secret.mkdir()
+    subprocess.run(
+        ["icacls", str(secret), "/deny", f"*{EVERYONE}:(W)"], check=True, capture_output=True
+    )
+    guard = WindowsPermissionGuard()
+    guard.harden(str(secret), directory=True)
+    guard.verify(str(secret), directory=True)
