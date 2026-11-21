@@ -295,3 +295,27 @@ def test_redact_bytes_replaces_every_occurrence_of_the_key():
     marker = REDACTION_MARKER.encode()
     assert key.redact_bytes(data) == b"x" + marker + b"y" + marker
     assert key.redact_bytes(b"") == b""
+
+
+class _ExistenceRecordingGuard(_Guard):
+    """Records, at each harden call, whether the key file already exists."""
+
+    def __init__(self, key_file):
+        super().__init__()
+        self.key_file = key_file
+        self.seen = []
+
+    def harden(self, path, directory):
+        self.seen.append((path, directory, os.path.exists(self.key_file)))
+
+
+def test_the_secret_directory_is_hardened_before_the_key_file_exists(tmp_path):
+    # [Loop1 M-1] os.makedirs(mode=0o700) is owner-only on Windows only on CPython with the CVE-2024-4030
+    # fix; hardening the directory first makes the file inherit the owner-only grant on every build.
+    key_file = KeyStore(_Guard()).key_path(str(tmp_path))
+    guard = _ExistenceRecordingGuard(key_file)
+    KeyStore(guard).persist(str(tmp_path), MagiKey("c2VjcmV0LWtleQ=="))
+    assert guard.seen[0] == (os.path.dirname(key_file), True, False)
+    # The later harden of directory and file stays.
+    assert (os.path.dirname(key_file), True, True) in guard.seen
+    assert (key_file, False, True) in guard.seen
