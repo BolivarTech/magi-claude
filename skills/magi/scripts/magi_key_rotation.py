@@ -532,7 +532,8 @@ class KeyRotation:
             created_parents: The parents that call created, outermost first.
 
         Raises:
-            RotationFailedError: Hardening or verification failed; the empty
+            RotationFailedError: Hardening or verification failed, or was
+                interrupted (``KeyboardInterrupt``, ``SystemExit``); the empty
                 directory is removed (or the message says it was left) and
                 nothing was moved.
         """
@@ -542,7 +543,7 @@ class KeyRotation:
             for directory in (*created_parents, backup_dir):
                 guard.harden(directory, True)
                 guard.verify(directory, True)
-        except (KeyStoreError, OSError) as error:
+        except BaseException as error:  # noqa: BLE001 - before the move, even an interrupt must end described
             leftover = ""
             try:
                 shutil.rmtree(backup_dir)
