@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from magi_key import KeyExposedError, KeyHardeningError, KeyUnverifiableError
+from magi_key import KeyExposedError, KeyHardeningError, KeyStore, KeyUnverifiableError
 from magi_key_permissions import (
     DIR_MODE,
     FILE_MODE,
@@ -673,3 +673,53 @@ def test_a_dacl_whose_alias_resolves_to_a_non_sid_is_unverifiable():
     guard._native = _NativeAnswering("not a sid")
     with pytest.raises(KeyUnverifiableError):
         guard.verify("k", directory=False)
+
+
+_REAL_STAT = os.stat
+
+
+def _owned_by(monkeypatch, owner_uid, current_uid, paths):
+    """Make ``paths`` look owner-only (0600/0700) but owned by ``owner_uid``, as a POSIX host would report."""
+    targets = {os.path.normcase(str(path)) for path in paths}
+
+    def _stat(path, *args, **kwargs):
+        if os.path.normcase(str(path)) in targets:
+            return SimpleNamespace(st_uid=owner_uid, st_mode=0o600)
+        return _REAL_STAT(path, *args, **kwargs)
+
+    monkeypatch.setattr("magi_key_permissions.sys.platform", "linux")
+    monkeypatch.setattr("magi_key_permissions.os.stat", _stat)
+    monkeypatch.setattr("magi_key_permissions.os.geteuid", lambda: current_uid, raising=False)
+
+
+def test_a_key_owned_by_another_uid_is_unverifiable_never_called_compromised(tmp_path, monkeypatch):
+    # [R1] a UID mismatch (container mount, sudo-created file) is not proof of exposure: never route it to a
+    # destructive rotation as "compromised".
+    store = KeyStore(PosixPermissionGuard())
+    key_file = tmp_path / ".magi" / ".secret" / "magi.key"
+    key_file.parent.mkdir(parents=True)
+    key_file.write_text("k" * 44, encoding="ascii")
+    _owned_by(monkeypatch, owner_uid=0, current_uid=1000, paths=[key_file.parent, key_file])
+    with pytest.raises(KeyUnverifiableError) as raised:
+        store.load(str(tmp_path))
+    message = str(raised.value)
+    assert "uid 0" in message and "1000" in message and "ownership" in message
+    assert "compromised" not in message and "--ollama-rotate-key" in message
+
+
+def test_group_or_other_bits_on_a_posix_key_stay_exposed(tmp_path, monkeypatch):
+    # [R1] only the owner check moves to "unverifiable"; readable bits remain an exposure.
+    path = tmp_path / "k"
+    path.write_text("x")
+
+    def _stat(target, *args, **kwargs):
+        if os.path.normcase(str(target)) == os.path.normcase(str(path)):
+            return SimpleNamespace(st_uid=1000, st_mode=0o640)
+        return _REAL_STAT(target, *args, **kwargs)
+
+    monkeypatch.setattr("magi_key_permissions.sys.platform", "linux")
+    monkeypatch.setattr("magi_key_permissions.os.stat", _stat)
+    monkeypatch.setattr("magi_key_permissions.os.geteuid", lambda: 1000, raising=False)
+    with pytest.raises(KeyExposedError) as raised:
+        PosixPermissionGuard().verify(str(path), directory=False)
+    assert not isinstance(raised.value, KeyUnverifiableError)
