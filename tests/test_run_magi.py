@@ -5712,3 +5712,52 @@ def test_rotate_main_turns_an_interrupted_init_into_one_line_and_exit_1(
     (backup,) = os.listdir(state / "magi" / "rotated")
     assert err.startswith("ERROR:") and err.count("\n") == 1 and "Traceback" not in err
     assert backup in err and "move it back" in err
+
+
+def test_the_key_subcommands_appear_in_help(capsys):
+    # [W2] four published surfaces tell the user to run them: --help must list them.
+    with pytest.raises(SystemExit) as exc:
+        run_magi.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert exc.value.code == 0
+    assert "--ollama-vault-set" in out and "--ollama-rotate-key" in out and "--yes" in out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["analysis", "bundle.md", "--ollama-rotate-key", "--yes"],
+        ["analysis", "bundle.md", "--ollama-rotate-key"],
+        ["--ollama-rotate-key", "analysis"],
+        ["analysis", "bundle.md", "--ollama-vault-set", "OPENAI_API_KEY"],
+        ["--ollama-rotate-key", "--ollama-vault-set", "OPENAI_API_KEY"],
+        ["--ollama-init", "--ollama-rotate-key", "--yes"],
+        ["--ollama-init", "--ollama-vault-set", "OPENAI_API_KEY"],
+        ["--yes"],
+        ["analysis", "bundle.md", "--yes"],
+        ["--ollama-vault-set", "OPENAI_API_KEY", "--yes"],
+    ],
+)
+def test_a_key_subcommand_mixed_with_anything_else_is_an_argument_error_and_runs_nothing(
+    monkeypatch, argv
+):
+    # [W2] a destructive rotation is never honoured from any position: argparse rejects the mix first.
+    called = []
+    for handler, result in (("rotate_main", 0), ("vault_set_main", 0), ("run_ollama_init", "")):
+        monkeypatch.setattr(
+            f"run_magi.{handler}", lambda *a, _h=handler, _r=result, **k: called.append(_h) or _r
+        )
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", *argv])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code == 2 and called == []
+
+
+def test_an_abbreviated_rotate_flag_is_expanded_by_argparse(monkeypatch):
+    # [W2] argparse's own abbreviation handling applies, as for every other flag.
+    seen = {}
+    monkeypatch.setattr("run_magi.rotate_main", lambda args, *rest: seen.update(args=args) or 0)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-rotate", "--yes"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code in (0, None) and seen["args"] == ["--yes"]
