@@ -194,19 +194,18 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
         OllamaInitError: ``<workdir>/.magi`` is a link or reparse point (a broken one
             included); nothing was called and nothing was written.
         OSError: ``<workdir>/.magi`` exists but cannot be inspected.
-        Any exception from the child launch or the key store: the ``.magi/`` this call
-            created is removed first and the exception propagates unchanged. When something
-            needs saying instead (the removal failed, so the message says to delete it by hand;
-            or the ``.magi/`` now holds a key this call did not write, e.g. ``persist`` raised
-            ``FileExistsError`` because another process initialised it, so it is never removed),
-            an ``OllamaInitError`` carrying that sentence and its ``leftover``
-            (:class:`InitLeftover`) is raised from the original. A failed child
-            always ends as an ``OllamaInitError`` with its ``leftover``. An
-            interrupt (``KeyboardInterrupt``, ``SystemExit``) is re-raised as itself; its
-            sentence is written to stderr as one ``[!] WARNING:`` line first.
-        OllamaInitError: ``magi-rs init`` exited non-zero; the message is its
-            output with the new key redacted. No key is persisted and the
-            ``.magi/`` this call saw appear is removed.
+        OllamaInitError: One entry for every ``init`` failure, always carrying its
+            ``leftover`` (:class:`InitLeftover`, what is left at ``.magi/``) except for the
+            link refusal above. ``magi-rs init`` exited non-zero (the message is its output
+            with the new key redacted; no key is persisted and the ``.magi/`` this call saw
+            appear is removed), or the child launch or key store failed with something that
+            needs saying (the removal failed, so delete it by hand; or the ``.magi/`` now
+            holds a key this call did not write, e.g. ``persist`` raised ``FileExistsError``
+            because another process initialised it, so it is never removed), raised from the
+            original. When the failure needs nothing said and the ``.magi/`` this call
+            created was removed, the original exception propagates unchanged. An interrupt
+            (``KeyboardInterrupt``, ``SystemExit``) is re-raised as itself; its sentence is
+            written to stderr as one ``[!] WARNING:`` line first.
         KeyHardeningError: The key could not be restricted to its owner. The
             ``.magi/`` this call created is removed.
         UnsafeBinDirectoryError, DigestMismatchError, VersionMismatchError,

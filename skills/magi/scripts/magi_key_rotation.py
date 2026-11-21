@@ -37,7 +37,11 @@ moves ``<workdir>/.magi`` into it, restricts the backup's permissions, and
 creates a new ``<workdir>/.magi`` through ``init``.
 
 Error paths (state left on disk, the clause of the one-line message, what the
-operator is told to do)::
+operator is told to do). Each row is pinned by tests in ``tests/test_magi_key_rotation.py``:
+the ``init`` rows by the parametrized
+``test_the_rotation_words_the_failure_by_the_leftover_init_reported``, the others by the
+test named for their stage (move, re-harden, verify, names), so this table is a map of
+pinned behaviour and not a second, unchecked source::
 
     stage        state left on disk                       message says           operator verb
     -----------  ---------------------------------------  ---------------------  --------------

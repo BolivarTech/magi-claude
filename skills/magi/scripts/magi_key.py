@@ -33,7 +33,8 @@ KEY_FILENAME = "magi.key"
 """The key file's name inside ``KEY_DIR_PARTS``."""
 
 KEY_BYTES = 32
-"""Random bytes behind each key, before base64 encoding."""
+"""Random bytes behind each key, before base64 encoding: 32 bytes encode to 44 base64
+characters, the last one ``=`` padding."""
 
 DIR_MODE = 0o700
 """POSIX mode of the key directory: owner only."""

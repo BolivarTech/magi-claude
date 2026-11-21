@@ -42,6 +42,9 @@ _LS_SEPARATOR = " · "
 _LS_MIN_COLUMNS = 3
 """``NAME``, created, updated."""
 _LS_NAME_PATTERN = re.compile(r"[A-Za-z0-9_]+")
+"""A vault name. Contrast: a 32-byte key encodes to 44 base64 characters ending in ``=`` padding,
+so it can never match this pattern, which is why a key echoed as a name is only a theoretical
+case (still redacted)."""
 _LS_EMPTY_VAULT = "(vault empty)"
 """What magi-rs 0.25.0 prints, with exit 0, when the vault holds nothing (measurement M1)."""
 
