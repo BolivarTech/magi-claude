@@ -64,7 +64,7 @@ _EXCLUSIVE_CREATE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_
 _ROTATE_COMMAND = command(ROTATE_KEY_FLAG)
 
 REGENERATION_GUIDANCE = (
-    f"move the existing .magi/ aside to a backup, run {command(INIT_FLAG)} (it leaves an existing .magi/ "
+    f"move the existing .magi/ aside to a backup outside the project, run {command(INIT_FLAG)} (it leaves an existing .magi/ "
     f"untouched), then reload each API key with {command(VAULT_SET_FLAG, '<NAME>')}"
 )
 """How to regenerate a ``.magi/`` that cannot be used (REQ-12): the one procedure, stated once.
