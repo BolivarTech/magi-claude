@@ -314,6 +314,10 @@ def test_the_backup_key_and_its_directory_are_hardened_and_verified(tmp_path):
         True,
     ) in guard.calls  # [CP2-C44] the backup directory itself
     assert ("verify", report.backup_dir, True) in guard.calls  # [fix 1] verified, not only hardened
+    # [fix 2] a same-volume rename does not re-propagate inheritance: <id> is hardened again after the move,
+    # so its owner-only inheritable grant reaches the moved DB and magi.toml.
+    pre_move_verify = guard.calls.index(("verify", report.backup_dir, True))
+    assert ("harden", report.backup_dir, True) in guard.calls[pre_move_verify + 1 :]
 
 
 def test_a_failed_move_leaves_the_magi_dir_in_place_and_no_partial_backup(tmp_path, monkeypatch):
