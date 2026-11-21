@@ -201,6 +201,9 @@ class MagiRsCodeReview(TrioExecutor):
         Raises:
             MagiRsContractError: :meth:`preflight` has not run, or the envelope
                 breaks the contract (``MemoryContractError`` included).
+            UnsafeBinDirectoryError, DigestMismatchError, VersionMismatchError,
+            KeyMissingError, KeyUnverifiableError, KeyExposedError: The binary or the key
+                no longer verifies (re-checked right before the launch, R4).
             MagiRsProcessError: The child could not start, exited non-zero
                 (a ``--timeout`` rejection names the flag and is not retried), or
                 was killed before printing a complete envelope.
@@ -208,6 +211,10 @@ class MagiRsCodeReview(TrioExecutor):
         del prompt, agents_dir, models, max_attempts, timeout  # accepted, unused: see above
         if self._executable is None:
             raise MagiRsContractError("preflight() must run before run_trio()")
+        # R4, as MagiRsTrio does: every run verifies right before executing. The embedder
+        # probe is NOT repeated -- it ran in preflight() and costs a network request.
+        self._executable = verified_executable(BinaryBootstrap(self._pin, self._bin_dir))
+        self._key = ProjectPreflight.require_ready(self._workdir, self._key_store)
         argv = build_review_argv(self._executable, self._workdir, self._target, self._timeout)
         stdout, stderr, overran = await self._launch(argv, on_state)
         MagiRsTrio._persist_raw(output_dir, stdout)

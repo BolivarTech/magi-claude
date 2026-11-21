@@ -6220,6 +6220,12 @@ def _run_main_with_fake_review(
         return "magi-rs"
 
     monkeypatch.chdir(tmp_path)
+    # run_trio re-verifies the binary and the key right before the launch (R4): fake both.
+    monkeypatch.setattr("magi_rs_code_review.verified_executable", lambda bootstrap: "magi-rs")
+    monkeypatch.setattr(
+        "magi_rs_code_review.ProjectPreflight.require_ready",
+        staticmethod(lambda *args, **kwargs: _CR_KEY),
+    )
     if MagiRsCodeReview.preflight is _ORIGINAL_REVIEW_PREFLIGHT:  # a test's own recorder wins
         monkeypatch.setattr(MagiRsCodeReview, "preflight", _preflight)
     if not history_recorded:
