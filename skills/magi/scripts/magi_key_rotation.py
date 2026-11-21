@@ -16,8 +16,11 @@ replaces everything:
    directory and file of it is restricted again and verified (a move across
    volumes does not carry the ACL, a rename keeps each child's own);
 4. a new ``.magi/`` is created by the injected ``init`` (new key, new database),
-   and its key is loaded back through the store (present and owner-only), so a
-   ``.magi/`` that some other run recreated is never reported as rotated;
+   and its key is loaded back through the store (present, owner-only and
+   different from the old one), so a ``.magi/`` that some other run recreated,
+   or the old tree moved back by hand, is never reported as rotated; an
+   ``init`` that finds a ``.magi/`` already there fails the rotation and that
+   ``.magi/`` is left as it is;
 5. the old key is used once more, only for ``vault ls`` on the backup, so the
    operator learns which API keys to revoke (names only, never values).
 
@@ -45,6 +48,7 @@ from datetime import datetime, timezone
 
 from magi_key import DIR_MODE, KEY_DIR_PARTS, KeyStore, KeyStoreError, MagiKey
 from magi_rs_vault import VAULT_KEY_NAMES
+from ollama_init import MagiDirExistsError
 
 MAGI_DIR = KEY_DIR_PARTS[0]
 """The project directory that a rotation moves aside and recreates."""
@@ -303,7 +307,7 @@ class KeyRotation:
         self._move(magi_dir, backup_dir)
         self._reharden(backup_dir, workdir)
         self._create_new(workdir, backup_dir, old_key)
-        self._verify_new(workdir, backup_dir)
+        self._verify_new(workdir, backup_dir, old_key)
         names, from_vault = self._names_to_revoke(backup_dir, old_key)
         return RotationReport(backup_dir, names, from_vault)
 
@@ -550,7 +554,10 @@ class KeyRotation:
         return entries
 
     def _create_new(self, workdir: str, backup_dir: str, old_key: MagiKey) -> None:
-        """Create the new ``.magi/``; on any failure, leave none at the root.
+        """Create the new ``.magi/``; on any failure, leave none of this rotation's at the root.
+
+        A ``.magi/`` that ``init`` found already there (``MagiDirExistsError``)
+        is not this rotation's: it is left as it is and named.
 
         Args:
             workdir: The project root.
@@ -563,6 +570,13 @@ class KeyRotation:
         magi_dir = os.path.join(workdir, MAGI_DIR)
         try:
             self._init(workdir, self._store)
+        except MagiDirExistsError as error:
+            raise RotationFailedError(
+                f"a {MAGI_DIR}/ appeared at {magi_dir} before the new one could be created; it was left "
+                f"as it is because this rotation did not create it, and the old one is intact at "
+                f"{os.path.join(backup_dir, MAGI_DIR)}; inspect {magi_dir} and move that aside, then move "
+                f"the old one back to {magi_dir} to retry"
+            ) from error
         except Exception as error:  # noqa: BLE001 - any init failure must end in the described state
             raw = " ".join([str(error), *getattr(error, "__notes__", [])])
             detail = _one_line(old_key.redact(raw)) or type(error).__name__
@@ -579,31 +593,41 @@ class KeyRotation:
                 f"{os.path.join(backup_dir, MAGI_DIR)}; move it back to {magi_dir} to retry"
             ) from error
 
-    def _verify_new(self, workdir: str, backup_dir: str) -> None:
-        """Require the new ``.magi/`` to hold a present, owner-only key (REQ-13g.2).
+    def _verify_new(self, workdir: str, backup_dir: str, old_key: MagiKey) -> None:
+        """Require the new ``.magi/`` to hold a present, owner-only key other than the old one (REQ-13g.2).
 
-        ``init`` returns normally, without creating anything, when a ``.magi/``
-        already exists, e.g. one a concurrent run recreated after the move.
+        An ``init`` double, or a ``.magi/`` restored by hand, can leave a tree
+        that holds no key of this rotation; the exposed key back in service is
+        never reported as rotated.
 
         Args:
             workdir: The project root.
             backup_dir: ``<backup root>/<id>``, named in the recovery instruction.
+            old_key: The exposed key; the new one must differ from it.
 
         Raises:
-            RotationFailedError: The key is absent, unreadable or not owner-only.
-                The ``.magi/`` at the root is left as it is (this rotation may
-                not have created it); the message names it and the backup.
+            RotationFailedError: The key is absent, unreadable, not owner-only,
+                or the old key. The ``.magi/`` at the root is left as it is (this
+                rotation may not have created it); the message names it and the
+                backup, never either key.
         """
         magi_dir = os.path.join(workdir, MAGI_DIR)
-        try:
-            self._store.load(workdir)
-        except (KeyStoreError, OSError) as error:
-            raise RotationFailedError(
+
+        def _failure(reason: str) -> RotationFailedError:
+            """Build the one-line failure naming ``magi_dir``, the backup and ``reason``."""
+            return RotationFailedError(
                 f"the {MAGI_DIR}/ now at {magi_dir} does not hold a verified key of this rotation "
-                f"({_reason(error)}); it was left as it is because this rotation may not have created it, "
+                f"({reason}); it was left as it is because this rotation may not have created it, "
                 f"and the old one is intact at {os.path.join(backup_dir, MAGI_DIR)}; inspect {magi_dir} and "
                 f"move that aside, then move it back to {magi_dir} to retry"
-            ) from error
+            )
+
+        try:
+            new_key = self._store.load(workdir)
+        except (KeyStoreError, OSError) as error:
+            raise _failure(_reason(error)) from error
+        if new_key == old_key:
+            raise _failure("it holds the old key")
 
     def _names_to_revoke(self, backup_dir: str, old_key: MagiKey) -> tuple[list[str], bool]:
         """List the old vault's names with the old key: the key's only use after the move.

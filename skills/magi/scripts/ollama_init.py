@@ -8,7 +8,9 @@
 carve-out for the init command, which executes the binary too), generates the
 key, hands it to ``magi-rs init -w <root>`` through the child environment and
 only then persists it. A ``.magi/`` that already exists is left untouched:
-nothing is called, nothing is written (REQ-12). The key never travels in argv.
+nothing is called, nothing is written, and :class:`MagiDirExistsError` says so
+(REQ-12), so no caller can mistake it for a new ``.magi/``. The key never
+travels in argv.
 """
 
 from __future__ import annotations
@@ -43,7 +45,13 @@ class OllamaInitError(Exception):
 
 
 class MagiDirExistsError(OllamaInitError):
-    """``.magi/`` already exists: nothing was initialised and no key was created."""
+    """``.magi/`` already exists: nothing was initialised and no key was created.
+
+    Raised before anything runs. The ``--ollama-init`` CLI prints its message
+    and exits 0 (an already initialised project is not a failure there); the
+    key rotation treats it as a failure, since the ``.magi/`` it finds is not
+    the one it was creating.
+    """
 
 
 def _remove_created_magi_dir(magi_dir: str) -> str:
@@ -74,11 +82,12 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
             store (:func:`magi_key_permissions.default_key_store`).
 
     Returns:
-        A message saying ``.magi/`` already exists (nothing was done), or what
-        ``magi-rs init`` printed (stdout, then stderr), relayed verbatim except
-        that the new key is replaced by ``REDACTION_MARKER``.
+        What ``magi-rs init`` printed (stdout, then stderr), relayed verbatim
+        except that the new key is replaced by ``REDACTION_MARKER``.
 
     Raises:
+        MagiDirExistsError: ``<workdir>/.magi/`` already exists; nothing was
+            called and nothing was written.
         Any exception from the child launch or the key store: the ``.magi/`` this call
             created is removed first; if that removal fails the message says to delete it by hand.
         OllamaInitError: ``magi-rs init`` exited non-zero; the message is its
@@ -99,7 +108,7 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
     """
     magi_dir = os.path.join(workdir, _MAGI_DIR)
     if os.path.exists(magi_dir):
-        return _ALREADY_INITIALISED.format(workdir=workdir)
+        raise MagiDirExistsError(_ALREADY_INITIALISED.format(workdir=workdir))
     store = key_store if key_store is not None else default_key_store()
     root = plugin_root()
     executable = verified_executable(BinaryBootstrap(Pin.load(pin_path(root)), bin_dir(root)))

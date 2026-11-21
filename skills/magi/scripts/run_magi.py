@@ -84,7 +84,7 @@ from magi_key_rotation import (  # noqa: E402
     RotationNotAuthorisedError,
 )
 from magi_rs_vault import VAULT_KEY_NAMES, VaultClient  # noqa: E402
-from ollama_init import run_ollama_init  # noqa: E402
+from ollama_init import MagiDirExistsError, run_ollama_init  # noqa: E402
 from run_lock import (  # noqa: E402
     refresh_lock,
     remove_lock,
@@ -2237,6 +2237,10 @@ def main() -> None:
     if "--ollama-init" in sys.argv[1:]:
         try:
             output = run_ollama_init(os.getcwd())
+        except MagiDirExistsError as exc:
+            # REQ-12: an initialised project is left untouched, and that is not a failure here.
+            print(exc)
+            sys.exit(0)
         except Exception as exc:  # noqa: BLE001 - every bootstrap error is fatal here
             # The bootstrap's fail-closed errors are siblings of Exception on
             # purpose; at the CLI boundary each of them is a [FATAL] with its
