@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 import subprocess
 
+from magi_key import KeyStore
+from magi_key_permissions import default_key_store  # noqa: F401
 from magi_rs_bootstrap import BinaryBootstrap
 from magi_rs_env import EnvironmentPolicy
 from magi_rs_paths import bin_dir, pin_path, plugin_root
@@ -29,7 +31,11 @@ _INIT_TIMEOUT_SECONDS = 120
 far beyond any healthy run and only bounds a hung child."""
 
 
-def run_ollama_init(workdir: str) -> str:
+class OllamaInitError(Exception):
+    """Stub."""
+
+
+def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
     """Initialise ``workdir`` for the magi-rs backend, by delegating entirely.
 
     Args:

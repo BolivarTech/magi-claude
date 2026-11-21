@@ -14,7 +14,9 @@ from unittest.mock import patch
 
 import pytest
 
+import run_magi
 from models import ModelSpec
+from ollama_init import OllamaInitError
 from rotation_harness import (
     _run,
     _trio_from_launch,
@@ -5272,3 +5274,27 @@ def test_the_timeout_help_names_the_ollama_default_from_its_constant(capsys):
     help_text = " ".join(capsys.readouterr().out.split())
     assert f"default {magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS}" in help_text
     assert "default 1800" not in help_text
+
+
+def _raise(exception):
+    """A callable with any signature that raises `exception`."""
+
+    def _raiser(*args, **kwargs):
+        raise exception
+
+    return _raiser
+
+
+def test_a_failed_init_is_one_fatal_line_at_the_cli(monkeypatch, capsys):
+    # [CP2-C33] the guard the closed list removed, at the level it belongs to.
+    monkeypatch.setattr("run_magi.run_ollama_init", _raise(OllamaInitError("error: init died")))
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    err = capsys.readouterr().err
+    assert (
+        exc.value.code == 1
+        and err.startswith("[FATAL]")
+        and "init died" in err
+        and "Traceback" not in err
+    )

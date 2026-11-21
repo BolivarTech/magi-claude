@@ -8,9 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from magi_key import KeyHardeningError, KeyStore, MagiKey
 from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_env import EnvironmentPolicy
-from ollama_init import run_ollama_init
+from ollama_init import OllamaInitError, run_ollama_init
 
 
 class _Ok:
@@ -46,7 +47,7 @@ def test_ollama_init_invokes_magi_rs_init_with_the_workdir(monkeypatch, tmp_path
         "ollama_init.subprocess.run",
         lambda argv, **kw: seen.update(argv=argv, env=kw.get("env")) or _Ok(),
     )
-    run_ollama_init(str(tmp_path))
+    run_ollama_init(str(tmp_path), key_store=_Store())
     assert seen["argv"][1] == "init"
     assert seen["argv"][seen["argv"].index("-w") + 1] == str(tmp_path)
     assert "-p" not in seen["argv"]  # R5a: no passphrase, ever
@@ -62,7 +63,7 @@ def test_ollama_init_touches_nothing_under_dot_claude(monkeypatch, tmp_path):
     stale.write_text("[models]\nmelchior = 'x'", encoding="utf-8")
     before = stale.read_bytes()
     monkeypatch.setattr("ollama_init.subprocess.run", lambda *a, **k: _Ok())
-    output = run_ollama_init(str(tmp_path))
+    output = run_ollama_init(str(tmp_path), key_store=_Store())
     assert stale.read_bytes() == before
     assert "magi-ollama" not in output
     assert sorted(p.name for p in claude_dir.iterdir()) == ["magi-ollama.toml"]
@@ -76,33 +77,7 @@ def test_ollama_init_reports_cleanly_on_an_already_initialised_project(monkeypat
         "ollama_init.subprocess.run",
         lambda *a, **k: _Ok(stdout="already initialised at /repo/.magi"),
     )
-    assert "already initialised" in run_ollama_init(str(tmp_path))
-
-
-def test_ollama_init_relays_a_refusal_without_a_traceback(monkeypatch, tmp_path):
-    # BDD-7b, the other outcome: magi-rs refuses (non-zero). Relayed as text,
-    # never forced, never a Python traceback.
-    monkeypatch.setattr(
-        "ollama_init.subprocess.run",
-        lambda *a, **k: _Ok(stdout="", stderr="refusing to nest under /repo/.magi", returncode=1),
-    )
-    output = run_ollama_init(str(tmp_path))
-    assert "refusing to nest" in output
-
-
-def test_ollama_init_child_environment_carries_nothing_beyond_the_allowlist(monkeypatch, tmp_path):
-    # The first draft CAPTURED this env and never asserted on it. R7 applies to
-    # both subprocess sites, not just to the gate one.
-    seen = {}
-    monkeypatch.setenv("MAGI_PASSPHRASE", "hunter2")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
-    monkeypatch.setattr(
-        "ollama_init.subprocess.run", lambda argv, **kw: seen.update(env=kw["env"]) or _Ok()
-    )
-    run_ollama_init(str(tmp_path))
-    assert "MAGI_PASSPHRASE" not in seen["env"]
-    assert "ANTHROPIC_API_KEY" not in seen["env"]
-    assert set(seen["env"]) <= set(EnvironmentPolicy.build(os.environ)) | {"PATH"}
+    assert "already initialised" in run_ollama_init(str(tmp_path), key_store=_Store())
 
 
 def test_ollama_init_does_not_run_an_unverified_binary(monkeypatch, tmp_path):
@@ -116,3 +91,113 @@ def test_ollama_init_does_not_run_an_unverified_binary(monkeypatch, tmp_path):
     with pytest.raises(DigestMismatchError):
         run_ollama_init(str(tmp_path))
     assert ran == []
+
+
+class _Completed:
+    def __init__(self, returncode=0, stdout="initialised\n", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def _fake_run(seen, creates_magi=True, returncode=0):
+    def run(argv, **kwargs):
+        seen.append((argv, kwargs["env"]))
+        if creates_magi and returncode == 0:
+            os.makedirs(os.path.join(kwargs.get("cwd") or argv[argv.index("-w") + 1], ".magi"))
+        return _Completed(returncode=returncode)
+
+    return run
+
+
+class _Store(KeyStore):
+    def __init__(self, fail=False):
+        self.persisted, self.fail = [], fail
+
+    def new_key(self):
+        return MagiKey("generated-key-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
+
+    def persist(self, workdir, key):
+        if self.fail:
+            raise KeyHardeningError("cannot harden")
+        self.persisted.append((workdir, key))
+        return "path"
+
+
+def test_init_uses_the_platform_key_store_by_default(monkeypatch, tmp_path):
+    # [CP2-C36] the fourth production call site, the one every new user runs first.
+    built = []
+    store = _Store()
+    monkeypatch.setattr("ollama_init.default_key_store", lambda: built.append("built") or store)
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run([]))
+    run_ollama_init(str(tmp_path))
+    assert built == ["built"] and store.persisted
+
+
+def test_init_passes_the_new_key_by_environment_and_persists_it(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run(seen))
+    store = _Store()
+    run_ollama_init(str(tmp_path), key_store=store)
+    argv, env = seen[0]
+    assert env["MAGI_PASSPHRASE"] == store.new_key().reveal()
+    assert store.new_key().reveal() not in " ".join(argv)
+    assert store.persisted and store.persisted[0][0] == str(tmp_path)
+
+
+def test_an_existing_magi_dir_is_left_untouched_and_magi_rs_is_not_called(monkeypatch, tmp_path):
+    (tmp_path / ".magi").mkdir()
+    seen = []
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run(seen))
+    store = _Store()
+    message = run_ollama_init(str(tmp_path), key_store=store)
+    assert seen == [] and store.persisted == []
+    assert "already" in message and ".magi" in message
+
+
+def test_a_failed_init_persists_no_key(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run(seen, returncode=1))
+    store = _Store()
+    with pytest.raises(OllamaInitError):  # [CP2-C29]
+        run_ollama_init(str(tmp_path), key_store=store)
+    assert store.persisted == []
+
+
+def test_a_failed_init_relays_its_output_and_removes_the_magi_dir_it_created(monkeypatch, tmp_path):
+    # [CP2-M33]
+    def run(argv, **kwargs):
+        os.makedirs(os.path.join(argv[argv.index("-w") + 1], ".magi"))
+        return _Completed(returncode=1, stdout="", stderr="error: init died")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", run)
+    store = _Store()
+    with pytest.raises(OllamaInitError) as exc:  # [CP2-C29]
+        run_ollama_init(str(tmp_path), key_store=store)
+    assert "init died" in str(exc.value) and store.persisted == []
+    assert not (tmp_path / ".magi").exists()
+
+
+def test_a_key_that_cannot_be_hardened_removes_the_magi_dir_this_call_created(
+    monkeypatch, tmp_path
+):
+    seen = []
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run(seen))
+    with pytest.raises(KeyHardeningError):
+        run_ollama_init(str(tmp_path), key_store=_Store(fail=True))
+    assert not (tmp_path / ".magi").exists()
+
+
+def test_ollama_init_child_environment_carries_nothing_beyond_the_allowlist(monkeypatch, tmp_path):
+    # [RD-D12] The injected key travels; the inherited passphrase and API keys never do.
+    seen = {}
+    monkeypatch.setenv("MAGI_PASSPHRASE", "hunter2")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
+    monkeypatch.setattr(
+        "ollama_init.subprocess.run", lambda argv, **kw: seen.update(env=kw["env"]) or _Completed()
+    )
+    store = _Store()
+    run_ollama_init(str(tmp_path), key_store=store)
+    assert seen["env"]["MAGI_PASSPHRASE"] == store.new_key().reveal()
+    assert "ANTHROPIC_API_KEY" not in seen["env"]
+    assert set(seen["env"]) - {"MAGI_PASSPHRASE"} <= set(EnvironmentPolicy.build(os.environ)) | {
+        "PATH"
+    }
