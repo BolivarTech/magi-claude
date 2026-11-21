@@ -217,8 +217,7 @@ class VaultClient:
                 text = text.replace(secret, REDACTION_MARKER)
         return text
 
-    @staticmethod
-    def _parse_ls_line(line: str) -> str:
+    def _parse_ls_line(self, line: str) -> str:
         """Extract the name from one ``vault ls`` line.
 
         Args:
@@ -237,6 +236,8 @@ class VaultClient:
             raise VaultCommandError("vault ls answered in an unrecognised format")
         if name not in VAULT_KEY_NAMES:
             raise VaultCommandError(
-                f"vault ls listed {name!r}, which is not a vault name this plugin uses"
+                self._redact(
+                    f"vault ls listed {name!r}, which is not a vault name this plugin uses", ()
+                )
             )
         return name
