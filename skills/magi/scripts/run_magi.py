@@ -79,6 +79,7 @@ from magi_rs_bootstrap import (  # noqa: E402
 )
 from magi_rs_preflight import ProjectPreflight  # noqa: E402
 from magi_key import MagiKey  # noqa: E402
+from magi_rs_targets import DEFAULT_BASE  # noqa: E402
 from magi_key_rotation import (  # noqa: E402
     KeyRotation,
     magi_dir_problem,
@@ -392,8 +393,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--base",
-        default="main",
-        help="Base ref for code-review context enrichment (default: main)",
+        default=None,
+        help=(
+            f"Base ref of the diff (default: {DEFAULT_BASE}): the enrichment base of the Claude path, and "
+            "with code-review --ollama the base of the branch to review (needs --head)."
+        ),
+    )
+    parser.add_argument("--commit", help="With code-review --ollama: review this commit.")
+    parser.add_argument(
+        "--from",
+        dest="from_",
+        help="With code-review --ollama: start of the range to review (needs --to).",
+    )
+    parser.add_argument(
+        "--to", help="With code-review --ollama: end of the range to review (needs --from)."
+    )
+    parser.add_argument(
+        "--head", help="With code-review --ollama: head of the branch to review (needs --base)."
+    )
+    parser.add_argument(
+        "--uncommitted",
+        action="store_true",
+        help="With code-review --ollama: review staged, unstaged and untracked changes.",
     )
     parser.add_argument(
         "--no-enrich",
@@ -480,7 +501,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--warn-input-tokens must be a positive integer")
     _check_subcommands(parser, args)
     standalone = args.ollama_init or args.ollama_vault_set is not None or args.ollama_rotate_key
-    if not args.check_prompts and not standalone and (args.mode is None or args.input is None):
+    native_review = args.mode == "code-review" and args.ollama
+    target_flags = [
+        flag
+        for flag, given in (
+            ("--commit", args.commit is not None),
+            ("--from", args.from_ is not None),
+            ("--to", args.to is not None),
+            ("--head", args.head is not None),
+            ("--uncommitted", args.uncommitted),
+        )
+        if given
+    ]
+    if target_flags and not native_review:
+        parser.error(f"{', '.join(target_flags)} apply only to code-review --ollama")
+    if (
+        not args.check_prompts
+        and not standalone
+        and (args.mode is None or (args.input is None and not native_review))
+    ):
         parser.error("the following arguments are required: mode, input")
     if args.ollama and args.model is not None:
         parser.error(
@@ -2408,13 +2447,15 @@ def main() -> None:
     # diverge. ``resolve_diff`` is TOTAL (returns "" on any failure); "" makes
     # the guard a no-op.
     review_diff = (
-        resolve_diff(input_content, os.getcwd(), args.base) if args.mode == "code-review" else ""
+        resolve_diff(input_content, os.getcwd(), args.base or DEFAULT_BASE)
+        if args.mode == "code-review"
+        else ""
     )
 
     input_content, enrich_note = _maybe_enrich(
         args.mode,
         input_content,
-        base_ref=args.base,
+        base_ref=args.base or DEFAULT_BASE,
         enrich=args.enrich,
         max_chars=args.enrich_max_chars,
         diff=review_diff,
