@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
-# Date: 2026-11-19
+# Version: 8.0.0
+# Date: 2026-11-21
 """Owner-only permission guards for the magi-rs memory key.
 
 ``PermissionGuard.for_platform()`` picks the guard for the running platform and

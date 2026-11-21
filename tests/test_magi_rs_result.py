@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.0.1
-# Date: 2026-10-14
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for reading a magi-rs consult envelope (MS3 Task 3c).
 
 The fixtures under ``tests/fixtures/magi-rs-consult/`` derive from ONE real

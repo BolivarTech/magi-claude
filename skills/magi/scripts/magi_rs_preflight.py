@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 8.0.0
+# Date: 2026-11-21
 """Check that a project has been initialised for the magi-rs backend."""
 
 from __future__ import annotations

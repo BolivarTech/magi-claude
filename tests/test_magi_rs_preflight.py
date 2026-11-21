@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for the one-check project preflight of the magi-rs path (MS3 Task 2)."""
 
 import pytest

@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
+# Version: 8.0.0
 # Date: 2026-11-21
 """Reachability probe for the embedder that ``magi-rs code-review`` depends on."""
 

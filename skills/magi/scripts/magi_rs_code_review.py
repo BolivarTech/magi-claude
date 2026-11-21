@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
+# Version: 8.0.0
 # Date: 2026-11-21
 """Run ONE ``magi-rs code-review`` child and judge what it prints (REQ-14).
 

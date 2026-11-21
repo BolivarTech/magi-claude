@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for the magi-rs binary bootstrap (MS2 Tasks 2-5).
 
 No test touches the network or the plugin's real ``bin/``: downloads are served

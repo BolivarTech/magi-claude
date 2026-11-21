@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
-# Date: 2026-11-19
+# Version: 8.0.0
+# Date: 2026-11-21
 """Custody of the passphrase that opens the ``magi-rs`` memory database.
 
 One key opens both the memory database and the vault. It lives in

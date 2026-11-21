@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
-# Date: 2026-11-19
+# Version: 8.0.0
+# Date: 2026-11-21
 """Full rotation of an exposed magi-rs memory key (REQ-13e-h).
 
 A key whose permissions were loosened may have been copied, and with it the

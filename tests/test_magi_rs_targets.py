@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
+# Version: 8.0.0
 # Date: 2026-11-21
 """Tests for the code-review target model (REQ-01..03, PM-C-1)."""
 

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
-# Date: 2026-11-19
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for the magi-rs vault client (MS1 Task 8)."""
 
 import os

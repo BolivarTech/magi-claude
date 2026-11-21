@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
+# Version: 8.0.0
 # Date: 2026-11-21
 """The one home of the key subcommands' flag literals and of how a message names them.
 

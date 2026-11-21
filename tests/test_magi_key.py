@@ -1,3 +1,7 @@
+# Author: Julian Bolivar
+# Version: 8.0.0
+# Date: 2026-11-21
+
 import base64
 import os
 import sys

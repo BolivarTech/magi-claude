@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-09-19
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for the allowlisted child environment of magi-rs (MS3 Task 1)."""
 
 import os

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 8.0.0
+# Date: 2026-11-21
 """Build the environment handed to the ``magi-rs`` child process.
 
 The environment is built by ALLOWLIST: only what is declared here is inherited,

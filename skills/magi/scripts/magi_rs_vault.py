@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
-# Date: 2026-11-19
+# Version: 8.0.0
+# Date: 2026-11-21
 """Client for ``magi-rs vault set|ls``.
 
 The vault is the only source of API keys (REQ-13c): a value reaches the

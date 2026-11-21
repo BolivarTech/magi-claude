@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 3.0.0
-# Date: 2026-09-20
+# Version: 8.0.0
+# Date: 2026-11-21
 """``--ollama-init``: create the passphrase key, then one ``magi-rs init`` call.
 
 :func:`run_ollama_init` bootstraps and verifies the pinned binary (R4 has no

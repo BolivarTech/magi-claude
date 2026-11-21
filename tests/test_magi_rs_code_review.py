@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
+# Version: 8.0.0
 # Date: 2026-11-21
 """Tests for MagiRsCodeReview, the executor of one ``magi-rs code-review`` (MS2 Task 3).
 

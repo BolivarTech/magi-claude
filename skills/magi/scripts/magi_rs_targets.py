@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
+# Version: 8.0.0
 # Date: 2026-11-21
 """What ``code-review --ollama`` reviews: a path or a git revision (REQ-01..03).
 

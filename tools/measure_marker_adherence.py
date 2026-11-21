@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-09-29
+# Version: 8.0.0
+# Date: 2026-11-21
 """Release gate: measure MAGI's adherence to the verdict-sentinel markers (R17a).
 
 MS2 replaced heuristic verdict recovery with the ``<MAGI_VERDICT>`` / ``</MAGI_VERDICT>``

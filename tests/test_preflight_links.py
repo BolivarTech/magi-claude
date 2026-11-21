@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
+# Version: 8.0.0
 # Date: 2026-11-21
 """The preflight refuses a linked ``.magi/`` like every other entry point (MS1 gate, O4)."""
 

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.1.2
-# Date: 2026-09-18
+# Version: 8.0.0
+# Date: 2026-11-21
 """Obtain, verify and install the pinned ``magi-rs`` executable.
 
 Side effects -- this module has five, and every public function documents its

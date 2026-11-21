@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
+# Version: 8.0.0
 # Date: 2026-11-21
 """Refusal of a path that is a link or reparse point, shared by every place that touches the key.
 

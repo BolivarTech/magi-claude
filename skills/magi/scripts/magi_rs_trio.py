@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
-# Date: 2026-11-19
+# Version: 8.0.0
+# Date: 2026-11-21
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
 This is the second implementer of :class:`TrioExecutor` -- the one that

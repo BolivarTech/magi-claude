@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
-# Date: 2026-11-19
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for one_line.py — the single whitespace collapse behind every one-line error."""
 
 from __future__ import annotations

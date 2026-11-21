@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 2.0.0
-# Date: 2026-09-20
+# Version: 8.0.0
+# Date: 2026-11-21
 """``--ollama-init`` is one ``magi-rs init`` call (MS3 Task 4); nothing else survives here."""
 
 import os

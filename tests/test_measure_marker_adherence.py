@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-09-29
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for the R17a release gate: ``tools/measure_marker_adherence.py``.
 
 A broken measurement instrument does not give a bad number -- it gives a FALSE one, which
