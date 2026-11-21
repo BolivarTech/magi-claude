@@ -924,3 +924,23 @@ def test_verify_refuses_a_key_path_that_is_itself_a_link(tmp_path, directory):
     message = str(exc.value)
     assert str(link) in message and "is a link" in message and "\n" not in message
     guard.verify(str(target), directory)
+
+
+@pytest.mark.parametrize(("platform", "expected_encoding"), [("win32", "oem"), ("linux", None)])
+def test_permission_tool_output_is_decoded_with_the_console_code_page_on_windows(
+    monkeypatch, platform, expected_encoding
+):
+    # [V4] icacls/whoami write in the OEM code page; the locale ANSI default garbles non-ASCII names.
+    from magi_key_permissions import _run
+
+    captured = {}
+
+    def _fake_run(argv, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(stdout="out")
+
+    monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
+    monkeypatch.setattr(sys, "platform", platform)
+    assert _run(["tool"]) == "out"
+    assert captured.get("encoding") == expected_encoding
+    assert captured["errors"] == "replace" and captured["text"] is True
