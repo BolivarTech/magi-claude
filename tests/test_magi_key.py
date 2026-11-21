@@ -171,11 +171,22 @@ def test_load_of_an_empty_key_is_missing(tmp_path):
     assert "--ollama-init" in message and "move" in message and "backup" in message
 
 
+class _FileHardenFailingGuard(_Guard):
+    """Hardens directories; fails on the key file, i.e. after the file was written."""
+
+    def harden(self, path, directory):
+        if not directory:
+            raise KeyHardeningError(f"cannot harden {path}")
+        super().harden(path, directory)
+
+
 def test_a_failed_cleanup_never_masks_the_hardening_failure(tmp_path, monkeypatch):
     def _remove_fails(path):
         raise OSError("sharing violation")
 
-    store = _store(harden_fails=True)
+    # [Loop1 M-1] the failure is put on the FILE harden: the directory is now hardened before the
+    # file exists, and this test is about cleaning up a file that was written.
+    store = KeyStore(_FileHardenFailingGuard())
     key_file = store.key_path(str(tmp_path))
     monkeypatch.setattr("magi_key.os.remove", _remove_fails)
     with pytest.raises(KeyHardeningError) as exc:
