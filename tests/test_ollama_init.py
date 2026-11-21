@@ -30,7 +30,7 @@ class _Ok:
 def _verified_binary(monkeypatch):
     """Stub the bootstrap: no test here may download into the real bin/."""
     monkeypatch.setattr(
-        "ollama_init.BinaryBootstrap",
+        "magi_rs_bootstrap.BinaryBootstrap",
         lambda *a, **k: SimpleNamespace(
             ensure=lambda: "/bin/magi-rs", verify=lambda: "/bin/magi-rs"
         ),
@@ -88,7 +88,7 @@ def test_ollama_init_does_not_run_an_unverified_binary(monkeypatch, tmp_path):
     ran = []
     monkeypatch.setattr("ollama_init.subprocess.run", lambda *a, **k: ran.append(a))
     monkeypatch.setattr(
-        "ollama_init.BinaryBootstrap",
+        "magi_rs_bootstrap.BinaryBootstrap",
         lambda *a, **k: SimpleNamespace(ensure=_raising(DigestMismatchError("digest differs"))),
     )
     with pytest.raises(DigestMismatchError):

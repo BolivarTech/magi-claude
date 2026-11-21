@@ -32,7 +32,6 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from collections.abc import Callable
 from typing import IO
 
 from magi_rs_paths import bin_dir, pin_path, plugin_root
@@ -712,16 +711,11 @@ def plugin_binary_location() -> tuple[Pin, str]:
     return Pin.load(pin_path(root)), bin_dir(root)
 
 
-def verified_plugin_executable(bootstrap: Callable[[Pin, str], BinaryBootstrap]) -> str:
+def verified_plugin_executable() -> str:
     """Return the verified ``magi-rs`` executable of the running plugin.
 
     The one composition every launcher uses: plugin root, pin, ``bin/``, then
-    :func:`verified_executable`.
-
-    Args:
-        bootstrap: Builds the bootstrap from the pin and ``bin/``; callers pass
-            :class:`BinaryBootstrap` (the name they import, so a test double of
-            it applies).
+    :class:`BinaryBootstrap` and :func:`verified_executable`.
 
     Returns:
         The path of the verified executable.
@@ -731,10 +725,10 @@ def verified_plugin_executable(bootstrap: Callable[[Pin, str], BinaryBootstrap])
         raises. The binary is not executed before its digest matched.
 
     Example:
-        >>> path = verified_plugin_executable(BinaryBootstrap)  # doctest: +SKIP
+        >>> path = verified_plugin_executable()  # doctest: +SKIP
     """
     pin, directory = plugin_binary_location()
-    return verified_executable(bootstrap(pin, directory))
+    return verified_executable(BinaryBootstrap(pin, directory))
 
 
 class BinaryBootstrap:

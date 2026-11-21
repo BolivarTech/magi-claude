@@ -74,7 +74,6 @@ from magi_rs_trio import (  # noqa: E402
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
 from magi_key_permissions import default_key_store  # noqa: E402
 from magi_rs_bootstrap import (  # noqa: E402
-    BinaryBootstrap,
     plugin_binary_location,
     verified_plugin_executable,
 )
@@ -2198,7 +2197,7 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
     """
     workdir = os.getcwd()
     try:
-        executable = verified_plugin_executable(BinaryBootstrap)
+        executable = verified_plugin_executable()
         key = ProjectPreflight.require_ready(workdir, default_key_store())
         value = getpass.getpass(_VAULT_VALUE_PROMPT) if is_tty else stdin.read()
         value = value.rstrip(_LINE_ENDINGS)
@@ -2236,7 +2235,7 @@ def rotate_main(assume_yes: bool, is_tty: bool) -> int:
         authorised or it stopped (one line on stderr, never a traceback).
     """
     try:
-        executable = verified_plugin_executable(BinaryBootstrap)
+        executable = verified_plugin_executable()
     except Exception as exc:  # noqa: BLE001 - as in vault_set_main: every bootstrap error is fail-closed
         print(_render_fatal(exc), file=sys.stderr)
         return 1

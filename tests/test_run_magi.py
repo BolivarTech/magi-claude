@@ -5328,7 +5328,8 @@ def _stub_vault_preflight(monkeypatch, key_error=None, bootstrap_fails=False):
         return MagiKey("k" * 44)
 
     monkeypatch.setattr(
-        "run_magi.BinaryBootstrap", lambda *a, **k: SimpleNamespace(ensure=_verify, verify=_verify)
+        "magi_rs_bootstrap.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(ensure=_verify, verify=_verify),
     )
     monkeypatch.setattr("run_magi.default_key_store", lambda: seen["sentinel"])
     monkeypatch.setattr("run_magi.ProjectPreflight.require_ready", staticmethod(_ready))
@@ -5461,7 +5462,8 @@ def _stub_rotation_bootstrap(monkeypatch, fails=False):
         return "/bin/magi-rs"
 
     monkeypatch.setattr(
-        "run_magi.BinaryBootstrap", lambda *a, **k: SimpleNamespace(ensure=_verify, verify=_verify)
+        "magi_rs_bootstrap.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(ensure=_verify, verify=_verify),
     )
 
 
@@ -5478,7 +5480,8 @@ def test_rotate_main_renders_any_bootstrap_error_as_one_fatal_line(monkeypatch, 
     rotated = []
     failing = _raise(RuntimeError("unexpected"))
     monkeypatch.setattr(
-        "run_magi.BinaryBootstrap", lambda *a, **k: SimpleNamespace(ensure=failing, verify=failing)
+        "magi_rs_bootstrap.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(ensure=failing, verify=failing),
     )
     monkeypatch.setattr("run_magi.KeyRotation.rotate", lambda self, *a, **k: rotated.append(a))
     assert run_magi.rotate_main(True, is_tty=False) == 1
@@ -5624,7 +5627,7 @@ def test_the_ollama_preflight_fatal_line_carries_the_guards_diagnostic(
 def _ensure_ok_verify_fails(monkeypatch):
     """A bootstrap whose ensure() succeeds (steady state) but whose verify() fails."""
     monkeypatch.setattr(
-        "run_magi.BinaryBootstrap",
+        "magi_rs_bootstrap.BinaryBootstrap",
         lambda *a, **k: SimpleNamespace(
             ensure=lambda: "/bin/magi-rs", verify=_raise(VersionMismatchError("reports 0.24.1"))
         ),
@@ -5685,7 +5688,8 @@ def test_the_vault_set_fatal_is_one_line_with_its_notes(monkeypatch, capsys):
 def test_the_rotate_fatal_is_one_line_with_its_notes(monkeypatch, capsys):
     failing = _raise(_noted(DigestMismatchError("first line\nsecond line")))
     monkeypatch.setattr(
-        "run_magi.BinaryBootstrap", lambda *a, **k: SimpleNamespace(ensure=failing, verify=failing)
+        "magi_rs_bootstrap.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(ensure=failing, verify=failing),
     )
     assert run_magi.rotate_main(True, is_tty=False) == 1
     _assert_one_fatal_line_with_the_note(capsys.readouterr().err)

@@ -261,7 +261,7 @@ def test_a_real_init_that_fails_makes_the_rotation_fail(tmp_path, monkeypatch):
         lambda argv, **kw: SimpleNamespace(returncode=1, stdout="", stderr="error: init died"),
     )
     monkeypatch.setattr(
-        "ollama_init.BinaryBootstrap",
+        "magi_rs_bootstrap.BinaryBootstrap",
         lambda *a, **k: SimpleNamespace(
             ensure=lambda: "/bin/magi-rs", verify=lambda: "/bin/magi-rs"
         ),
@@ -1087,7 +1087,7 @@ def _real_init_whose_cleanup_fails(tmp_path, monkeypatch, work, failure):
 
     monkeypatch.setattr("ollama_init.subprocess.run", _run)
     monkeypatch.setattr(
-        "ollama_init.BinaryBootstrap",
+        "magi_rs_bootstrap.BinaryBootstrap",
         lambda *a, **k: SimpleNamespace(
             ensure=lambda: "/bin/magi-rs", verify=lambda: "/bin/magi-rs"
         ),

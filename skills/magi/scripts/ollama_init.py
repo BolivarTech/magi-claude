@@ -31,7 +31,7 @@ from magi_key import (
     MagiKey,
 )
 from magi_key_permissions import default_key_store
-from magi_rs_bootstrap import BinaryBootstrap, verified_plugin_executable
+from magi_rs_bootstrap import verified_plugin_executable
 from magi_rs_env import EnvironmentPolicy
 from one_line import one_line
 
@@ -198,7 +198,7 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
     if os.path.exists(magi_dir):
         raise MagiDirExistsError(_ALREADY_INITIALISED.format(workdir=workdir))
     store = key_store if key_store is not None else default_key_store()
-    executable = verified_plugin_executable(BinaryBootstrap)
+    executable = verified_plugin_executable()
     key = store.new_key()
     try:
         completed = subprocess.run(
