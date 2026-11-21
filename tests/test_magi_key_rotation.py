@@ -1242,3 +1242,40 @@ def test_a_backup_hardening_failure_names_the_directory_that_failed(tmp_path):
     message = str(exc.value)
     assert f"cannot restrict the rotation backup directory {root} to its owner" in message
     assert "nothing was moved" in message and (work / ".magi" / "magi.toml").read_text() == "old"
+
+
+def test_a_copy_whose_directory_cannot_be_listed_is_never_proven_complete(tmp_path, monkeypatch):
+    # [U1] a directory the completeness walk cannot list must never be skipped: "cannot prove complete" keeps
+    # both copies, because the partial backup may hold the only copy of what the source lost.
+    work = _project(tmp_path)
+    (work / ".magi" / "index").mkdir()
+    (work / ".magi" / "index" / "chunks.bin").write_bytes(b"chunks")
+
+    def _move(src, dst):
+        shutil.copytree(src, dst)
+        os.remove(os.path.join(src, "index", "chunks.bin"))  # the only copy now lives in the backup
+        raise OSError("file in use")
+
+    real_walk = os.walk
+
+    def _walk(top, topdown=True, onerror=None, followlinks=False):
+        for current, dirs, files in real_walk(top, topdown, onerror, followlinks):
+            in_backup = "rotated" in os.path.normpath(current).split(os.sep)
+            if in_backup and "index" in dirs:
+                dirs.remove("index")  # what os.walk does with a directory it cannot list
+                if onerror is not None:
+                    onerror(
+                        PermissionError(13, "Permission denied", os.path.join(current, "index"))
+                    )
+            yield current, dirs, files
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move)
+    monkeypatch.setattr("magi_key_rotation.os.walk", _walk)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    (backup,) = os.listdir(tmp_path / "rotated")
+    assert (
+        tmp_path / "rotated" / backup / ".magi" / "index" / "chunks.bin"
+    ).read_bytes() == b"chunks"
+    assert "both copies were kept" in str(exc.value)
