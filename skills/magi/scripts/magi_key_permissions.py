@@ -440,8 +440,13 @@ def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
     return _PROTECTED_FLAG in flags, aces
 
 
-_LINK_REPARSE_TAGS = frozenset({stat.IO_REPARSE_TAG_SYMLINK, stat.IO_REPARSE_TAG_MOUNT_POINT})
-"""The reparse tags of a symbolic link and of a junction: the entries that are links."""
+_IO_REPARSE_TAG_SYMLINK = 0xA000000C
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+"""Windows reparse tags of a symbolic link and of a junction (the ``stat`` module defines them
+only on Windows builds, and this module is imported everywhere)."""
+
+_LINK_REPARSE_TAGS = frozenset({_IO_REPARSE_TAG_SYMLINK, _IO_REPARSE_TAG_MOUNT_POINT})
+"""The reparse tags that are links."""
 
 _LINK_REFUSAL = "{path} is a link: replace it with a real file/directory"
 _REPARSE_REFUSAL = (
