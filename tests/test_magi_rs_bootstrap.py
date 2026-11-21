@@ -38,6 +38,7 @@ from magi_rs_bootstrap import (
     require_real_directory,
     sha256_of,
     sweep,
+    verified_executable,
 )
 from magi_rs_pin import Asset, Pin
 
@@ -1038,3 +1039,24 @@ def test_a_failed_rollback_in_the_rename_dance_propagates_and_discards_the_stage
     assert len(attempts_on_final) == 2  # once directly, once after renaming aside
     assert (bin_dir / _installed_name()).read_bytes() == b"previous version"  # rolled back
     assert sorted(p.name for p in bin_dir.iterdir()) == [_installed_name()]  # staged discarded
+
+
+def test_verified_executable_ensures_then_verifies_and_returns_the_verified_path():
+    # [Loop1 M-4] one helper for "a verified executable": ensure() alone skips the version check
+    # in the steady state, so every launcher must also verify().
+    calls = []
+    bootstrap = SimpleNamespace(
+        ensure=lambda: calls.append("ensure") or "/bin/ensured",
+        verify=lambda: calls.append("verify") or "/bin/verified",
+    )
+    assert verified_executable(bootstrap) == "/bin/verified"
+    assert calls == ["ensure", "verify"]
+
+
+def test_verified_executable_propagates_a_verification_failure():
+    def _fail():
+        raise VersionMismatchError("reports 0.24.1")
+
+    bootstrap = SimpleNamespace(ensure=lambda: "/bin/magi-rs", verify=_fail)
+    with pytest.raises(VersionMismatchError):
+        verified_executable(bootstrap)

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 from collections import Counter, defaultdict
 import os
@@ -62,8 +63,6 @@ from bundle_segmenter import (  # noqa: E402
     SegmentTooLargeError,
     mentions,
 )
-from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
-from magi_rs_pin import Pin  # noqa: E402
 from magi_rs_result import ConsultResult, describe_reasoning  # noqa: E402
 from magi_rs_trio import (  # noqa: E402
     DEFAULT_OLLAMA_TIMEOUT_SECONDS,
@@ -73,7 +72,28 @@ from magi_rs_trio import (  # noqa: E402
     MagiRsTrio,
 )
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
-from ollama_init import run_ollama_init  # noqa: E402
+from magi_key_permissions import default_key_store  # noqa: E402
+from magi_rs_bootstrap import (  # noqa: E402
+    plugin_binary_location,
+    verified_plugin_executable,
+)
+from magi_rs_preflight import ProjectPreflight  # noqa: E402
+from magi_key import MagiKey  # noqa: E402
+from magi_key_rotation import (  # noqa: E402
+    KeyRotation,
+    RotationFailedError,
+    RotationNotAuthorisedError,
+)
+from magi_rs_vault import VAULT_KEY_NAMES, VaultClient  # noqa: E402
+from cli_commands import (  # noqa: E402
+    INIT_FLAG,
+    ROTATE_KEY_FLAG,
+    VAULT_SET_FLAG,
+    YES_FLAG,
+    command,
+)
+from ollama_init import MagiDirExistsError, run_ollama_init  # noqa: E402
+from one_line import one_line  # noqa: E402
 from run_lock import (  # noqa: E402
     refresh_lock,
     remove_lock,
@@ -151,6 +171,12 @@ DEFAULT_MAX_ATTEMPTS = 2
 #: TOML "already validates this way". It did not: it accepted 1000 (MAGI gate, Balthasar).
 
 
+_VAULT_VALUE_PROMPT = "API key value (input hidden): "
+_USAGE_EXIT_CODE = 2
+"""The exit status of an unusable invocation, as argparse uses."""
+_LINE_ENDINGS = "\r\n"
+
+
 def _max_attempts(raw: str) -> int:
     """Validate ``--max-attempts``: an integer in ``[MIN_ATTEMPTS, MAX_ATTEMPTS_CAP]``.
 
@@ -225,6 +251,39 @@ def _resolve_timeout(flag: int | None) -> float:
     if flag is not None:
         return float(flag)
     return DEFAULT_TIMEOUT_SECONDS
+
+
+def _check_subcommands(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject a standalone subcommand mixed with a mode, an input, ``--ollama`` or another one, and a stray ``--yes``.
+
+    The standalone subcommands are ``--check-prompts``, ``--ollama-init``,
+    ``--ollama-vault-set`` and ``--ollama-rotate-key``. A destructive rotation (or an initialisation) must
+    never be honoured from any position of a normal run, so the mix is an
+    argument error before anything runs.
+
+    Args:
+        parser: Reports the error.
+        args: The parsed arguments.
+
+    Raises:
+        SystemExit: Exit code 2, via ``parser.error``, for any invalid mix.
+    """
+    chosen = [
+        flag
+        for flag, given in (
+            ("--check-prompts", args.check_prompts),
+            (INIT_FLAG, args.ollama_init),
+            (VAULT_SET_FLAG, args.ollama_vault_set is not None),
+            (ROTATE_KEY_FLAG, args.ollama_rotate_key),
+        )
+        if given
+    ]
+    if len(chosen) > 1:
+        parser.error(f"{' and '.join(chosen)} cannot be combined; run one at a time")
+    if args.yes and not args.ollama_rotate_key:
+        parser.error(f"{YES_FLAG} applies only to {ROTATE_KEY_FLAG}")
+    if chosen and (args.mode is not None or args.input is not None or args.ollama):
+        parser.error(f"{chosen[0]} takes no mode, input or --ollama")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -364,9 +423,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--ollama-init",
+        INIT_FLAG,
         action="store_true",
         help="Initialise this project for magi-rs (`magi-rs init -w <cwd>`, creates .magi/) and exit.",
+    )
+    parser.add_argument(
+        VAULT_SET_FLAG,
+        metavar="NAME",
+        choices=VAULT_KEY_NAMES,
+        default=None,
+        help=(
+            f"Store one API key in the magi-rs vault of .magi/ and exit. NAME is one of "
+            f"{', '.join(VAULT_KEY_NAMES)}; the value is read from stdin, or from a hidden prompt at a "
+            "terminal, never from the command line. Takes no mode, input or --ollama."
+        ),
+    )
+    parser.add_argument(
+        ROTATE_KEY_FLAG,
+        action="store_true",
+        help=(
+            "Replace an exposed magi-rs key: move .magi/ to a backup outside the project, create a new "
+            "one and list the API keys to revoke, then exit. Asks for confirmation at a terminal; "
+            f"elsewhere it needs {YES_FLAG}. Takes no mode, input or --ollama."
+        ),
+    )
+    parser.add_argument(
+        YES_FLAG,
+        action="store_true",
+        help=f"With {ROTATE_KEY_FLAG} only: authorise the rotation without asking.",
     )
     # ``model_source`` is declared here with its siblings, not only assigned in
     # the body below: a hand-built Namespace (tests, embedders) would otherwise
@@ -387,12 +471,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.warn_input_tokens <= 0:
         parser.error("--warn-input-tokens must be a positive integer")
-    if not args.check_prompts and (args.mode is None or args.input is None):
+    _check_subcommands(parser, args)
+    standalone = args.ollama_init or args.ollama_vault_set is not None or args.ollama_rotate_key
+    if not args.check_prompts and not standalone and (args.mode is None or args.input is None):
         parser.error("the following arguments are required: mode, input")
     if args.ollama and args.model is not None:
         parser.error(
             "--model does not apply with --ollama; the trio is declared in .magi/magi.toml "
-            "(run --ollama-init once per project)."
+            f"({command(INIT_FLAG)} once per project)."
         )
     if args.ollama and args.max_attempts is not None:
         # R13/R18: with --ollama, magi-rs owns the retries and the rotation; the flag
@@ -737,13 +823,13 @@ def _select_executor(args: argparse.Namespace, timeout: int) -> MagiRsTrio | Non
     """
     if not args.ollama:
         return None
-    root = plugin_root()
+    pin, directory = plugin_binary_location()
     return MagiRsTrio(
         workdir=os.getcwd(),
         mode=args.mode,
         timeout=timeout,
-        bin_dir=bin_dir(root),
-        pin=Pin.load(pin_path(root)),
+        bin_dir=directory,
+        pin=pin,
     )
 
 
@@ -1279,6 +1365,21 @@ def _default_agents_dir() -> str:
     return os.path.join(os.path.dirname(script_dir), "agents")
 
 
+def _render_fatal(exc: BaseException) -> str:
+    """Render a fail-closed error as the ONE ``[FATAL]`` line every CLI site prints.
+
+    Every run of whitespace -- newlines included -- collapses to one space, so a
+    multi-line message can never spill a second line.
+
+    Args:
+        exc: The error to render.
+
+    Returns:
+        ``"[FATAL] <message>"`` on a single line, without a newline.
+    """
+    return f"[FATAL] {one_line(str(exc))}"
+
+
 def check_prompts(agents_dir: str) -> None:
     """Validate a directory of agent prompts and exit. The dry run of the startup guard.
 
@@ -1301,7 +1402,7 @@ def check_prompts(agents_dir: str) -> None:
     try:
         AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
     except PromptContractError as exc:
-        print(f"[FATAL] {exc}", file=sys.stderr)
+        print(_render_fatal(exc), file=sys.stderr)
         sys.exit(1)
     print(f"OK: the prompts in {agents_dir} honour the verdict-marker contract.")
     sys.exit(0)
@@ -2083,6 +2184,104 @@ def _write_report_file(report_text: str, out_path: str) -> None:
         raise
 
 
+def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
+    """``--ollama-vault-set NAME``: store one API key in the magi-rs vault.
+
+    Order matters: the name was validated by argparse (``choices``), then the
+    binary is verified and the key preflighted, and only then is the value read
+    -- so a secret is never typed or piped into a session that was already
+    refused. The value is never placed in argv, printed or logged.
+
+    Args:
+        name: One name from ``VAULT_KEY_NAMES`` (``VaultClient.set`` checks it again).
+        stdin: Where a non-interactive value is read from.
+        is_tty: True when stdin is a terminal; the value is then prompted hidden.
+
+    Returns:
+        0 on success; 1 for a fail-closed error or an empty value; 2 (a usage
+        error) for a value that contains a line break.
+    """
+    workdir = os.getcwd()
+    try:
+        executable = verified_plugin_executable()
+        key = ProjectPreflight.require_ready(workdir, default_key_store())
+        value = getpass.getpass(_VAULT_VALUE_PROMPT) if is_tty else stdin.read()
+        value = value.rstrip(_LINE_ENDINGS)
+        if not value:
+            print(f"ERROR: the value for {name} is empty; nothing was stored.", file=sys.stderr)
+            return 1
+        if any(ending in value for ending in _LINE_ENDINGS):
+            print(
+                f"ERROR: the value for {name} contains a line break; nothing was stored "
+                "(pass the key alone, on one line).",
+                file=sys.stderr,
+            )
+            return _USAGE_EXIT_CODE
+        VaultClient(executable, workdir, key).set(name, value)
+    except ValidationError as exc:
+        print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - every key/bootstrap error is fail-closed here
+        print(_render_fatal(exc), file=sys.stderr)
+        return 1
+    print(f"{name} stored in the magi-rs vault.")
+    return 0
+
+
+def rotate_main(assume_yes: bool, is_tty: bool) -> int:
+    """``--ollama-rotate-key [--yes]``: replace an exposed key, its database and its vault.
+
+    The binary is verified first, before anything moves, because the rotation
+    ends by running ``magi-rs init`` and ``magi-rs vault ls``. The rotation
+    itself (:class:`magi_key_rotation.KeyRotation`) moves the current
+    ``.magi/`` to a backup outside the working tree and creates a new one; this
+    handler prints where the backup went and which API keys to revoke (names,
+    never values). Neither key is ever printed.
+
+    Args:
+        assume_yes: True when ``--yes`` was given; it authorises without asking.
+        is_tty: True when stdin is a terminal; without ``--yes`` the operator
+            is then asked to confirm.
+
+    Returns:
+        0 on success; 1 when the binary does not verify, the rotation is not
+        authorised or it stopped (one line on stderr, never a traceback).
+    """
+    try:
+        executable = verified_plugin_executable()
+    except Exception as exc:  # noqa: BLE001 - as in vault_set_main: every bootstrap error is fail-closed
+        print(_render_fatal(exc), file=sys.stderr)
+        return 1
+
+    def _vault_ls(workdir: str, key: MagiKey) -> list[str]:
+        """List the vault names under ``workdir`` with the verified binary."""
+        return VaultClient(executable, workdir, key).ls()
+
+    rotation = KeyRotation(default_key_store(), run_ollama_init, _vault_ls)
+    try:
+        report = rotation.rotate(os.getcwd(), assume_yes=assume_yes, is_tty=is_tty)
+    except (RotationNotAuthorisedError, RotationFailedError) as exc:
+        print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
+        return 1
+    print(
+        f"Key rotated. The old .magi/ is in {report.backup_dir}: destroy it once you no longer need it."
+    )
+    if not report.names_from_vault:
+        print("The old vault could not be read, so every name it may have held is listed.")
+    if report.names_to_revoke:
+        print(
+            "Treat these API keys as compromised: revoke each one at its provider, then store the new value"
+        )
+        print(f"with {command(VAULT_SET_FLAG, '<NAME>')}:")
+        for name in report.names_to_revoke:
+            print(f"  {name}")
+    else:
+        print(
+            f"The old vault held no API keys; store new ones with {command(VAULT_SET_FLAG, '<NAME>')}."
+        )
+    return 0
+
+
 def main() -> None:
     """CLI entry point for MAGI orchestrator."""
     # Must run BEFORE any ``print`` or ``sys.exit`` — every output
@@ -2091,24 +2290,34 @@ def main() -> None:
     # happened on an earlier print.
     _enable_utf8_console_io()
 
-    # Short-circuit: --ollama-init delegates to ``magi-rs init`` and exits
-    # before parse_args() so that mode/input positional arguments are not
-    # required. We screen sys.argv directly; the flag is unambiguous (no value
-    # follows it). The whole command is ONE call (R5): no config of the
-    # plugin's own is written, nothing under .claude/ is read.
-    if "--ollama-init" in sys.argv[1:]:
+    args = parse_args()
+
+    # The standalone subcommands are dispatched from the PARSED args, so argparse
+    # lists them in --help, expands their abbreviations and rejects any mix with a
+    # mode, an input or each other before anything runs (parse_args). None of
+    # them needs a mode or an input. --ollama-init is ONE call (R5): no config of
+    # the plugin's own is written, nothing under .claude/ is read.
+    if args.ollama_init:
         try:
             output = run_ollama_init(os.getcwd())
+        except MagiDirExistsError as exc:
+            # REQ-12: an initialised project is left untouched, and that is not a failure here.
+            print(exc)
+            sys.exit(0)
         except Exception as exc:  # noqa: BLE001 - every bootstrap error is fatal here
             # The bootstrap's fail-closed errors are siblings of Exception on
             # purpose; at the CLI boundary each of them is a [FATAL] with its
             # own actionable message, never a traceback.
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
         print(output, end="" if output.endswith("\n") else "\n")
         sys.exit(0)
 
-    args = parse_args()
+    # The value of --ollama-vault-set never comes from argv, only its NAME does.
+    if args.ollama_vault_set is not None:
+        sys.exit(vault_set_main(args.ollama_vault_set, sys.stdin, sys.stdin.isatty()))
+    if args.ollama_rotate_key:
+        sys.exit(rotate_main(args.yes, sys.stdin.isatty()))
 
     # A dry run of the prompt guard: no mode, no input, no tokens. Decided from the PARSED
     # args, not by scanning sys.argv -- a raw scan duplicates the flag name as a magic string
@@ -2149,7 +2358,7 @@ def main() -> None:
             # the bootstrap's, ProjectNotInitialisedError): at the CLI boundary
             # each is a [FATAL] with its own message, never a traceback, exactly
             # like --ollama-init.
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
 
     try:
@@ -2215,7 +2424,7 @@ def main() -> None:
     try:
         AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
     except PromptContractError as exc:
-        print(f"[FATAL] {exc}", file=sys.stderr)
+        print(_render_fatal(exc), file=sys.stderr)
         sys.exit(1)
 
     if not args.ollama:
@@ -2276,7 +2485,7 @@ def main() -> None:
         except SegmentTooLargeError as exc:
             if is_temp_dir:
                 shutil.rmtree(output_dir, ignore_errors=True)
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
         if segment_plan.is_segmented:
             announce_segmentation(
@@ -2300,7 +2509,7 @@ def main() -> None:
                 # Only the bootstrap's fail-closed family reaches here: a segment's
                 # own failures are tabled inside run_segmented (§6.2.5).
                 if isinstance(exc, FAIL_CLOSED_ERRORS):
-                    print(f"[FATAL] {exc}", file=sys.stderr)
+                    print(_render_fatal(exc), file=sys.stderr)
                     sys.exit(1)
                 raise
             print(f"\nFull report saved to: {os.path.join(output_dir, 'magi-report.json')}")
@@ -2338,7 +2547,7 @@ def main() -> None:
         if isinstance(exc, FAIL_CLOSED_ERRORS):
             # The preflight run_trio repeats (R4) failed differently from the
             # one main() ran: same rendering as the first, never a traceback.
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
         if isinstance(exc, (MagiRsProcessError, MagiRsContractError)):
             # BDD-14a/14b/14d: the trio never formed (the child died, timed out,

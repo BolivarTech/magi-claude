@@ -17,6 +17,9 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from cli_commands import VAULT_SET_FLAG, command
+from magi_key import KeyExposedError, KeyMissingError, KeyStore, MagiKey
+from magi_key_permissions import default_key_store
 from magi_rs_bootstrap import (
     BinaryBootstrap,
     DigestMismatchError,
@@ -24,6 +27,7 @@ from magi_rs_bootstrap import (
     UnsafeArchiveError,
     UnsafeBinDirectoryError,
     VersionMismatchError,
+    verified_executable,
 )
 from magi_rs_env import EnvironmentPolicy
 from magi_rs_paths import PluginRootError
@@ -66,13 +70,6 @@ _UNTRUSTED_CONTENT_FLAG = "--untrusted-content"
 """The payload is third-party code (R11). It also turns an omitted ``--mode``
 into an error, closing by construction the path R10 closes by convention."""
 
-ALLOWS_RUNNING_WITHOUT_PASSPHRASE = "--no-memory"
-"""Named for what it DOES, not what its name suggests (D10). This flag turns
-"missing passphrase => fatal" into "missing passphrase => proceed with the
-environment" -- it is what lets the plugin run with no passphrase, no key and
-no config of its own (R13). It does NOT isolate memory: ``consult`` never
-touches the memory layer by construction, so every run is stateless anyway."""
-
 _TIMEOUT_FLAG = "--timeout"
 """Wall-clock ceiling (R12). ``magi-rs`` also DERIVES the per-mage budget from
 it: with magi-rs 0.21.0, 0.24.1 and 0.25.0, 16820 derives a 2335 s per-mage ceiling, a
@@ -97,6 +94,11 @@ on 2026-09-29 against the pinned binary, and unchanged with 0.24.1 on
 _RECOMMENDED_MIN_TIMEOUT_SECONDS = DEFAULT_OLLAMA_TIMEOUT_SECONDS
 """Below the default the derived ceiling falls under the only value measured
 with the 65 536-token output cap, so a lower value warns (D2)."""
+_VAULT_HINT = (
+    "If this is an authentication failure, load the API keys the config needs with "
+    f"`{command(VAULT_SET_FLAG, '<NAME>')}`."
+)
+"""Every non-zero exit carries it: magi-rs offers no free check for a missing key (REQ-13d)."""
 _STDERR_EXCERPT_CHARS = 2000
 _STDERR_ELISION_MARKER = "[... earlier stderr elided ...] "
 """Prefixed to a failure's stderr excerpt when its head was cut. Since 0.20 magi-rs
@@ -118,6 +120,8 @@ FAIL_CLOSED_ERRORS: tuple[type[Exception], ...] = (
     DigestMismatchError,
     VersionMismatchError,
     ProjectNotInitialisedError,
+    KeyMissingError,
+    KeyExposedError,
 )
 
 
@@ -170,7 +174,6 @@ def build_argv(executable: str, workdir: str, mode: str, timeout: int) -> list[s
         _MODE_FLAG,
         mode,
         _UNTRUSTED_CONTENT_FLAG,
-        ALLOWS_RUNNING_WITHOUT_PASSPHRASE,
         _TIMEOUT_FLAG,
         str(timeout),
     ]
@@ -307,7 +310,15 @@ class MagiRsTrio(TrioExecutor):
         ``{mage}.json`` per verdict into ``output_dir``.
     """
 
-    def __init__(self, workdir: str, mode: str, timeout: int, bin_dir: str, pin: Pin) -> None:
+    def __init__(
+        self,
+        workdir: str,
+        mode: str,
+        timeout: int,
+        bin_dir: str,
+        pin: Pin,
+        key_store: KeyStore | None = None,
+    ) -> None:
         """Bind the executor to one project and one invocation.
 
         Args:
@@ -318,12 +329,17 @@ class MagiRsTrio(TrioExecutor):
             timeout: Wall-clock ceiling, already resolved by ``resolve_timeout``.
             bin_dir: The plugin's ``bin/``.
             pin: The parsed pin, for the bootstrap.
+            key_store: Where the key is loaded from. ``None`` means the
+                platform store from :func:`default_key_store`.
         """
         self._workdir = workdir
         self._mode = mode
         self._timeout = timeout
         self._bin_dir = bin_dir
         self._pin = pin
+        self._key_store = key_store if key_store is not None else default_key_store()
+        #: The key the last preflight loaded; injected into the child, never logged.
+        self._key: MagiKey | None = None
         #: The parsed envelope of the LAST run, for the report's ``magi_rs``
         #: block and the stderr warnings (MS4). ``None`` until a run completes
         #: past the contract check; the verdicts themselves travel through
@@ -411,14 +427,16 @@ class MagiRsTrio(TrioExecutor):
                 obtained or did not verify. It is NOT executed.
             ProjectNotInitialisedError: No ``.magi/magi.toml`` under the
                 workdir. Names ``/magi --ollama-init``; never initialises.
+            KeyMissingError, KeyUnverifiableError, KeyExposedError: The key is
+                absent, its permissions could not be verified, or they are
+                loosened (not owner-only). Fail-closed.
 
         Side effects:
-            May download and install the binary into ``bin_dir``.
+            May download and install the binary into ``bin_dir``; stores the
+            loaded key for the launch.
         """
-        bootstrap = BinaryBootstrap(self._pin, self._bin_dir)
-        bootstrap.ensure()
-        executable = bootstrap.verify()
-        ProjectPreflight.require_initialised(self._workdir)
+        executable = verified_executable(BinaryBootstrap(self._pin, self._bin_dir))
+        self._key = ProjectPreflight.require_ready(self._workdir, self._key_store)
         return executable
 
     async def _launch(
@@ -463,7 +481,7 @@ class MagiRsTrio(TrioExecutor):
             at ``timeout``. magi-rs's deadline behaviour is internal to it, so
             this is re-measured on every pin bump.
         """
-        env = EnvironmentPolicy.build(os.environ)
+        env = EnvironmentPolicy.build(os.environ, passphrase=self._key)
         _emit(on_state, _TRIO_NODE, "running")
         # Encode BEFORE anything starts: a lone surrogate (argv or a file that
         # arrived via surrogateescape) is a deterministic payload defect, not a
@@ -498,16 +516,37 @@ class MagiRsTrio(TrioExecutor):
                 f"magi-rs did not finish within --timeout {timeout}s; nothing is recovered "
                 f"from its partial output. {self._allowlist_hint()}"
             ) from exc
+        # The ONE redaction point: nothing the child said reaches a message, the
+        # stderr tail, the raw artifact or the parser with the key still in it.
+        stdout, stderr = self._redact(stdout), self._redact(stderr)
         self._persist_raw(output_dir, stdout)
         if process.returncode != 0:
             _emit(on_state, _TRIO_NODE, "failed")
             raise MagiRsProcessError(
                 f"magi-rs exited {process.returncode}; stderr: "
                 f"{_stderr_tail(stderr)!r}. "
-                f"{self._allowlist_hint()}"
+                f"{_VAULT_HINT} {self._allowlist_hint()}"
             )
         _emit(on_state, _TRIO_NODE, "success")
         return stdout.decode("utf-8", errors="replace")
+
+    def _redact(self, captured: bytes) -> bytes:
+        """Remove the key from bytes captured from the child.
+
+        Args:
+            captured: The child's stdout or stderr.
+
+        Returns:
+            ``captured`` with every exact occurrence of the key replaced by
+            ``REDACTION_MARKER`` (:meth:`MagiKey.redact_bytes`); unchanged when
+            no key is loaded.
+
+        Complexity:
+            O(n) in the captured size, once per stream per launch.
+        """
+        if self._key is None:
+            return captured
+        return self._key.redact_bytes(captured)
 
     @staticmethod
     def _allowlist_hint() -> str:

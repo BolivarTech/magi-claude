@@ -9,16 +9,20 @@ network, or touches the plugin's real ``bin/``.
 
 import asyncio
 import json
+import logging
 import os
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 import magi_rs_trio
+from magi_key import KeyExposedError, KeyHardeningError, KeyMissingError, MagiKey
 from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_preflight import ProjectNotInitialisedError
 from magi_rs_trio import (
     _STDERR_ELISION_MARKER,
+    FAIL_CLOSED_ERRORS,
     MagiRsContractError,
     MagiRsProcessError,
     MagiRsTrio,
@@ -99,7 +103,12 @@ def _stub_pin():
     return SimpleNamespace(version="0.19.1", assets={}, repository="BolivarTech/magi")
 
 
+_KEY = MagiKey("test-key-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+
+
 def _stub_bootstrap(monkeypatch):
+    # [RD-D10] stubs only the key load: the ordered preflight still checks the project first.
+    monkeypatch.setattr("magi_key.KeyStore.load", lambda self, workdir: _KEY)
     monkeypatch.setattr(
         "magi_rs_trio.BinaryBootstrap",
         lambda *a, **k: SimpleNamespace(
@@ -195,10 +204,8 @@ def test_the_argv_always_declares_the_content_untrusted():
     assert "--untrusted-content" in _argv()
 
 
-def test_the_argv_always_passes_no_memory():
-    # BDD-22. Present because it is what allows running WITHOUT a passphrase --
-    # not for memory isolation, which consult gives by construction.
-    assert "--no-memory" in _argv()
+def test_the_argv_never_passes_no_memory():
+    assert "--no-memory" not in _argv()
 
 
 def test_the_argv_never_carries_a_passphrase_flag():
@@ -325,18 +332,173 @@ async def test_the_prompt_travels_on_stdin_and_never_in_the_argv(monkeypatch, tm
     assert process.stdin_seen == prompt.encode("utf-8")
 
 
+def _stub_key(monkeypatch):
+    monkeypatch.setattr(
+        "magi_rs_trio.ProjectPreflight.require_ready", staticmethod(lambda workdir, ks: _KEY)
+    )
+
+
 @pytest.mark.asyncio
-async def test_the_child_environment_has_no_passphrase(monkeypatch, tmp_path):
+async def test_the_child_gets_the_injected_key_and_never_the_inherited_one(monkeypatch, tmp_path):
     seen = {}
 
     async def _fake_exec(*argv, **kwargs):
-        seen["env"] = kwargs["env"]
+        seen["argv"], seen["env"] = argv, kwargs["env"]
         return _FakeProcess(_ok_payload())
 
     monkeypatch.setenv("MAGI_PASSPHRASE", "hunter2")
     monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+    _stub_key(monkeypatch)
     await _run(monkeypatch, tmp_path)
-    assert "MAGI_PASSPHRASE" not in seen["env"]
+    assert seen["env"]["MAGI_PASSPHRASE"] == _KEY.reveal()
+    assert _KEY.reveal() not in " ".join(seen["argv"])
+
+
+@pytest.mark.asyncio
+async def test_a_failure_message_never_contains_the_key(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(b"", _KEY.reveal().encode(), 1)),
+    )
+    _stub_key(monkeypatch)
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    assert _KEY.reveal() not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_a_process_failure_names_the_vault_command_for_a_missing_api_key(
+    monkeypatch, tmp_path
+):
+    # REQ-13d: magi-rs offers no free check, so every child failure carries the hint.
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _exec_returning(_FakeProcess(b"", b"boom", 1))
+    )
+    _stub_key(monkeypatch)
+    with pytest.raises(MagiRsProcessError) as exc:
+        await _run(monkeypatch, tmp_path)
+    assert "--ollama-vault-set" in str(exc.value)
+    assert "authentication" in str(exc.value)  # [CP2-B10] a conditional hint, not a diagnosis
+
+
+def test_the_trio_uses_the_platform_key_store_by_default(monkeypatch, tmp_path):
+    # [CP2-C26] the production trio verifies with default_key_store(), never a store built elsewhere.
+    sentinel = object()
+    seen = []
+    monkeypatch.setattr("magi_rs_trio.default_key_store", lambda: sentinel)
+    monkeypatch.setattr(
+        "magi_rs_trio.ProjectPreflight.require_ready",
+        staticmethod(lambda workdir, ks: seen.append(ks) or _KEY),
+    )
+    _initialise(tmp_path)
+    _stub_bootstrap(monkeypatch)
+    MagiRsTrio(
+        workdir=str(tmp_path),
+        mode="design",
+        timeout=1800,
+        bin_dir=str(tmp_path / "bin"),
+        pin=_stub_pin(),
+    ).preflight()
+    assert seen == [sentinel]
+
+
+def _run_main_ollama(
+    monkeypatch,
+    tmp_path,
+    argv,
+    envelope,
+    preflight_error=None,
+    exits=None,
+    stderr=b"",
+    returncode=0,
+):  # [RD-D8] untyped: mypy no-untyped-call
+    """Run main() on the --ollama path with a faked magi-rs child; return the written report or None."""
+    import run_magi
+
+    def _preflight(self):
+        if preflight_error is not None:
+            raise preflight_error
+        self._key = _KEY
+        return "magi-rs"
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(MagiRsTrio, "preflight", _preflight)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec",
+        _exec_returning(_FakeProcess(envelope, stderr, returncode)),
+    )
+    out = tmp_path / "out"
+    monkeypatch.setattr(
+        sys, "argv", ["run_magi.py", *argv, "--ollama", "--no-status", "--output-dir", str(out)]
+    )
+    try:
+        run_magi.main()
+    except SystemExit as exc:
+        if exits is not None:
+            exits.append(exc.code)  # [CP2-M38] lets a test assert the exit code itself
+        if exc.code not in (0, None):
+            return None
+    path = out / "magi-report.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+@pytest.mark.parametrize("error", [KeyMissingError, KeyExposedError, KeyHardeningError])
+def test_every_key_error_is_fatal_before_the_input_is_read(monkeypatch, tmp_path, capsys, error):
+    # [CP2-C6] the exposed and hardening paths go through main() too, not only the missing one.
+    read, exits = [], []
+    monkeypatch.setattr("run_magi._load_input_content", lambda *a: read.append(a))
+    report = _run_main_ollama(
+        monkeypatch,
+        tmp_path,
+        ["design", "hello"],
+        b"{}",
+        preflight_error=error("key problem"),
+        exits=exits,
+    )
+    assert report is None and read == []
+    assert exits == [1]  # [CP2-M38] BDD-06 "exit != 0", asserted, not proxied
+    err = capsys.readouterr().err
+    assert err.startswith("[FATAL]") and "key problem" in err  # [CP2-C42] the error's own text
+
+
+def test_a_successful_run_never_writes_the_key_to_the_report_or_the_console(
+    monkeypatch, tmp_path, capsys
+):
+    # [CP2-C5] BDD-22 on the success path: report, stdout and stderr.
+    report = _run_main_ollama(monkeypatch, tmp_path, ["design", "hello"], _ok_payload())
+    assert report is not None
+    out = capsys.readouterr()
+    assert _KEY.reveal() not in json.dumps(report) + out.out + out.err
+
+
+@pytest.mark.parametrize("kind", ["success", "off-contract", "failed"])
+def test_a_child_that_echoes_the_key_on_stderr_never_leaks_it(monkeypatch, tmp_path, capsys, kind):
+    # [CP2-B8] [CP2-C41] BDD-22 with a key-bearing stderr: report, stdout, stderr (the stderr tail of a
+    # child that FAILS included, so redaction must exist) and every file the run wrote.
+    # [RD-D36] the envelope is built inside the test: _ok_payload() in the decorator is a typed call.
+    envelope = _ok_payload() if kind == "success" else b"{}"
+    report = _run_main_ollama(
+        monkeypatch,
+        tmp_path,
+        ["design", "hello"],
+        envelope,
+        stderr=_KEY.reveal().encode(),
+        returncode=1 if kind == "failed" else 0,
+    )
+    out = capsys.readouterr()
+    assert _KEY.reveal() not in json.dumps(report) + out.out + out.err
+    for written in (tmp_path / "out").rglob("*"):
+        if written.is_file():
+            assert _KEY.reveal().encode() not in written.read_bytes()
+
+
+def test_no_log_record_ever_carries_the_key(monkeypatch, tmp_path, caplog):
+    # [CP2-C17] BDD-22 "plugin logs", on the success path and on a child answering off-contract.
+    caplog.set_level(logging.DEBUG)
+    _run_main_ollama(monkeypatch, tmp_path, ["design", "hello"], _ok_payload())
+    (tmp_path / "second").mkdir()
+    _run_main_ollama(monkeypatch, tmp_path / "second", ["design", "hello"], b"{}")
+    assert _KEY.reveal() not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -722,7 +884,7 @@ def test_an_uninitialised_project_is_FATAL_before_the_payload_is_built(
     monkeypatch.setattr(run_magi, "_load_input_content", _payload_built)
     assert _main_with_ollama(monkeypatch, tmp_path) == 1
     err = capsys.readouterr().err
-    assert "[FATAL]" in err and "/magi --ollama-init" in err and "Traceback" not in err
+    assert "[FATAL]" in err and "run_magi.py --ollama-init" in err and "Traceback" not in err
     assert not (tmp_path / ".magi").exists()
 
 
@@ -1090,3 +1252,13 @@ async def test_the_outer_clock_is_exactly_the_timeout_because_m4_found_no_oversh
     )
     await _run(monkeypatch, tmp_path)
     assert seen["timeout"] == _RUN_TIMEOUT
+
+
+@pytest.mark.parametrize("error", [KeyMissingError, KeyExposedError])
+def test_every_new_preflight_error_is_rendered_fatal(error):
+    assert error in FAIL_CLOSED_ERRORS
+
+
+def test_the_hardening_error_is_not_listed_as_a_preflight_error():
+    # [I-a] the --ollama preflight never raises it; init, rotation and vault render it through their own handlers.
+    assert KeyHardeningError not in FAIL_CLOSED_ERRORS
