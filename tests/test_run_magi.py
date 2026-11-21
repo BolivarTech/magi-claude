@@ -5437,8 +5437,8 @@ def test_vault_set_with_an_exposed_key_is_fatal_and_calls_nothing(monkeypatch, c
 
 
 def test_a_failed_cleanup_note_reaches_the_one_fatal_line(monkeypatch, capsys):
-    error = KeyHardeningError("cannot harden")
-    error.add_note("/w/.magi could not be removed; delete it by hand")
+    # [R7] the cleanup note travels in the message now, not as an exception note.
+    error = KeyHardeningError("cannot harden\n/w/.magi could not be removed; delete it by hand")
     monkeypatch.setattr("run_magi.run_ollama_init", _raise(error))
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
     with pytest.raises(SystemExit):
@@ -5647,9 +5647,8 @@ def test_rotate_main_runs_the_full_binary_verification(monkeypatch, capsys):
 
 
 def _noted(error):
-    """`error` with a two-line message already, plus a note (what a cleanup adds)."""
-    error.add_note("the half-made .magi could not be removed; delete it by hand")
-    return error
+    """`error` with a two-line message and a cleanup sentence folded into it [R7]."""
+    return type(error)(f"{error}\nthe half-made .magi could not be removed; delete it by hand")
 
 
 def _assert_one_fatal_line_with_the_note(err):
@@ -5658,7 +5657,7 @@ def _assert_one_fatal_line_with_the_note(err):
 
 
 def test_the_ollama_preflight_fatal_is_one_line_with_its_notes(monkeypatch, tmp_path, capsys):
-    # [Loop1 M-7] every [FATAL] site renders the same way: whitespace collapsed, __notes__ appended.
+    # [Loop1 M-7] every [FATAL] site renders the same way: whitespace collapsed, one line.
     from magi_rs_trio import MagiRsTrio
 
     monkeypatch.chdir(tmp_path)

@@ -351,12 +351,14 @@ def test_a_key_that_already_exists_at_persist_keeps_the_other_process_magi_dir(
         return _Completed()
 
     monkeypatch.setattr("ollama_init.subprocess.run", run)
-    with pytest.raises(FileExistsError) as exc:
+    # [R7] the note is folded into an OllamaInitError chained from the FileExistsError (no add_note).
+    with pytest.raises(OllamaInitError) as exc:
         run_ollama_init(str(tmp_path), key_store=KeyStore(_NoopGuard()))
     key_file = tmp_path / ".magi" / ".secret" / "magi.key"
     assert key_file.read_text(encoding="ascii") == OTHER_PROCESS_KEY
-    notes = " ".join(getattr(exc.value, "__notes__", []))
+    notes = " ".join(str(exc.value).split())
     assert "another process" in notes and str(tmp_path / ".magi") in notes
+    assert isinstance(exc.value.__cause__, FileExistsError)
 
 
 def test_a_key_this_call_wrote_and_could_not_remove_does_not_keep_the_magi_dir(
@@ -375,3 +377,46 @@ def test_a_key_this_call_wrote_and_could_not_remove_does_not_keep_the_magi_dir(
     with pytest.raises(KeyHardeningError):
         run_ollama_init(str(tmp_path), key_store=_WritesThenFails())
     assert not (tmp_path / ".magi").exists()
+
+
+def test_a_cleanup_note_is_part_of_the_message_never_an_exception_note(monkeypatch, tmp_path):
+    # [R7] ``add_note`` needs Python 3.11; the note travels in ``str(error)`` of an OllamaInitError instead.
+    def boom(*args, **kwargs):
+        raise OSError("locked")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run([]))
+    monkeypatch.setattr("ollama_init.shutil.rmtree", boom)
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store(fail=True))
+    assert "delete it by hand" in str(exc.value) and not hasattr(exc.value, "__notes__")
+    assert isinstance(exc.value.__cause__, KeyHardeningError)
+
+
+def test_an_empty_key_file_is_no_key_and_the_magi_dir_this_call_created_is_removed(
+    monkeypatch, tmp_path
+):
+    # [R4] an empty key file is not another process's key: the cleanup removes the .magi/ this call created.
+    def run(argv, **kwargs):
+        secret = os.path.join(argv[argv.index("-w") + 1], ".magi", ".secret")
+        os.makedirs(secret)
+        open(os.path.join(secret, "magi.key"), "w").close()
+        return _Completed(returncode=1, stdout="", stderr="error: init died")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", run)
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    assert not (tmp_path / ".magi").exists() and "another process" not in str(exc.value)
+
+
+def test_an_unreadable_key_file_is_treated_as_another_process_key_and_kept(monkeypatch, tmp_path):
+    # [R4] passes in Red by design: a key that cannot be read is never deleted.
+    def run(argv, **kwargs):
+        os.makedirs(os.path.join(argv[argv.index("-w") + 1], ".magi", ".secret", "magi.key"))
+        return _Completed(returncode=1, stdout="", stderr="error: init died")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", run)
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    assert (tmp_path / ".magi" / ".secret" / "magi.key").exists() and "another process" in str(
+        exc.value
+    )
