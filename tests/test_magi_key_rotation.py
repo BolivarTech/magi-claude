@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from magi_key import KeyExposedError, KeyHardeningError, KeyStore, MagiKey
+from magi_key import KeyExposedError, KeyHardeningError, KeyMissingError, KeyStore, MagiKey
 from ollama_init import OllamaInitError, run_ollama_init
 from magi_key_rotation import (
     KeyRotation,
@@ -944,3 +944,34 @@ def test_an_unverifiable_key_this_rotation_did_not_write_keeps_the_may_not_have_
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     message = str(exc.value)
     assert "may not have created it" in message and "created by this rotation" not in message
+
+
+def test_an_old_key_read_failure_without_a_message_still_names_its_cause(tmp_path):
+    # [I-4] the pre-move steps render errors like every other step: one line, the class name when empty.
+    work = _project(tmp_path)
+
+    class _SilentlyUnreadable(_Store):
+        def read_unverified(self, path):
+            raise KeyMissingError()
+
+    rotation = KeyRotation(
+        _SilentlyUnreadable(), lambda *a: "", lambda *a: [], str(tmp_path / "rotated")
+    )
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert "(KeyMissingError)" in str(exc.value) and "nothing was moved" in str(exc.value)
+
+
+def test_a_backup_dir_creation_failure_without_a_message_still_names_its_cause(
+    tmp_path, monkeypatch
+):
+    work = _project(tmp_path)
+
+    def _makedirs(*args, **kwargs):
+        raise OSError()
+
+    monkeypatch.setattr("magi_key_rotation.os.makedirs", _makedirs)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert "(OSError)" in str(exc.value) and "nothing was moved" in str(exc.value)
