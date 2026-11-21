@@ -1009,3 +1009,16 @@ def test_the_duration_is_the_envelope_total():
     envelope = _cr_envelope()
     effort = CodeReviewResult.from_json(json.dumps(envelope)).effort()
     assert effort["duration_ms"] == envelope["timings"]["total_ms"]
+
+
+def test_both_flags_are_false_on_the_clean_capture():
+    result = CodeReviewResult.from_json(_raw())
+    assert result.without_memory is False
+    assert result.without_embedder is False
+
+
+@pytest.mark.parametrize("field", ["without_memory", "without_embedder"])
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_a_non_boolean_flag_is_an_off_contract_envelope(field, value):
+    with pytest.raises(MagiRsContractError, match=field):
+        CodeReviewResult.from_json(_raw(**{field: value}))
