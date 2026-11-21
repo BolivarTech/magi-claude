@@ -142,3 +142,16 @@ def test_the_http_error_response_is_closed(tmp_path):
 
     EmbedderProbe(opener=opener).check(_config(tmp_path))
     assert closed
+
+
+def test_a_client_side_invalid_url_is_fatal_not_an_answer(tmp_path):
+    # InvalidURL subclasses HTTPException; it means the request never left, not that
+    # someone answered, so it must not count as reachable.
+    def opener(request, timeout):
+        raise http.client.InvalidURL("nonnumeric port: 'x'")
+
+    config = _config(tmp_path)
+    with pytest.raises(EmbedderUnreachableError) as exc:
+        EmbedderProbe(opener=opener).check(config)
+    assert config in str(exc.value)
+
