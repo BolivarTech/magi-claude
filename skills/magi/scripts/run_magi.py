@@ -2162,7 +2162,8 @@ def main() -> None:
             # The bootstrap's fail-closed errors are siblings of Exception on
             # purpose; at the CLI boundary each of them is a [FATAL] with its
             # own actionable message, never a traceback.
-            print(f"[FATAL] {' '.join(str(exc).split())}", file=sys.stderr)
+            detail = " ".join([str(exc), *getattr(exc, "__notes__", [])])
+            print(f"[FATAL] {' '.join(detail.split())}", file=sys.stderr)
             sys.exit(1)
         print(output, end="" if output.endswith("\n") else "\n")
         sys.exit(0)
