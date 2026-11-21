@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+from enum import Enum
 
 from magi_key import (
     KEY_DIR_PARTS,
@@ -47,8 +48,44 @@ _ALREADY_INITIALISED = (
 )
 
 
+class InitLeftover(Enum):
+    """What a failed ``run_ollama_init`` left at ``<workdir>/.magi``, decided by its own cleanup."""
+
+    REMOVED = "removed"
+    """Nothing: the ``.magi/`` this call created was removed."""
+    KEY_WRITTEN_KEPT = "key-written-kept"
+    """This call's key is on disk and the ``.magi/`` could not be removed."""
+    HARDENING_FAILED_KEPT = "hardening-failed-kept"
+    """As ``KEY_WRITTEN_KEPT``, and the key could not be hardened: it may be readable by others."""
+    FOREIGN_KEPT = "foreign-kept"
+    """The ``.magi/`` holds a key this call did not write: another process initialised it; kept."""
+    HALF_MADE_KEPT = "half-made-kept"
+    """A ``.magi/`` without a key that this call created and could not remove."""
+
+
 class OllamaInitError(Exception):
-    """``magi-rs init`` failed; the message carries what it printed (a sibling of ``ValidationError``)."""
+    """``magi-rs init`` failed; the message carries what it printed (a sibling of ``ValidationError``).
+
+    Attributes:
+        leftover: What the failure left at ``.magi/`` (:class:`InitLeftover`),
+            or ``None`` when not reported (an error raised outside
+            ``run_ollama_init``'s cleanup).
+    """
+
+    def __init__(self, message: str, leftover: InitLeftover | None = None) -> None:
+        """Build the error.
+
+        Args:
+            message: The one-line (or multi-line) description.
+            leftover: What the failure left at ``.magi/``; ``None`` when not reported.
+        """
+        super().__init__(message)
+        self._leftover = leftover
+
+    @property
+    def leftover(self) -> InitLeftover | None:
+        """What the failure left at ``.magi/``, as decided by ``run_ollama_init``'s cleanup."""
+        return self._leftover
 
 
 class MagiDirExistsError(OllamaInitError):

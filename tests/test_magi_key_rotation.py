@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from magi_key import KeyExposedError, KeyHardeningError, KeyMissingError, KeyStore, MagiKey
-from ollama_init import OllamaInitError, run_ollama_init
+from ollama_init import InitLeftover, OllamaInitError, run_ollama_init
 from magi_key_rotation import (
     KeyRotation,
     RotationFailedError,
@@ -724,7 +724,9 @@ def test_a_failed_init_never_removes_a_magi_dir_holding_another_process_key(tmp_
 
     def _init(workdir, store):
         _recreate_magi(workdir, FOREIGN)
-        raise OllamaInitError("init died")
+        raise OllamaInitError(
+            "init died", leftover=InitLeftover.FOREIGN_KEPT
+        )  # [S4] as the real init reports
 
     rotation, _ = _rotation(tmp_path, init=_init)
     with pytest.raises(RotationFailedError) as exc:
@@ -889,7 +891,12 @@ def test_a_new_key_that_could_not_be_hardened_is_never_reported_as_an_interrupti
     monkeypatch.setattr("magi_key.os.remove", _remove)
 
     def _init(workdir, store):
-        store.persist(workdir, store.new_key())
+        try:
+            store.persist(workdir, store.new_key())
+        except KeyHardeningError as error:  # [S4] as run_ollama_init reports a kept, unhardened key
+            raise OllamaInitError(
+                str(error), leftover=InitLeftover.HARDENING_FAILED_KEPT
+            ) from error
         return "initialised"
 
     rotation, _ = _rotation(tmp_path, init=_init, guard=_NewKeyUnhardenableGuard())
@@ -1135,3 +1142,45 @@ def test_an_interrupt_inside_the_real_init_reaches_the_rotation_as_an_interrupt(
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert isinstance(exc.value.__cause__, KeyboardInterrupt)
     assert "interrupted after its key was written" in str(exc.value)
+
+
+_LEFTOVER_WORDING = {
+    InitLeftover.KEY_WRITTEN_KEPT: "initialisation failed after its key was written",
+    InitLeftover.HARDENING_FAILED_KEPT: "may be readable by others",
+    InitLeftover.FOREIGN_KEPT: "another process",
+    InitLeftover.HALF_MADE_KEPT: "could not be removed",
+}
+
+
+@pytest.mark.parametrize("leftover", list(InitLeftover))
+def test_the_rotation_words_the_failure_by_the_leftover_init_reported(tmp_path, leftover):
+    # [S4] the rotation trusts init's typed report; it never inspects the disk to guess ownership.
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        raise OllamaInitError("init died", leftover=leftover)
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    for other, wording in _LEFTOVER_WORDING.items():
+        assert (wording in message) is (other is leftover), (leftover, other)
+    assert os.listdir(tmp_path / "rotated")[0] in message and "\n" not in message.strip()
+
+
+def test_a_non_init_error_from_the_injected_init_gets_the_generic_wording(tmp_path):
+    # [S4] no guessing: an error that is not init's typed report never claims who wrote what.
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        _recreate_magi(workdir, FOREIGN)
+        raise RuntimeError("init died")
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    for wording in _LEFTOVER_WORDING.values():
+        assert wording not in message
+    assert "left as it is" in message and (work / ".magi" / ".secret" / "magi.key").exists()

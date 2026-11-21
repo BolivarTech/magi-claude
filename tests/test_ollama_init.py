@@ -14,7 +14,7 @@ import run_magi
 from magi_key import REDACTION_MARKER, KeyHardeningError, KeyStore, MagiKey
 from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_env import EnvironmentPolicy
-from ollama_init import MagiDirExistsError, OllamaInitError, run_ollama_init
+from ollama_init import InitLeftover, MagiDirExistsError, OllamaInitError, run_ollama_init
 
 
 class _Ok:
@@ -487,3 +487,69 @@ def test_an_existing_magi_dir_names_the_whole_regeneration(tmp_path):
         and "untouched" in message
         and _names_the_whole_regeneration(message)
     )
+
+
+def _rmtree_fails(monkeypatch):
+    def boom(*args, **kwargs):
+        raise OSError("locked")
+
+    monkeypatch.setattr("ollama_init.shutil.rmtree", boom)
+
+
+def test_a_failed_child_whose_magi_dir_was_removed_reports_removed(monkeypatch, tmp_path):
+    # [S4] run_ollama_init's cleanup is the one place that decides what was left; it says so in a type.
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run([], returncode=1))
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    assert exc.value.leftover is InitLeftover.REMOVED
+
+
+def test_a_magi_dir_another_process_initialised_reports_foreign_kept(monkeypatch, tmp_path):
+    def run(argv, **kwargs):
+        _write_other_process_key(argv[argv.index("-w") + 1])
+        return _Completed(returncode=1, stdout="", stderr="error: init died")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", run)
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    assert exc.value.leftover is InitLeftover.FOREIGN_KEPT
+
+
+def test_a_half_made_magi_dir_that_could_not_be_removed_reports_half_made_kept(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run([], returncode=1))
+    _rmtree_fails(monkeypatch)
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    assert exc.value.leftover is InitLeftover.HALF_MADE_KEPT
+
+
+class _WritesThenRaises(_Store):
+    """Writes the key file, then raises ``error`` (as a persist whose hardening or later step failed)."""
+
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def persist(self, workdir, key):
+        secret = os.path.join(workdir, ".magi", ".secret")
+        os.makedirs(secret, exist_ok=True)
+        with open(os.path.join(secret, "magi.key"), "w", encoding="ascii") as handle:
+            handle.write(key.reveal())
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "error, leftover",
+    [
+        (KeyHardeningError("cannot harden"), InitLeftover.HARDENING_FAILED_KEPT),
+        (OSError("disk full"), InitLeftover.KEY_WRITTEN_KEPT),
+    ],
+)
+def test_a_kept_magi_dir_holding_this_calls_key_reports_why(monkeypatch, tmp_path, error, leftover):
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run([]))
+    _rmtree_fails(monkeypatch)
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_WritesThenRaises(error))
+    assert exc.value.leftover is leftover
