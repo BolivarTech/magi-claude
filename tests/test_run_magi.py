@@ -6022,6 +6022,38 @@ def test_without_embedder_marks_the_report_degraded_with_its_cause(monkeypatch, 
     assert "WARNING" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("overrides", "cause"),
+    [
+        ({"failed_batches": [[2, "timeout"]]}, "failed_batches"),
+        ({"batches_completed": 0}, "failed_batches"),
+        ({"undelivered_units": ["src/a.py"]}, "undelivered_units"),
+    ],
+)
+def test_lost_batches_or_units_degrade_the_run_with_one_warning(
+    monkeypatch, tmp_path, capsys, overrides, cause
+):
+    # Loop 1 I1: magi-rs consolidates and exits 0 over a partial review; that is truncation.
+    report = _run_main_with_fake_review(
+        monkeypatch,
+        tmp_path,
+        ["code-review", "--ollama", "--commit", "abc"],
+        overrides=overrides,
+    )
+    assert report["degraded"] is True
+    assert report["degraded_causes"].count(cause) == 1
+    err = capsys.readouterr().err
+    assert len([line for line in err.splitlines() if "WARNING" in line and cause in line]) == 1
+
+
+def test_a_complete_review_is_not_degraded_by_the_lost_context_checks(monkeypatch, tmp_path):
+    report = _run_main_with_fake_review(
+        monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
+    )
+    assert not report.get("degraded")
+    assert "degraded_causes" not in report
+
+
 def test_an_agent_that_breaks_the_seven_key_contract_degrades_the_run(monkeypatch, tmp_path):
     # [CP2-M8] BDD-08: the seven-key validation runs on the code-review path too.
     envelope = json.loads(_cr_payload())
