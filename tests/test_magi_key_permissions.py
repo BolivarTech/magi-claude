@@ -1031,3 +1031,17 @@ def test_a_ctypes_failure_in_the_native_layer_is_a_hardening_error_on_harden():
 def test_windows_verify_accepts_a_protected_empty_dacl_for_the_owner_only_case():
     # [I-1] "D:P" is a real, protected, empty DACL (nobody listed): it is not the NULL-DACL token.
     _windows_guard("D:P").verify("k")
+
+
+def test_an_attribute_error_from_the_native_binding_is_a_described_failure_on_verify_and_harden():
+    # [M6] a binding that lacks an entry point (AttributeError) must fail closed like any other native failure.
+    def _boom(path):
+        raise AttributeError("module 'ctypes' has no attribute 'windll'")
+
+    guard = _windows_guard(f"D:PAI(A;;FA;;;{ME})")
+    guard.read_sddl = _boom
+    with pytest.raises(KeyUnverifiableError) as raised:
+        guard.verify("k")
+    assert "\n" not in str(raised.value)
+    with pytest.raises(KeyHardeningError):
+        guard.harden("k", directory=False)
