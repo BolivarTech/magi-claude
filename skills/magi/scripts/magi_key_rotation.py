@@ -419,6 +419,12 @@ class KeyRotation:
         follow such a link into whatever it points at; the walk itself never
         follows one (``_backup_entries``). O(n) in the entries of ``.magi/``.
 
+        Residual, declared: a link planted between this scan and a
+        cross-volume move is still followed by ``copytree``. That needs a local
+        process racing the rotation inside the owner's own ``.magi/``, which is
+        outside the threat model (DIR-4); the post-move walk then refuses to
+        harden it.
+
         Args:
             magi_dir: ``<workdir>/.magi``.
 
