@@ -46,6 +46,7 @@ from magi_key import (
     KeyStore,
     KeyUnverifiableError,
 )
+from magi_rs_env import EnvironmentPolicy
 
 __all__ = [
     "DIR_MODE",
@@ -76,10 +77,6 @@ _WHOAMI_ARGS = ("/user", "/fo", "csv", "/nh")
 
 _ACL_PATH_VARIABLE = "MAGI_ACL_PATH"
 """Environment variable that carries the path to PowerShell; never interpolated into the command."""
-
-_PS_MODULE_PATH_VARIABLE = "PSMODULEPATH"
-"""Dropped from PowerShell's environment: a PowerShell 7 module path inherited by
-Windows PowerShell 5.1 keeps ``Get-Acl`` from loading; unset, 5.1 rebuilds its default."""
 
 _STDERR_EXCERPT_CHARS = 300
 """How much of a failed tool's stderr an error message carries, from its start (the headline)."""
@@ -154,12 +151,34 @@ def _stderr_excerpt(error: subprocess.SubprocessError) -> str:
     return " ".join(stderr.split())[:_STDERR_EXCERPT_CHARS]
 
 
+def _tool_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the environment of a permission tool: the magi-rs allowlist plus ``extra``.
+
+    The same allowlist the ``magi-rs`` child gets (``EnvironmentPolicy``), so no
+    API key and no parent ``MAGI_PASSPHRASE`` reach whoami, icacls or
+    PowerShell. ``PSModulePath`` is not allowlisted: a PowerShell 7 module path
+    inherited by Windows PowerShell 5.1 keeps ``Get-Acl`` from loading, and
+    unset, 5.1 rebuilds its default.
+
+    Args:
+        extra: The variables that carry the tool's input, added on top.
+
+    Returns:
+        A new environment mapping.
+    """
+    env = EnvironmentPolicy.build(os.environ)
+    env.update(extra or {})
+    return env
+
+
 def _run(argv: list[str], env: Mapping[str, str] | None = None) -> str:
     """Run a permission tool and return its standard output.
 
     Args:
         argv: The command, as an argument list (never through a shell).
-        env: The child's whole environment; None inherits the current one.
+        env: The variables that carry the tool's input; they are added to
+            the allowlisted environment (``_tool_environment``), never to the
+            whole parent environment.
 
     Returns:
         The decoded standard output.
@@ -178,7 +197,7 @@ def _run(argv: list[str], env: Mapping[str, str] | None = None) -> str:
             errors="replace",
             timeout=_COMMAND_TIMEOUT_SECONDS,
             check=True,
-            env=env,
+            env=_tool_environment(env),
         )
     except subprocess.CalledProcessError as error:
         raise OSError(
@@ -197,8 +216,8 @@ def _run_powershell(command: str, variable: str, value: str) -> str:
     """Run one Windows PowerShell command that reads its input from one variable.
 
     The value travels only in the child environment, never in the command
-    text. The child does not inherit ``PSModulePath`` (see
-    ``_PS_MODULE_PATH_VARIABLE``).
+    text; that environment is the allowlist plus ``variable``
+    (``_tool_environment``).
 
     Args:
         command: The PowerShell command text.
@@ -211,11 +230,9 @@ def _run_powershell(command: str, variable: str, value: str) -> str:
     Raises:
         OSError: PowerShell could not run or exited non-zero.
     """
-    env = {
-        name: text for name, text in os.environ.items() if name.upper() != _PS_MODULE_PATH_VARIABLE
-    }
-    env[variable] = value
-    return _run([_system_tool(_POWERSHELL_PARTS), *_POWERSHELL_OPTIONS, command], env).strip()
+    return _run(
+        [_system_tool(_POWERSHELL_PARTS), *_POWERSHELL_OPTIONS, command], {variable: value}
+    ).strip()
 
 
 def _system_tool(parts: tuple[str, ...]) -> str:
@@ -403,7 +420,7 @@ class WindowsPermissionGuard(PermissionGuard):
 
         The path reaches PowerShell only through ``MAGI_ACL_PATH``, never in
         the command text, so no character in it can be interpreted. The
-        child does not inherit ``PSModulePath`` (see ``_PS_MODULE_PATH_VARIABLE``).
+        child gets the allowlisted environment only (``_tool_environment``).
 
         Args:
             path: The file or directory to read.
