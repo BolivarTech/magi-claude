@@ -1733,3 +1733,18 @@ def test_every_test_the_rotation_error_table_cites_exists():
     assert len(cited) >= 8
     defined = set(globals())
     assert cited <= defined, sorted(cited - defined)
+
+
+def test_a_backup_root_inside_the_project_is_refused_before_the_confirmation_prompt(tmp_path):
+    # [O3] never ask the operator to confirm a rotation that the configuration already forbids.
+    work = _project(tmp_path)
+    rotation = KeyRotation(
+        _Store(), lambda w, s: "x", lambda w, k: [], backup_root=str(work / "backups")
+    )
+
+    def _asked(prompt):
+        raise AssertionError("the operator was asked before the backup root was checked")
+
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=False, is_tty=True, confirm=_asked)
+    assert "is inside the working tree" in str(exc.value)
