@@ -1,6 +1,8 @@
 import ntpath
 import os
+import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -155,6 +157,36 @@ def test_windows_harden_uses_the_sid_never_a_localised_name():
     icacls = next(a for a in seen if "icacls" in a[0].lower())
     assert "/inheritance:r" in icacls
     assert any(part.startswith(f"*{ME}:") for part in icacls)
+
+
+def test_windows_read_sddl_drops_psmodulepath_and_carries_the_acl_path(monkeypatch):
+    # A pwsh 7 PSModulePath inherited by Windows PowerShell 5.1 breaks Get-Acl (CI, pwsh step shell).
+    seen = {}
+
+    def _fake_run(argv, **kwargs):
+        seen["env"] = kwargs["env"]
+        return SimpleNamespace(stdout=f"D:PAI(A;;FA;;;{ME})")
+
+    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
+    monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
+    assert WindowsPermissionGuard().read_sddl("k") == f"D:PAI(A;;FA;;;{ME})"
+    assert not any(name.upper() == "PSMODULEPATH" for name in seen["env"])
+    assert seen["env"]["MAGI_ACL_PATH"] == "k"
+
+
+def test_a_failing_permission_tool_reports_its_stderr_and_exit_code(monkeypatch):
+    def _fake_run(argv, **kwargs):
+        raise subprocess.CalledProcessError(
+            1, argv, output="", stderr="Get-Acl : module could not be loaded\r\n"
+        )
+
+    monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
+    with pytest.raises(OSError) as raised:
+        WindowsPermissionGuard().read_sddl("k")
+    message = str(raised.value)
+    assert "Get-Acl : module could not be loaded" in message
+    assert "exit code 1" in message
+    assert "\n" not in message
 
 
 def test_windows_harden_failure_is_a_hardening_error():
