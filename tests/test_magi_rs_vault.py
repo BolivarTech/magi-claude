@@ -126,3 +126,17 @@ def test_a_secret_in_stderr_is_redacted_before_whitespace_is_collapsed():
     assert value not in message and " ".join(value.split()) not in message
     assert _KEY.reveal() not in message
     assert message.count(REDACTION_MARKER) == 2
+
+
+@pytest.mark.parametrize(
+    "first_line",
+    ["NAME · CREATED · UPDATED", "SOME_OTHER_KEY · 2026-11-20 13:32:14 · 2026-11-20 13:32:14"],
+    ids=["header-row", "unknown-name"],
+)
+def test_an_ls_line_whose_name_is_not_a_vault_name_is_never_reported_as_one(first_line):
+    # [T2] a header row or an unknown name must never be printed as an API key to revoke: the answer is
+    # unrecognised, and the rotation then falls back to the whole closed list (its existing safe default).
+    with open(_LS_FIXTURE, encoding="utf-8") as handle:
+        captured = first_line + "\n" + handle.read()
+    with pytest.raises(VaultCommandError):
+        _client([], _Completed(stdout=captured)).ls()
