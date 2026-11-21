@@ -667,10 +667,10 @@ class KeyRotation:
                 f"{_MAX_BACKUP_CANDIDATES} tries: nothing was moved; clear old backups there"
             )
         created_parents: list[str] = []
-        parent = os.path.dirname(candidate)
-        platform_base = os.path.dirname(self._feature_root())
+        parent = os.path.dirname(os.path.normpath(candidate))
+        platform_base = os.path.normcase(os.path.dirname(self._feature_root()))
         while (
-            parent != platform_base
+            os.path.normcase(parent) != platform_base
             and not os.path.lexists(parent)
             and os.path.dirname(parent) != parent
         ):
