@@ -2748,7 +2748,7 @@ class TestEnrichIntegration:
         import run_magi
 
         a = run_magi.parse_args(["code-review", "in.txt"])
-        assert a.base == "main" and a.enrich is True and a.enrich_max_chars == 512_000
+        assert a.base is None and a.enrich is True and a.enrich_max_chars == 512_000
 
     def test_no_enrich(self):
         import run_magi
@@ -5910,3 +5910,30 @@ def test_render_fatal_names_the_error_class_when_the_message_is_empty():
     # [O6] a bare EOFError (an exhausted stdin) must never render as a bare "[FATAL]".
     assert run_magi._render_fatal(EOFError()) == "[FATAL] EOFError"
     assert run_magi._render_fatal(ValueError("one\ntwo")) == "[FATAL] one two"
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [  # [CP2-C15] every "only with code-review --ollama" flag
+        ["--commit", "abc"],
+        ["--from", "a"],
+        ["--to", "b"],
+        ["--head", "HEAD"],
+        ["--uncommitted"],
+    ],
+)
+def test_target_flags_without_ollama_are_refused(capsys, flag):
+    with pytest.raises(SystemExit):
+        run_magi.parse_args(["code-review", "x.md", *flag])
+    # [RD-D20] without this, today's "unrecognized arguments" (no --commit at all) passes the test.
+    assert "unrecognized arguments" not in capsys.readouterr().err
+
+
+def test_code_review_ollama_needs_no_positional_input():
+    args = run_magi.parse_args(["code-review", "--ollama"])
+    assert args.input is None and args.ollama
+
+
+def test_design_ollama_still_requires_its_input(capsys):
+    with pytest.raises(SystemExit):
+        run_magi.parse_args(["design", "--ollama"])
