@@ -190,6 +190,17 @@ async def test_no_failure_message_contains_the_key(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_failing_exit_still_persists_the_redacted_stdout(monkeypatch, tmp_path):
+    # Loop 1 m5: a non-zero exit may follow paid per-batch output; keep it, key redacted.
+    process = _StreamingProcess(b"partial " + _KEY.reveal().encode(), b"boom", returncode=1)
+    executor, _ = _review(monkeypatch, tmp_path, process)
+    with pytest.raises(MagiRsProcessError):
+        await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    raw = (tmp_path / "magi-rs-raw.json").read_text(encoding="utf-8")
+    assert raw.startswith("partial ") and _KEY.reveal() not in raw
+
+
+@pytest.mark.asyncio
 async def test_magi_rs_own_history_warning_means_history_was_not_recorded(monkeypatch, tmp_path):
     process = _StreamingProcess(
         _cr_payload(), stderr=HISTORY_WARNING_MARKER.encode(), exits_after=0.0
