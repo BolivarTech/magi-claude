@@ -11,7 +11,14 @@ from types import SimpleNamespace
 import pytest
 
 import run_magi
-from magi_key import REDACTION_MARKER, KeyHardeningError, KeyStore, MagiKey
+from magi_key import (
+    REDACTION_MARKER,
+    EmptyKeyError,
+    KeyHardeningError,
+    KeyMissingError,
+    KeyStore,
+    MagiKey,
+)
 from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_env import EnvironmentPolicy
 from ollama_init import InitLeftover, MagiDirExistsError, OllamaInitError, run_ollama_init
@@ -617,3 +624,32 @@ def test_a_magi_entry_that_is_a_broken_link_is_refused_and_nothing_is_created(tm
     assert "is a link" in message and "\n" not in message.strip()
     assert not isinstance(exc.value, MagiDirExistsError)
     assert not outside.exists() and store.persisted == []
+
+
+class _BareMissingStore(_Store):
+    """A store whose reader fails with a KeyMissingError that carries no cause."""
+
+    def key_path(self, workdir):
+        return os.path.join(workdir, "magi.key")
+
+    def read_unverified(self, key_file):
+        raise KeyMissingError("cannot read")
+
+
+def test_cleanup_ownership_is_decided_by_the_error_type_not_by_its_cause(tmp_path):
+    # [X3] only an EmptyKeyError means "no key"; any other failure to read an existing file is someone else's.
+    from ollama_init import _holds_other_key
+
+    (tmp_path / "magi.key").write_text("x", encoding="ascii")
+    assert _holds_other_key(_BareMissingStore(), str(tmp_path), MagiKey("k" * 44)) is True
+
+
+def test_an_empty_key_file_is_no_key_by_type(tmp_path):
+    from ollama_init import _holds_other_key
+
+    class _Empty(_BareMissingStore):
+        def read_unverified(self, key_file):
+            raise EmptyKeyError("empty")
+
+    (tmp_path / "magi.key").write_text("", encoding="ascii")
+    assert _holds_other_key(_Empty(), str(tmp_path), MagiKey("k" * 44)) is False

@@ -361,3 +361,24 @@ def test_a_missing_key_names_the_whole_regeneration(tmp_path):
     with pytest.raises(KeyMissingError) as exc:
         KeyStore(_Guard()).load(str(tmp_path))
     assert _names_the_whole_regeneration(str(exc.value))
+
+
+def test_read_unverified_of_an_empty_file_raises_the_empty_key_error(tmp_path):
+    # [X3] "exists but empty" has its own type, so callers never infer it from __cause__.
+    from magi_key import EmptyKeyError
+
+    key_file = tmp_path / "magi.key"
+    key_file.write_text("  \n", encoding="ascii")
+    with pytest.raises(EmptyKeyError) as exc:
+        _store().read_unverified(str(key_file))
+    assert isinstance(exc.value, KeyMissingError)
+
+
+def test_read_unverified_of_an_unreadable_file_is_missing_but_not_empty(tmp_path):
+    from magi_key import EmptyKeyError
+
+    unreadable = tmp_path / "magi.key"
+    unreadable.mkdir()
+    with pytest.raises(KeyMissingError) as exc:
+        _store().read_unverified(str(unreadable))
+    assert not isinstance(exc.value, EmptyKeyError)
