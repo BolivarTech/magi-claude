@@ -240,10 +240,12 @@ def _resolve_timeout(flag: int | None) -> float:
 
 
 def _check_subcommands(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """Reject a key subcommand mixed with a mode, an input, another subcommand, or a stray ``--yes``.
+    """Reject a standalone subcommand mixed with a mode, an input, ``--ollama`` or another one, and a stray ``--yes``.
 
-    A destructive rotation must never be honoured from any position of a
-    normal run, so the mix is an argument error before anything runs.
+    The standalone subcommands are ``--ollama-init``, ``--ollama-vault-set`` and
+    ``--ollama-rotate-key``. A destructive rotation (or an initialisation) must
+    never be honoured from any position of a normal run, so the mix is an
+    argument error before anything runs.
 
     Args:
         parser: Reports the error.
@@ -265,9 +267,8 @@ def _check_subcommands(parser: argparse.ArgumentParser, args: argparse.Namespace
         parser.error(f"{' and '.join(chosen)} cannot be combined; run one at a time")
     if args.yes and not args.ollama_rotate_key:
         parser.error(f"{_YES_FLAG} applies only to {_ROTATE_KEY_FLAG}")
-    key_command = args.ollama_vault_set is not None or args.ollama_rotate_key
-    if key_command and (args.mode is not None or args.input is not None):
-        parser.error(f"{chosen[0]} takes no mode or input")
+    if chosen and (args.mode is not None or args.input is not None or args.ollama):
+        parser.error(f"{chosen[0]} takes no mode, input or --ollama")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -414,11 +415,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         _VAULT_SET_FLAG,
         metavar="NAME",
+        choices=VAULT_KEY_NAMES,
         default=None,
         help=(
             f"Store one API key in the magi-rs vault of .magi/ and exit. NAME is one of "
             f"{', '.join(VAULT_KEY_NAMES)}; the value is read from stdin, or from a hidden prompt at a "
-            "terminal, never from the command line. Takes no mode or input."
+            "terminal, never from the command line. Takes no mode, input or --ollama."
         ),
     )
     parser.add_argument(
@@ -427,7 +429,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Replace an exposed magi-rs key: move .magi/ to a backup outside the project, create a new "
             "one and list the API keys to revoke, then exit. Asks for confirmation at a terminal; "
-            f"elsewhere it needs {_YES_FLAG}. Takes no mode or input."
+            f"elsewhere it needs {_YES_FLAG}. Takes no mode, input or --ollama."
         ),
     )
     parser.add_argument(
@@ -2174,29 +2176,22 @@ _LINE_ENDINGS = "\r\n"
 _YES_FLAG = "--yes"
 
 
-def vault_set_main(argv: list[str], stdin: IO[str], is_tty: bool) -> int:
+def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
     """``--ollama-vault-set NAME``: store one API key in the magi-rs vault.
 
-    Order matters: the name is validated first, then the binary is verified and
-    the key preflighted, and only then is the value read -- so a secret is never
-    typed or piped into a session that was already refused. The value is never
-    placed in argv, printed or logged.
+    Order matters: the name was validated by argparse (``choices``), then the
+    binary is verified and the key preflighted, and only then is the value read
+    -- so a secret is never typed or piped into a session that was already
+    refused. The value is never placed in argv, printed or logged.
 
     Args:
-        argv: The arguments after the flag: exactly one name from ``VAULT_KEY_NAMES``.
+        name: One name from ``VAULT_KEY_NAMES`` (``VaultClient.set`` checks it again).
         stdin: Where a non-interactive value is read from.
         is_tty: True when stdin is a terminal; the value is then prompted hidden.
 
     Returns:
-        0 on success; 1 for a fail-closed error or an unusable value; 2 for a
-        bad name.
+        0 on success; 1 for a fail-closed error or an unusable value.
     """
-    if len(argv) != 1 or argv[0] not in VAULT_KEY_NAMES:
-        print(
-            f"ERROR: expected exactly one vault name: {', '.join(VAULT_KEY_NAMES)}", file=sys.stderr
-        )
-        return 2
-    name = argv[0]
     workdir = os.getcwd()
     try:
         root = plugin_root()
@@ -2218,7 +2213,7 @@ def vault_set_main(argv: list[str], stdin: IO[str], is_tty: bool) -> int:
     return 0
 
 
-def rotate_main(argv: list[str], is_tty: bool) -> int:
+def rotate_main(assume_yes: bool, is_tty: bool) -> int:
     """``--ollama-rotate-key [--yes]``: replace an exposed key, its database and its vault.
 
     The binary is verified first, before anything moves, because the rotation
@@ -2229,18 +2224,14 @@ def rotate_main(argv: list[str], is_tty: bool) -> int:
     never values). Neither key is ever printed.
 
     Args:
-        argv: The arguments after the flag: nothing, or ``--yes``.
+        assume_yes: True when ``--yes`` was given; it authorises without asking.
         is_tty: True when stdin is a terminal; without ``--yes`` the operator
             is then asked to confirm.
 
     Returns:
         0 on success; 1 when the binary does not verify, the rotation is not
-        authorised or it stopped (one line on stderr, never a traceback);
-        2 for unknown arguments.
+        authorised or it stopped (one line on stderr, never a traceback).
     """
-    if argv not in ([], [_YES_FLAG]):
-        print(f"ERROR: {_ROTATE_KEY_FLAG} accepts only {_YES_FLAG}", file=sys.stderr)
-        return 2
     try:
         root = plugin_root()
         executable = verified_executable(BinaryBootstrap(Pin.load(pin_path(root)), bin_dir(root)))
@@ -2254,7 +2245,7 @@ def rotate_main(argv: list[str], is_tty: bool) -> int:
 
     rotation = KeyRotation(default_key_store(), run_ollama_init, _vault_ls)
     try:
-        report = rotation.rotate(os.getcwd(), assume_yes=argv == [_YES_FLAG], is_tty=is_tty)
+        report = rotation.rotate(os.getcwd(), assume_yes=assume_yes, is_tty=is_tty)
     except (RotationNotAuthorisedError, RotationFailedError) as exc:
         print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
         return 1
@@ -2310,9 +2301,9 @@ def main() -> None:
 
     # The value of --ollama-vault-set never comes from argv, only its NAME does.
     if args.ollama_vault_set is not None:
-        sys.exit(vault_set_main([args.ollama_vault_set], sys.stdin, sys.stdin.isatty()))
+        sys.exit(vault_set_main(args.ollama_vault_set, sys.stdin, sys.stdin.isatty()))
     if args.ollama_rotate_key:
-        sys.exit(rotate_main([_YES_FLAG] if args.yes else [], sys.stdin.isatty()))
+        sys.exit(rotate_main(args.yes, sys.stdin.isatty()))
 
     # A dry run of the prompt guard: no mode, no input, no tokens. Decided from the PARSED
     # args, not by scanning sys.argv -- a raw scan duplicates the flag name as a magic string
