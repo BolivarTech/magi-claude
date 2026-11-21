@@ -1451,3 +1451,54 @@ def test_a_created_dir_that_cannot_be_removed_is_named(tmp_path, monkeypatch):
     message = str(exc.value)
     assert str(tmp_path / "rotated") in message and "delete" in message
     assert "\n" not in message.strip()
+
+
+def test_a_target_that_cannot_be_inspected_is_never_proven_absent(tmp_path, monkeypatch):
+    # [tighten-1] "cannot stat the copy" is not "nothing was copied": both copies are kept, nothing deleted.
+    work = _project(tmp_path)
+    holder = {}
+
+    def _move(src, dst):
+        shutil.copytree(src, dst)
+        holder["target"] = dst
+        raise OSError("file in use")
+
+    real_lstat, real_lexists = os.lstat, os.path.lexists
+
+    def _lstat(path, *args, **kwargs):
+        if "target" in holder and os.fspath(path) == os.fspath(holder["target"]):
+            raise PermissionError("denied")
+        return real_lstat(path, *args, **kwargs)
+
+    def _lexists(path):
+        if "target" in holder and os.fspath(path) == os.fspath(holder["target"]):
+            return False  # lexists swallows every OSError
+        return real_lexists(path)
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move)
+    monkeypatch.setattr("magi_key_rotation.os.lstat", _lstat)
+    monkeypatch.setattr("magi_key_rotation.os.path.lexists", _lexists)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert "both copies were kept" in str(exc.value)
+    assert (Path(holder["target"]) / "magi.toml").exists() and (work / ".magi").exists()
+
+
+def test_a_backup_leaf_that_already_existed_is_never_removed(tmp_path, monkeypatch):
+    # [tighten-2] FileExistsError: another rotation made the leaf; this call did not create it.
+    work = _project(tmp_path)
+    leaf = {}
+    real_makedirs = os.makedirs
+
+    def _makedirs(path, *args, **kwargs):
+        real_makedirs(path)
+        leaf["path"] = path
+        raise FileExistsError(path)
+
+    monkeypatch.setattr("magi_key_rotation.os.makedirs", _makedirs)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert "nothing was moved" in str(exc.value)
+    assert os.path.isdir(leaf["path"])
