@@ -2199,7 +2199,7 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
 
     Returns:
         0 on success; 1 for a fail-closed error or an empty value; 2 (a usage
-        error) for a value that contains a line break.
+        error) for a value that contains a line break or cannot be encoded as UTF-8.
     """
     workdir = os.getcwd()
     try:
@@ -2214,6 +2214,14 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
             print(
                 f"ERROR: the value for {name} contains a line break; nothing was stored "
                 "(pass the key alone, on one line).",
+                file=sys.stderr,
+            )
+            return _USAGE_EXIT_CODE
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            print(
+                f"ERROR: the value for {name} is not valid UTF-8 text; nothing was stored.",
                 file=sys.stderr,
             )
             return _USAGE_EXIT_CODE
