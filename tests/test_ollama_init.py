@@ -576,3 +576,14 @@ def test_an_empty_key_file_left_by_a_failed_removal_is_half_made_not_a_written_k
     with pytest.raises(OllamaInitError) as exc:
         run_ollama_init(str(tmp_path), key_store=_Store())
     assert exc.value.leftover is InitLeftover.HALF_MADE_KEPT
+
+
+def test_an_existing_magi_dir_message_leads_with_nothing_was_initialised(tmp_path):
+    # [V7] the operator must not read the guidance as "init has not run": the outcome comes first.
+    (tmp_path / ".magi").mkdir()
+    with pytest.raises(MagiDirExistsError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    message = str(exc.value)
+    assert message.startswith("nothing was initialised")
+    assert message.index("nothing was initialised") < message.index("to start over:")
+    assert "\n" not in message.strip()
