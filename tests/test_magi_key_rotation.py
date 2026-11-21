@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from magi_key import KeyHardeningError, KeyStore, MagiKey
+from magi_key import KeyExposedError, KeyHardeningError, KeyStore, MagiKey
 from ollama_init import OllamaInitError, run_ollama_init
 from magi_key_rotation import (
     KeyRotation,
@@ -492,3 +492,59 @@ def test_an_init_error_quoting_the_old_key_is_redacted(tmp_path):
     with pytest.raises(RotationFailedError) as exc:
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert OLD.reveal() not in str(exc.value) and "<redacted>" in str(exc.value)
+
+
+def test_a_backup_dir_that_cannot_be_hardened_names_the_guards_reason(tmp_path):
+    # [Loop1 M-5] the key-free one-line guard message reaches the operator, not only the class name.
+    work = _project(tmp_path)
+    rotation, _ = _rotation(tmp_path, guard=_FailingOnBackupIdGuard())
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert "cannot harden" in str(exc.value) and OLD.reveal() not in str(exc.value)
+
+
+def test_a_backup_that_cannot_be_rehardened_names_the_guards_reason(tmp_path):
+    work = _project(tmp_path)
+    rotation, _ = _rotation(tmp_path, guard=_FailingOnBackupGuard())
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert "cannot harden" in str(exc.value) and OLD.reveal() not in str(exc.value)
+
+
+def test_a_magi_dir_the_rotation_did_not_create_is_never_reported_as_rotated(tmp_path):
+    # [Loop1 M-6] a concurrent run recreated .magi/ between the move and init: init answers "already
+    # exists" and returns normally, but the new .magi/ has no key of this rotation (REQ-13g.2).
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        os.makedirs(os.path.join(workdir, ".magi"))
+        open(os.path.join(workdir, ".magi", "magi.toml"), "w").write("someone else's")
+        return ".magi/ already exists: left untouched"
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    backups = os.listdir(tmp_path / "rotated")
+    assert len(backups) == 1
+    assert (tmp_path / "rotated" / backups[0] / ".magi" / "magi.toml").read_text() == "old"
+    assert (work / ".magi" / "magi.toml").read_text() == "someone else's"  # not ours to delete
+    message = str(exc.value)
+    assert backups[0] in message and "move it back" in message
+    assert "\n" not in message.strip() and OLD.reveal() not in message
+
+
+def test_a_new_key_that_does_not_verify_stops_the_rotation(tmp_path):
+    # [Loop1 M-6] presence AND owner-only: a new key readable by others is not a completed rotation.
+    work = _project(tmp_path)
+
+    class _NewKeyExposedGuard(_NoopGuard):
+        def verify(self, path, directory):
+            if str(work) in path and not directory:
+                raise KeyExposedError(f"{path} grants access to S-1-5-11 (DACL protected: no)")
+
+    rotation, _ = _rotation(tmp_path, guard=_NewKeyExposedGuard())
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert os.listdir(tmp_path / "rotated")[0] in message and "S-1-5-11" in message
+    assert OLD.reveal() not in message and NEW.reveal() not in message
