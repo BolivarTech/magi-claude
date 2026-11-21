@@ -864,7 +864,11 @@ class KeyRotation:
                     f" (the new {magi_dir} was kept: initialisation was interrupted after its key was written; "
                     "move it aside first)"
                 )
-            elif isinstance(error, OllamaInitError) and error.leftover is not None:
+            elif (
+                isinstance(error, OllamaInitError)
+                and error.leftover
+                in _LEFTOVER_CLAUSES  # an unmapped value gets the generic wording
+            ):
                 leftover = _LEFTOVER_CLAUSES[error.leftover].format(magi_dir=magi_dir)
             else:
                 leftover = self._unreported_leftover(workdir, magi_dir)
