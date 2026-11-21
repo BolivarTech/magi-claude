@@ -149,3 +149,17 @@ def test_an_ls_that_prints_nothing_is_a_vault_command_error_never_an_empty_vault
     # [U2] only the measured "(vault empty)" sentinel means "no API keys": silence is not a claim.
     with pytest.raises(VaultCommandError):
         _client([], _Completed(stdout=stdout)).ls()
+
+
+def test_an_unlisted_name_that_echoes_the_key_is_redacted_in_the_error():
+    # [Z9] every vault message goes through the one redaction point, the unrecognised-name one included.
+    key = MagiKey("K" * 44)
+    stdout = f"{key.reveal()} \u00b7 2026-01-01 \u00b7 2026-01-02\n"
+
+    def runner(argv, **kwargs):
+        return _Completed(stdout=stdout)
+
+    client = VaultClient("/bin/magi-rs", "/repo", key, runner=runner)
+    with pytest.raises(VaultCommandError) as exc:
+        client.ls()
+    assert key.reveal() not in str(exc.value) and REDACTION_MARKER in str(exc.value)
