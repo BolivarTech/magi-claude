@@ -1792,3 +1792,25 @@ def test_an_empty_key_file_left_by_a_failed_init_counts_as_no_key_and_is_removed
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert not (work / ".magi").exists()
     assert "holding a key" not in str(exc.value)
+
+
+def test_a_backup_root_spelled_with_dot_parts_still_never_hardens_the_platform_base(tmp_path):
+    # [O5] the parent walk compares normalised paths like `_feature_root`: `base/./magi/rotated` is the same
+    # root, so `base/.` (the platform base itself) is neither created-recorded nor hardened.
+    work = _project(tmp_path)
+    base = tmp_path / "state-base"
+    guard = _RecordingGuard()
+    rotation = KeyRotation(
+        _Store(guard),
+        lambda workdir, new_store: _write_new_magi(workdir),
+        lambda workdir, key: [],
+        backup_root=os.path.join(str(base), ".", "magi", "rotated"),
+    )
+    rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    hardened = {
+        os.path.normcase(os.path.normpath(path))
+        for call, path, *_ in guard.calls
+        if call == "harden"
+    }
+    assert os.path.normcase(str(base)) not in hardened
+    assert os.path.normcase(str(base / "magi")) in hardened
