@@ -295,7 +295,8 @@ class KeyStore:
             self.guard.harden(secret_dir, True)
         except KeyStoreError as error:
             raise KeyHardeningError(
-                f"could not restrict the key directory {secret_dir} to its owner: no key was written"
+                f"could not restrict the key directory {secret_dir} to its owner "
+                f"({one_line(str(error))}): no key was written"
             ) from error
         descriptor = os.open(key_file, _EXCLUSIVE_CREATE_FLAGS, FILE_MODE)
         try:
@@ -308,7 +309,7 @@ class KeyStore:
         except KeyStoreError as error:
             cleanup_note = self._discard(key_file)
             raise KeyHardeningError(
-                f"could not restrict the key at {key_file} to its owner{cleanup_note}"
+                f"could not restrict the key at {key_file} to its owner ({one_line(str(error))}){cleanup_note}"
             ) from error
         except BaseException:
             self._discard(key_file)

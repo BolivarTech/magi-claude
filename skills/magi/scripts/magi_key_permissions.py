@@ -493,7 +493,9 @@ class PosixPermissionGuard(PermissionGuard):
         try:
             os.chmod(path, DIR_MODE if directory else FILE_MODE)
         except OSError as error:
-            raise KeyHardeningError(f"cannot restrict {path} to its owner") from error
+            raise KeyHardeningError(
+                f"cannot restrict {path} to its owner ({one_line(str(error))})"
+            ) from error
 
     def verify(self, path: str, directory: bool) -> None:
         """Require the effective user as owner and no group or other bits.
@@ -668,7 +670,9 @@ class WindowsPermissionGuard(PermissionGuard):
                 ]
             )
         except (OSError, ValueError) as error:
-            raise KeyHardeningError(f"cannot restrict {path} to its owner") from error
+            raise KeyHardeningError(
+                f"cannot restrict {path} to its owner ({one_line(str(error))})"
+            ) from error
 
     def verify(self, path: str, directory: bool) -> None:
         """Require a protected DACL whose every ACE is the current user's SID.
