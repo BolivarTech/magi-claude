@@ -79,37 +79,6 @@ _ICACLS_PARTS = (*_SYSTEM32_PARTS, "icacls.exe")
 _WHOAMI_ARGS = ("/user", "/fo", "csv", "/nh")
 """One CSV line, ``"<host>\\<user>","<SID>"``, without a header."""
 
-_WINDOWS_SYSTEM_VARIABLES = (
-    "LOCALAPPDATA",
-    "APPDATA",
-    "WINDIR",
-    "SYSTEMDRIVE",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PROGRAMW6432",
-    "PROGRAMDATA",
-    "COMMONPROGRAMFILES",
-    "COMMONPROGRAMFILES(X86)",
-    "COMMONPROGRAMW6432",
-    "PATHEXT",
-    "PROCESSOR_ARCHITECTURE",
-    "NUMBER_OF_PROCESSORS",
-    "OS",
-    "ALLUSERSPROFILE",
-    "PUBLIC",
-    "COMPUTERNAME",
-    "USERNAME",
-    "USERDOMAIN",
-    "HOMEDRIVE",
-    "HOMEPATH",
-)
-"""Non-secret Windows system variables the permission tools get on top of the allowlist, upper case.
-
-ENUMERATED, matched case-insensitively, copied only when the parent has them.
-They were added when the guard still started Windows PowerShell, which outlived
-``_COMMAND_TIMEOUT_SECONDS`` on the CI runner without them; whoami and icacls keep
-the same environment. None of these names carries a credential."""
-
 _STDERR_EXCERPT_CHARS = 300
 """How much of a failed tool's stderr an error message carries, from its start (the headline)."""
 
@@ -186,33 +155,12 @@ def _stderr_excerpt(error: subprocess.SubprocessError) -> str:
     return one_line(stderr)[:_STDERR_EXCERPT_CHARS]
 
 
-def _tool_environment() -> dict[str, str]:
-    """Return the environment of a permission tool: the allowlist plus the Windows system variables.
-
-    The same allowlist the ``magi-rs`` child gets (``EnvironmentPolicy``), so no
-    API key and no parent ``MAGI_PASSPHRASE`` reach whoami or icacls. The
-    ``_WINDOWS_SYSTEM_VARIABLES`` the parent has are added, whatever their case.
-    ``PSModulePath`` is in neither.
-
-    Complexity: O(n) in the number of parent variables (each checked against
-    22 names), once per tool run.
-
-    Returns:
-        A new environment mapping.
-    """
-    env = EnvironmentPolicy.build(os.environ)
-    env.update(
-        {
-            name: value
-            for name, value in os.environ.items()
-            if name.upper() in _WINDOWS_SYSTEM_VARIABLES
-        }
-    )
-    return env
-
-
 def _run(argv: list[str]) -> str:
     """Run a permission tool, with the allowlisted environment, and return its standard output.
+
+    The child gets exactly ``EnvironmentPolicy.build(os.environ)``, the
+    allowlist the ``magi-rs`` child gets: no API key, no parent
+    ``MAGI_PASSPHRASE``, no ``PSModulePath``.
 
     Args:
         argv: The command, as an argument list (never through a shell).
@@ -234,7 +182,7 @@ def _run(argv: list[str]) -> str:
             errors="replace",
             timeout=_COMMAND_TIMEOUT_SECONDS,
             check=True,
-            env=_tool_environment(),
+            env=EnvironmentPolicy.build(os.environ),
         )
     except subprocess.CalledProcessError as error:
         raise OSError(
