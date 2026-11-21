@@ -121,7 +121,7 @@ FAIL_CLOSED_ERRORS: tuple[type[Exception], ...] = (
     ProjectNotInitialisedError,
     KeyMissingError,
     KeyExposedError,
-    KeyHardeningError,
+    KeyHardeningError,  # Listed for the --ollama-init/rotation paths; the --ollama preflight never raises it.
 )
 
 
@@ -427,8 +427,9 @@ class MagiRsTrio(TrioExecutor):
                 obtained or did not verify. It is NOT executed.
             ProjectNotInitialisedError: No ``.magi/magi.toml`` under the
                 workdir. Names ``/magi --ollama-init``; never initialises.
-            KeyMissingError, KeyExposedError, KeyHardeningError: The key is
-                absent or its permissions are not owner-only. Fail-closed.
+            KeyMissingError, KeyUnverifiableError, KeyExposedError: The key is
+                absent, its permissions could not be verified, or they are
+                loosened (not owner-only). Fail-closed.
 
         Side effects:
             May download and install the binary into ``bin_dir``; stores the
