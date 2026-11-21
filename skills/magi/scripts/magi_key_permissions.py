@@ -455,7 +455,7 @@ def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
     return _PROTECTED_FLAG in flags, aces
 
 
-def _refuse_link(path: str) -> None:
+def _refuse_link_as_unverifiable(path: str) -> None:
     """Refuse a key path that is itself a link or reparse point: its permissions would be another's.
 
     Args:
@@ -554,7 +554,7 @@ class PosixPermissionGuard(PermissionGuard):
         """
         if sys.platform == "win32":
             raise KeyUnverifiableError("POSIX permissions cannot be verified on Windows")
-        _refuse_link(path)
+        _refuse_link_as_unverifiable(path)
         try:
             status = os.stat(path)
         except OSError as error:
@@ -763,7 +763,7 @@ class WindowsPermissionGuard(PermissionGuard):
         Any foreign ACE fails verification whatever its type: the type only
         chooses between the two failures and their wording.
         """
-        _refuse_link(path)
+        _refuse_link_as_unverifiable(path)
         try:
             sid = self.current_sid()
             protected, aces = _parse_dacl_aces(self.read_sddl(path))

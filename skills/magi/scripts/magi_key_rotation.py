@@ -868,21 +868,22 @@ class KeyRotation:
         """
         backup_dir = os.path.dirname(magi_dir)
 
-        def _refuse_link(path: str) -> None:
+        def _refuse_link_in_backup(path: str) -> None:
+            """Raise ``_LinkInBackupError`` when ``path`` is a link or reparse point."""
             refusal = link_refusal(path, os.path.relpath(path, backup_dir))
             if refusal is not None:
                 raise _LinkInBackupError(refusal)
 
-        _refuse_link(magi_dir)
+        _refuse_link_in_backup(magi_dir)
         entries = [(magi_dir, True)]
         for current, dirs, files in os.walk(magi_dir, onerror=_raise_walk_error, followlinks=False):
             for name in dirs:
                 path = os.path.join(current, name)
-                _refuse_link(path)
+                _refuse_link_in_backup(path)
                 entries.append((path, True))
             for name in files:
                 path = os.path.join(current, name)
-                _refuse_link(path)
+                _refuse_link_in_backup(path)
                 entries.append((path, False))
         return entries
 
