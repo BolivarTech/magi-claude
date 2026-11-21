@@ -210,6 +210,17 @@ class MagiKey:
             return NotImplemented
         return hmac.compare_digest(self._value.encode(), other._value.encode())
 
+    def __hash__(self) -> int:
+        """Refuse to hash a key: a secret must not become a dict key or a set member by accident.
+
+        Stated explicitly (``__eq__`` alone already disables hashing) so it
+        stays so if ``__eq__`` is ever removed.
+
+        Raises:
+            TypeError: Always.
+        """
+        raise TypeError("a MagiKey is not hashable")
+
 
 class KeyStore:
     """Generates, persists and loads the key under a working directory.
