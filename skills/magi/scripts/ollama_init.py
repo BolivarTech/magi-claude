@@ -19,7 +19,7 @@ import subprocess
 
 from magi_key import KeyStore
 from magi_key_permissions import default_key_store
-from magi_rs_bootstrap import BinaryBootstrap
+from magi_rs_bootstrap import BinaryBootstrap, verified_executable
 from magi_rs_env import EnvironmentPolicy
 from magi_rs_paths import bin_dir, pin_path, plugin_root
 from magi_rs_pin import Pin
@@ -98,9 +98,7 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
         return _ALREADY_INITIALISED.format(workdir=workdir)
     store = key_store if key_store is not None else default_key_store()
     root = plugin_root()
-    bootstrap = BinaryBootstrap(Pin.load(pin_path(root)), bin_dir(root))
-    bootstrap.ensure()
-    executable = bootstrap.verify()
+    executable = verified_executable(BinaryBootstrap(Pin.load(pin_path(root)), bin_dir(root)))
     key = store.new_key()
     try:
         completed = subprocess.run(

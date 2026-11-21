@@ -671,8 +671,28 @@ class VersionMismatchError(Exception):
 
 
 def verified_executable(bootstrap: BinaryBootstrap) -> str:
-    """Install the pinned binary if needed, then verify it; return its path."""
-    raise NotImplementedError
+    """Install the pinned binary if needed, then verify it; return its path.
+
+    The one way every launcher obtains the executable: in the steady state
+    ``ensure()`` checks only the digest, so ``verify()`` (digest, then
+    ``--version``) always follows it.
+
+    Args:
+        bootstrap: The bootstrap bound to the pin and ``bin/``.
+
+    Returns:
+        The path ``verify()`` returned.
+
+    Raises:
+        Anything ``ensure()`` or ``verify()`` raises (see
+        :meth:`BinaryBootstrap.ensure` and :meth:`BinaryBootstrap.verify`).
+        The binary is not executed before its digest matched.
+
+    Example:
+        >>> path = verified_executable(BinaryBootstrap(pin, "bin"))  # doctest: +SKIP
+    """
+    bootstrap.ensure()
+    return bootstrap.verify()
 
 
 class BinaryBootstrap:

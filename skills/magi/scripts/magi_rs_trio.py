@@ -26,6 +26,7 @@ from magi_rs_bootstrap import (
     UnsafeArchiveError,
     UnsafeBinDirectoryError,
     VersionMismatchError,
+    verified_executable,
 )
 from magi_rs_env import EnvironmentPolicy
 from magi_rs_paths import PluginRootError
@@ -433,9 +434,7 @@ class MagiRsTrio(TrioExecutor):
             May download and install the binary into ``bin_dir``; stores the
             loaded key for the launch.
         """
-        bootstrap = BinaryBootstrap(self._pin, self._bin_dir)
-        bootstrap.ensure()
-        executable = bootstrap.verify()
+        executable = verified_executable(BinaryBootstrap(self._pin, self._bin_dir))
         self._key = ProjectPreflight.require_ready(self._workdir, self._key_store)
         return executable
 
