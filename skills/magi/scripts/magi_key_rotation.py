@@ -537,14 +537,13 @@ class KeyRotation:
         failure may leave the source partly deleted. The partial backup is
         removed only when the source is still complete (every path that reached
         the copy still exists in the source); otherwise nothing is deleted and
-        both paths are named.
+        both paths are named. An interrupt (``KeyboardInterrupt``,
+        ``SystemExit``) during a long cross-volume copy follows the same
+        contract as a failed move.
 
         Args:
             magi_dir: ``<workdir>/.magi``.
             backup_dir: ``<backup root>/<id>``.
-
-        An interrupt (``KeyboardInterrupt``, ``SystemExit``) during a long
-        cross-volume copy follows the same contract as a failed move.
 
         Raises:
             RotationFailedError: The move failed or was interrupted; the message

@@ -20,8 +20,9 @@ guards harden a path to its owner and verify that nobody else can reach it;
   PowerShell start on the CI runner took tens of seconds.
 
 Any failure to read what verification needs (the ``stat``, the current SID,
-the DACL) is reported as ``KeyExposedError``: permissions that cannot be read
-are never treated as safe.
+the DACL, an SDDL alias) is reported as ``KeyUnverifiableError``, a subclass of
+``KeyExposedError``: permissions that cannot be read are never treated as safe,
+and the message says they could not be verified, never that they are exposed.
 
 Declared limits: the permissions of ``.magi/`` itself are not verified, POSIX
 extended ACLs are not read, and on Windows the file owner (the ``O:`` field of
