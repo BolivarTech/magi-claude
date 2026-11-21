@@ -398,9 +398,13 @@ class WindowsPermissionGuard(PermissionGuard):
                 raising ``OSError`` on failure.
         """
         self._runner = runner
+        self._sid: str | None = None
 
     def current_sid(self) -> str:
-        """Return the SID of the user running this process.
+        """Return the SID of the user running this process, asking ``whoami`` once per guard.
+
+        The SID of a process does not change, so the first successful answer is
+        kept; a failure is not, and the next call asks again.
 
         Returns:
             The SID string from ``whoami.exe /user /fo csv /nh``.
@@ -409,11 +413,13 @@ class WindowsPermissionGuard(PermissionGuard):
             OSError: ``whoami.exe`` could not run.
             ValueError: Its output is not one ``"<name>","<SID>"`` line.
         """
-        output = self._runner([_system_tool(_WHOAMI_PARTS), *_WHOAMI_ARGS])
-        rows = list(csv.reader(io.StringIO(output.strip())))
-        if len(rows) != 1 or len(rows[0]) != 2 or not _SID_PATTERN.fullmatch(rows[0][1]):
-            raise ValueError("whoami did not report the current user's SID")
-        return rows[0][1]
+        if self._sid is None:
+            output = self._runner([_system_tool(_WHOAMI_PARTS), *_WHOAMI_ARGS])
+            rows = list(csv.reader(io.StringIO(output.strip())))
+            if len(rows) != 1 or len(rows[0]) != 2 or not _SID_PATTERN.fullmatch(rows[0][1]):
+                raise ValueError("whoami did not report the current user's SID")
+            self._sid = rows[0][1]
+        return self._sid
 
     def read_sddl(self, path: str) -> str:
         """Return the SDDL of ``path``, read by PowerShell's ``Get-Acl``.
