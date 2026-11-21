@@ -1583,9 +1583,18 @@ def format_target_banner(target: ReviewTarget) -> str:
     return f"{_REVIEW_BANNER_PREFIX}Target: {target.label}"
 
 
-def _count(value: Any) -> Any:
-    """Length of a list field, or ``n/a`` when magi-rs did not send a list."""
-    return len(value) if isinstance(value, list) else _NOT_A_LIST
+def _count(value: Any, unlisted: Any = None) -> Any:
+    """Length of a list field, or ``n/a`` when magi-rs did not send a list.
+
+    Args:
+        value: The (possibly capped) list magi-rs sent.
+        unlisted: The matching ``*_unlisted`` counter; shown as ``N (+M unlisted)`` when positive.
+    """
+    if not isinstance(value, list):
+        return _NOT_A_LIST
+    if isinstance(unlisted, int) and not isinstance(unlisted, bool) and unlisted > 0:
+        return f"{len(value)} (+{unlisted} unlisted)"
+    return len(value)
 
 
 def format_review_banner(result: CodeReviewResult) -> list[str]:
@@ -1606,8 +1615,8 @@ def format_review_banner(result: CodeReviewResult) -> list[str]:
         f"discarded: {_count(review.get('discarded'))}",
         f"filtered by the gate: {_count(review.get('filtered'))}",
         f"judged: {review.get('judged_fraction')}",
-        f"skipped: {_count(review.get('skipped'))}",
-        f"masked: {_count(review.get('masked'))}",
+        f"skipped: {_count(review.get('skipped'), review.get('skipped_unlisted'))}",
+        f"masked: {_count(review.get('masked'), review.get('masked_unlisted'))}",
     ]
     if review.get("gate_stopped") is not None:
         lines.append(f"gate stopped: {review.get('gate_stopped')}")
@@ -2869,6 +2878,8 @@ def main() -> None:
     # ``oversize``, and ``raw_input_chars`` were all computed right after
     # _load_input_content, before _maybe_enrich could reassign input_content.
     # None for the native review: its input is a target, not text the plugin measures.
+    if review_target is not None:
+        report["guard"] = None
     report["input_size"] = (
         None
         if review_target is not None
