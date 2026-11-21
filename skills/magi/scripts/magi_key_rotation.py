@@ -49,7 +49,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from magi_key import DIR_MODE, KEY_DIR_PARTS, KeyGuard, KeyStore, KeyStoreError, MagiKey
+from magi_key import (
+    DIR_MODE,
+    KEY_DIR_PARTS,
+    KeyGuard,
+    KeyHardeningError,
+    KeyStore,
+    KeyStoreError,
+    MagiKey,
+)
 from magi_rs_vault import VAULT_KEY_NAMES
 from ollama_init import MagiDirExistsError
 from one_line import one_line
@@ -267,6 +275,19 @@ class _RecordingKeyStore(KeyStore):
         except (KeyStoreError, OSError):
             return False
         return any(current == key for key in self._written)
+
+    def redact(self, text: str) -> str:
+        """Replace every key this store was asked to persist in ``text`` with ``REDACTION_MARKER``.
+
+        Args:
+            text: Text that may echo a new key, e.g. an ``init`` failure.
+
+        Returns:
+            ``text`` with every recorded key redacted.
+        """
+        for key in self._written:
+            text = key.redact(text)
+        return text
 
 
 class KeyRotation:
@@ -630,13 +651,10 @@ class KeyRotation:
             ) from error
         except BaseException as error:  # noqa: BLE001 - any init failure, an interrupt included, ends in the described state
             raw = " ".join([str(error), *getattr(error, "__notes__", [])])
-            detail = one_line(old_key.redact(raw)) or type(error).__name__
+            detail = one_line(store.redact(old_key.redact(raw))) or type(error).__name__
             leftover = ""
             if store.holds_written_key(workdir):
-                leftover = (
-                    f" (the new {magi_dir} was kept: initialisation was interrupted after its key was written; "
-                    "move it aside first)"
-                )
+                leftover = self._own_key_leftover(magi_dir, error)
             elif os.path.lexists(self._store.key_path(workdir)):
                 leftover = (
                     f" (and the {magi_dir} now there holds a key this rotation did not write: another "
@@ -653,6 +671,31 @@ class KeyRotation:
                 f"creating the new {MAGI_DIR}/ failed ({detail}){leftover}: the old one is intact at "
                 f"{os.path.join(backup_dir, MAGI_DIR)}; move it back to {magi_dir} to retry"
             ) from error
+
+    @staticmethod
+    def _own_key_leftover(magi_dir: str, error: BaseException) -> str:
+        """Describe a new ``.magi/`` that holds this rotation's key after ``init`` failed, by the cause.
+
+        Args:
+            magi_dir: ``<workdir>/.magi``.
+            error: What stopped ``init``.
+
+        Returns:
+            The parenthetical clause of the failure message: an interrupt, a key
+            that could not be hardened (and may be readable by others), or any
+            other failure after the key was written.
+        """
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            return (
+                f" (the new {magi_dir} was kept: initialisation was interrupted after its key was written; "
+                "move it aside first)"
+            )
+        if isinstance(error, KeyHardeningError):
+            return (
+                f" (the new {magi_dir} was kept: its key could not be hardened and may be readable by others; "
+                "remove it first)"
+            )
+        return f" (the new {magi_dir} was kept: initialisation failed after its key was written; remove it first)"
 
     def _verify_new(self, workdir: str, backup_dir: str, old_key: MagiKey) -> None:
         """Require the new ``.magi/`` to hold a present, owner-only key other than the old one (REQ-13g.2).
