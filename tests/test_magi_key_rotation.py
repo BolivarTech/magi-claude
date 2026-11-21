@@ -139,7 +139,10 @@ def test_a_rotation_without_an_explicit_root_uses_the_platform_state_dir(monkeyp
     work = _project(tmp_path)
 
     def _init(workdir, store):
+        # [Loop1 M-6] the rotation now loads the new key back, so the double writes one.
         os.makedirs(os.path.join(workdir, ".magi", ".secret"))
+        with open(os.path.join(workdir, ".magi", ".secret", "magi.key"), "w") as handle:
+            handle.write(NEW.reveal())
         return "initialised"
 
     report = KeyRotation(_Store(), _init, lambda w, k: []).rotate(
