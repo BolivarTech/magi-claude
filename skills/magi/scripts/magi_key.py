@@ -41,6 +41,9 @@ FILE_MODE = 0o600
 KEY_ENCODING = "ascii"
 """The key file holds base64 text, which is pure ASCII."""
 
+REDACTION_MARKER = "<redacted>"
+"""Replaces the key wherever text captured from a child echoes it (BDD-22)."""
+
 _EXCLUSIVE_CREATE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
 """Create-or-fail, write-only; binary on Windows so no newline translation happens."""
 
@@ -158,6 +161,14 @@ class MagiKey:
         return self._REDACTED
 
     __str__ = __repr__
+
+    def redact(self, text: str) -> str:
+        """Replace every occurrence of the key in ``text`` with ``REDACTION_MARKER``."""
+        raise NotImplementedError
+
+    def redact_bytes(self, data: bytes) -> bytes:
+        """Replace every occurrence of the key in ``data`` with ``REDACTION_MARKER``."""
+        raise NotImplementedError
 
     def __eq__(self, other: object) -> bool:
         """Compare two keys by value, in constant time.

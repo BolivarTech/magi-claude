@@ -11,6 +11,7 @@ from magi_key import (
     KeyMissingError,
     KeyStore,
     KeyStoreError,
+    REDACTION_MARKER,
     KeyUnverifiableError,
     MagiKey,
 )
@@ -278,3 +279,19 @@ def test_an_unverifiable_key_is_never_called_compromised(tmp_path):
 def test_an_unverifiable_key_is_a_fail_closed_sibling_of_validation_error():
     assert issubclass(KeyUnverifiableError, KeyExposedError)
     assert not issubclass(KeyUnverifiableError, ValidationError)
+
+
+def test_redact_replaces_every_occurrence_of_the_key_with_the_one_marker():
+    # [Loop1 I-2] the one redaction helper every child-output path shares.
+    key = MagiKey("c2VjcmV0LWtleQ==")
+    text = f"echo {key.reveal()} and again {key.reveal()}\n"
+    assert key.redact(text) == f"echo {REDACTION_MARKER} and again {REDACTION_MARKER}\n"
+    assert key.redact("nothing to hide") == "nothing to hide" and key.redact("") == ""
+
+
+def test_redact_bytes_replaces_every_occurrence_of_the_key():
+    key = MagiKey("c2VjcmV0LWtleQ==")
+    data = b"x" + key.reveal().encode() + b"y" + key.reveal().encode()
+    marker = REDACTION_MARKER.encode()
+    assert key.redact_bytes(data) == b"x" + marker + b"y" + marker
+    assert key.redact_bytes(b"") == b""

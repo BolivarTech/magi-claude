@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from magi_key import MagiKey
+from magi_key import REDACTION_MARKER, MagiKey
 from magi_rs_env import EnvironmentPolicy
 from magi_rs_vault import InvalidVaultNameError, VaultClient, VaultCommandError
 
@@ -121,6 +121,8 @@ def test_a_secret_in_stderr_is_redacted_before_whitespace_is_collapsed():
     stderr = "rejected " + value + "\n\n  and key " + _KEY.reveal() + "\n"
     with pytest.raises(VaultCommandError) as exc:
         _client([], _Completed(returncode=1, stderr=stderr)).set("OPENAI_API_KEY", value)
-    assert "sk" not in str(exc.value).replace("rejected", "") and _KEY.reveal() not in str(
-        exc.value
-    )
+    # [Loop1 ledger] asserted against the full secret and the marker, not a substring of it.
+    message = str(exc.value)
+    assert value not in message and " ".join(value.split()) not in message
+    assert _KEY.reveal() not in message
+    assert message.count(REDACTION_MARKER) == 2

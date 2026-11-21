@@ -5,11 +5,13 @@
 
 import os
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-from magi_key import KeyHardeningError, KeyStore, MagiKey
+import run_magi
+from magi_key import REDACTION_MARKER, KeyHardeningError, KeyStore, MagiKey
 from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_env import EnvironmentPolicy
 from ollama_init import OllamaInitError, run_ollama_init
@@ -224,3 +226,53 @@ def test_a_cleanup_that_fails_is_named_so_the_operator_deletes_it_by_hand(monkey
     with pytest.raises(OllamaInitError) as exc:
         run_ollama_init(str(tmp_path), key_store=_Store())
     assert ".magi" in str(exc.value) and "delete" in str(exc.value)
+
+
+def _echoing_run(returncode, stream):
+    """A `magi-rs init` double that echoes its MAGI_PASSPHRASE on `stream` (BDD-22's worst case)."""
+
+    def run(argv, **kwargs):
+        os.makedirs(os.path.join(argv[argv.index("-w") + 1], ".magi"))
+        echoed = f"opening vault with {kwargs['env']['MAGI_PASSPHRASE']}\n"
+        return _Completed(
+            returncode=returncode,
+            stdout=echoed if stream == "stdout" else "",
+            stderr=echoed if stream == "stderr" else "",
+        )
+
+    return run
+
+
+def test_an_init_that_echoes_the_new_key_on_stdout_returns_it_redacted(monkeypatch, tmp_path):
+    # [Loop1 I-2] the init path relayed the child verbatim while the NEW key was in its environment.
+    store = _Store()
+    monkeypatch.setattr("ollama_init.subprocess.run", _echoing_run(0, "stdout"))
+    output = run_ollama_init(str(tmp_path), key_store=store)
+    assert store.new_key().reveal() not in output and REDACTION_MARKER in output
+
+
+def test_an_init_that_echoes_the_new_key_on_stderr_and_fails_raises_it_redacted(
+    monkeypatch, tmp_path
+):
+    store = _Store()
+    monkeypatch.setattr("ollama_init.subprocess.run", _echoing_run(1, "stderr"))
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=store)
+    assert store.new_key().reveal() not in str(exc.value) and REDACTION_MARKER in str(exc.value)
+
+
+@pytest.mark.parametrize("returncode, stream", [(0, "stdout"), (1, "stderr")])
+def test_the_ollama_init_cli_never_prints_the_new_key(
+    monkeypatch, tmp_path, capsys, returncode, stream
+):
+    store = _Store()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("ollama_init.default_key_store", lambda: store)
+    monkeypatch.setattr("ollama_init.subprocess.run", _echoing_run(returncode, stream))
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    captured = capsys.readouterr()
+    assert exc.value.code == returncode
+    assert store.new_key().reveal() not in captured.out + captured.err
+    assert REDACTION_MARKER in captured.out + captured.err
