@@ -1362,3 +1362,22 @@ def test_an_interrupt_while_restricting_the_backup_dir_ends_as_the_one_line_fail
     assert "nothing was moved" in message and "\n" not in message.strip()
     assert (work / ".magi" / "magi.toml").read_text() == "old"
     assert os.listdir(tmp_path / "rotated") == []
+
+
+def test_a_move_that_failed_before_creating_the_copy_reports_the_source_unchanged(
+    tmp_path, monkeypatch
+):
+    # [m-1] nothing was copied, so the source is trivially complete: say "unchanged", drop the empty dir.
+    work = _project(tmp_path)
+
+    def _move(src, dst):
+        raise OSError("quota exceeded")
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert "is unchanged" in message and "both copies" not in message
+    assert os.listdir(tmp_path / "rotated") == []
+    assert (work / ".magi" / "magi.toml").read_text() == "old"
