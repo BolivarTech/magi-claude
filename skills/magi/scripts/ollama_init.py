@@ -19,7 +19,7 @@ import os
 import shutil
 import subprocess
 
-from magi_key import KeyStore
+from magi_key import KEY_ENCODING, KeyStore, MagiKey
 from magi_key_permissions import default_key_store
 from magi_rs_bootstrap import BinaryBootstrap, verified_executable
 from magi_rs_env import EnvironmentPolicy
@@ -73,6 +73,35 @@ def _remove_created_magi_dir(magi_dir: str) -> str:
     return ""
 
 
+_OTHER_PROCESS_NOTE = (
+    "{magi_dir} now holds a key this run did not write: another process initialised it, "
+    "so it was left in place."
+)
+
+
+def _holds_other_key(key_file: str, key: MagiKey) -> bool:
+    """Tell whether ``key_file`` exists and holds anything but ``key``.
+
+    A key file that cannot be read counts as someone else's, so a cleanup never
+    deletes a key it cannot prove is its own.
+
+    Args:
+        key_file: ``<workdir>/.magi/.secret/magi.key``.
+        key: The key this call generated.
+
+    Returns:
+        True when another key is there (or an unreadable one); False when
+        there is none or it is ``key``.
+    """
+    if not os.path.lexists(key_file):
+        return False
+    try:
+        with open(key_file, encoding=KEY_ENCODING) as handle:
+            return MagiKey(handle.read().strip()) != key
+    except (OSError, UnicodeDecodeError):
+        return True
+
+
 def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
     """Initialise ``workdir`` for the magi-rs backend with a freshly generated key.
 
@@ -90,6 +119,9 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
             called and nothing was written.
         Any exception from the child launch or the key store: the ``.magi/`` this call
             created is removed first; if that removal fails the message says to delete it by hand.
+            A ``.magi/`` that holds a key this call did not write (another process initialised it
+            meanwhile, e.g. ``persist`` raised ``FileExistsError``) is never removed: the error
+            carries one line saying so and naming it.
         OllamaInitError: ``magi-rs init`` exited non-zero; the message is its
             output with the new key redacted. No key is persisted and the
             ``.magi/`` this call saw appear is removed.
@@ -130,7 +162,10 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
             raise OllamaInitError(output)
         store.persist(workdir, key)
     except BaseException as error:
-        note = _remove_created_magi_dir(magi_dir)
+        if _holds_other_key(store.key_path(workdir), key):
+            note = _OTHER_PROCESS_NOTE.format(magi_dir=magi_dir)
+        else:
+            note = _remove_created_magi_dir(magi_dir)
         if isinstance(error, OllamaInitError) and note:
             raise OllamaInitError(f"{error}\n{note}") from error
         if note:

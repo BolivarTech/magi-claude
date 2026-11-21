@@ -556,8 +556,10 @@ class KeyRotation:
     def _create_new(self, workdir: str, backup_dir: str, old_key: MagiKey) -> None:
         """Create the new ``.magi/``; on any failure, leave none of this rotation's at the root.
 
-        A ``.magi/`` that ``init`` found already there (``MagiDirExistsError``)
-        is not this rotation's: it is left as it is and named.
+        A ``.magi/`` that ``init`` found already there (``MagiDirExistsError``),
+        or one holding a key after ``init`` failed (``run_ollama_init`` never
+        leaves a key of its own behind, so another process wrote it), is not
+        this rotation's: it is left as it is and named.
 
         Args:
             workdir: The project root.
@@ -581,7 +583,12 @@ class KeyRotation:
             raw = " ".join([str(error), *getattr(error, "__notes__", [])])
             detail = _one_line(old_key.redact(raw)) or type(error).__name__
             leftover = ""
-            if os.path.lexists(magi_dir):
+            if os.path.lexists(self._store.key_path(workdir)):
+                leftover = (
+                    f" (and the {magi_dir} now there holds a key this rotation did not write: another "
+                    "process initialised it, so it was left in place; move it aside first)"
+                )
+            elif os.path.lexists(magi_dir):
                 try:
                     shutil.rmtree(magi_dir)
                 except OSError:
