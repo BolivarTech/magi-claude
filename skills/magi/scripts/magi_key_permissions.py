@@ -331,6 +331,19 @@ class _NativeSecurity:
         )
 
     @staticmethod
+    def _null_result(call: str, subject: str) -> OSError:
+        """Build the one-line error of a call that reported success but returned a NULL pointer.
+
+        Args:
+            call: The API function.
+            subject: The path or alias it was called for.
+
+        Returns:
+            ``OSError("<call> failed for <subject>: it reported success but returned NULL")``.
+        """
+        return OSError(f"{call} failed for {subject}: it reported success but returned NULL")
+
+    @staticmethod
     def _last_error() -> int:
         """Return the calling thread's last Win32 error, as ctypes saved it.
 
@@ -351,7 +364,8 @@ class _NativeSecurity:
             The SDDL text.
 
         Raises:
-            OSError: Either call failed; the message names the Win32 error.
+            OSError: Either call failed, or reported success with a NULL
+                result (never dereferenced); the message names the call.
         """
         descriptor = ctypes.c_void_p()
         code = self._get_named_security_info(
@@ -359,14 +373,17 @@ class _NativeSecurity:
         )
         if code != _ERROR_SUCCESS:
             raise self._failure("GetNamedSecurityInfoW", path, code)
+        if not descriptor.value:
+            raise self._null_result("GetNamedSecurityInfoW", path)
         try:
             text = ctypes.c_void_p()
+            call = "ConvertSecurityDescriptorToStringSecurityDescriptorW"
             if not self._descriptor_to_string(
                 descriptor, _SDDL_REVISION_1, _SDDL_SECTIONS, ctypes.byref(text), None
             ):
-                raise self._failure(
-                    "ConvertSecurityDescriptorToStringSecurityDescriptorW", path, self._last_error()
-                )
+                raise self._failure(call, path, self._last_error())
+            if not text.value:
+                raise self._null_result(call, path)
             try:
                 return ctypes.wstring_at(text)
             finally:
@@ -384,16 +401,21 @@ class _NativeSecurity:
             The SID string, e.g. ``S-1-5-18``.
 
         Raises:
-            OSError: The alias is unknown or a call failed; the message names
-                the Win32 error.
+            OSError: The alias is unknown, a call failed, or a call reported
+                success with a NULL result (never dereferenced); the message
+                names the call.
         """
         sid = ctypes.c_void_p()
         if not self._string_to_sid(alias, ctypes.byref(sid)):
             raise self._failure("ConvertStringSidToSidW", alias, self._last_error())
+        if not sid.value:
+            raise self._null_result("ConvertStringSidToSidW", alias)
         try:
             text = ctypes.c_void_p()
             if not self._sid_to_string(sid, ctypes.byref(text)):
                 raise self._failure("ConvertSidToStringSidW", alias, self._last_error())
+            if not text.value:
+                raise self._null_result("ConvertSidToStringSidW", alias)
             try:
                 return ctypes.wstring_at(text)
             finally:
