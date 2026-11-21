@@ -370,7 +370,7 @@ class KeyRotation:
         self._reharden(backup_dir, workdir)
         new_store = _RecordingKeyStore(self._store.guard)
         self._create_new(workdir, backup_dir, old_key, new_store)
-        self._verify_new(workdir, backup_dir, old_key)
+        self._verify_new(workdir, backup_dir, old_key, new_store)
         names, from_vault = self._names_to_revoke(workdir, backup_dir, old_key)
         return RotationReport(backup_dir, names, from_vault)
 
@@ -697,7 +697,9 @@ class KeyRotation:
             )
         return f" (the new {magi_dir} was kept: initialisation failed after its key was written; remove it first)"
 
-    def _verify_new(self, workdir: str, backup_dir: str, old_key: MagiKey) -> None:
+    def _verify_new(
+        self, workdir: str, backup_dir: str, old_key: MagiKey, store: _RecordingKeyStore
+    ) -> None:
         """Require the new ``.magi/`` to hold a present, owner-only key other than the old one (REQ-13g.2).
 
         An ``init`` double, or a ``.magi/`` restored by hand, can leave a tree
@@ -708,12 +710,16 @@ class KeyRotation:
             workdir: The project root.
             backup_dir: ``<backup root>/<id>``, named in the recovery instruction.
             old_key: The exposed key; the new one must differ from it.
+            store: The store ``init`` persisted through; it tells whether the key
+                on disk is this rotation's.
 
         Raises:
             RotationFailedError: The key is absent, unreadable, not owner-only,
-                or the old key, or the check was interrupted. The ``.magi/`` at the root is left as it is (this
-                rotation may not have created it); the message names it and the
-                backup, never either key.
+                or the old key, or the check was interrupted. The ``.magi/`` at
+                the root is left as it is; the message names it and the backup,
+                never either key. When the key on disk is this rotation's, the
+                message owns the new ``.magi/`` and says not to move the exposed
+                backup back; otherwise it says this rotation may not have created it.
         """
         magi_dir = os.path.join(workdir, MAGI_DIR)
 
@@ -729,6 +735,12 @@ class KeyRotation:
         try:
             new_key = self._store.load(workdir)
         except BaseException as error:  # noqa: BLE001 - after the move, even an interrupt must name the backup
+            if store.holds_written_key(workdir):
+                raise RotationFailedError(
+                    f"the new {MAGI_DIR}/ at {magi_dir} was created by this rotation but its key could not be "
+                    f"verified ({_reason(error)}); fix the cause and verify again, the old one is at "
+                    f"{os.path.join(backup_dir, MAGI_DIR)}: do not move the exposed backup back"
+                ) from error
             raise _failure(_reason(error)) from error
         if new_key == old_key:
             raise _failure("it holds the old key")
