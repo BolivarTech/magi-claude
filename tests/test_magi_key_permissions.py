@@ -16,6 +16,7 @@ from magi_key_permissions import (
     default_key_store,
     parse_sddl_dacl,
 )
+from magi_rs_env import EnvironmentPolicy
 
 ME = "S-1-5-21-1111-2222-3333-1001"
 OTHER = "S-1-5-11"  # Authenticated Users
@@ -490,3 +491,46 @@ def test_posix_verify_of_a_group_readable_key_is_exposed_not_unverifiable(tmp_pa
 
 def _raise_os_error(*args, **kwargs):
     raise OSError("tool failed")
+
+
+_PARENT_SECRETS = {"OPENAI_API_KEY": "sk-parent-secret", "MAGI_PASSPHRASE": "parent-passphrase"}
+
+
+def _capture_tool_envs(monkeypatch):
+    """Fake ``subprocess.run`` for the permission tools, recording each child's environment."""
+    seen = []
+
+    def _fake_run(argv, **kwargs):
+        seen.append((ntpath.basename(argv[0]).lower(), kwargs["env"]))
+        if argv[0].lower().endswith("whoami.exe"):
+            return SimpleNamespace(stdout=_fixture("whoami-nh.txt"))
+        return SimpleNamespace(stdout=f"D:PAI(A;;FA;;;{ME})")
+
+    for name, value in _PARENT_SECRETS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
+    return seen
+
+
+def test_no_permission_tool_inherits_an_api_key_or_a_passphrase(monkeypatch):
+    # [W6] REQ-13c: whoami, icacls and PowerShell get the allowlist, never the operator's whole shell.
+    seen = _capture_tool_envs(monkeypatch)
+    guard = WindowsPermissionGuard()
+    guard.harden("k", directory=False)
+    guard.read_sddl("k")
+    tools = {tool for tool, _ in seen}
+    assert {"whoami.exe", "icacls.exe", "powershell.exe"} <= tools
+    for tool, env in seen:
+        assert env is not None, tool
+        assert not set(_PARENT_SECRETS) & {name.upper() for name in env}, tool
+        assert not any(value in env.values() for value in _PARENT_SECRETS.values()), tool
+
+
+def test_powershell_gets_the_allowlist_plus_only_its_one_variable(monkeypatch):
+    # [W6] the one variable carrying the input is the only addition to the allowlisted environment.
+    seen = _capture_tool_envs(monkeypatch)
+    WindowsPermissionGuard().read_sddl("k")
+    ((_, env),) = [entry for entry in seen if entry[0] == "powershell.exe"]
+    expected = EnvironmentPolicy.build(os.environ)
+    expected["MAGI_ACL_PATH"] = "k"
+    assert env == expected
