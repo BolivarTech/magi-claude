@@ -5644,3 +5644,44 @@ def test_rotate_main_runs_the_full_binary_verification(monkeypatch, capsys):
     assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
     err = capsys.readouterr().err
     assert rotated == [] and err.startswith("[FATAL]") and "0.24.1" in err
+
+
+def _noted(error):
+    """`error` with a two-line message already, plus a note (what a cleanup adds)."""
+    error.add_note("the half-made .magi could not be removed; delete it by hand")
+    return error
+
+
+def _assert_one_fatal_line_with_the_note(err):
+    assert err.startswith("[FATAL]") and err.count("\n") == 1
+    assert "first line second line" in err and "delete it by hand" in err
+
+
+def test_the_ollama_preflight_fatal_is_one_line_with_its_notes(monkeypatch, tmp_path, capsys):
+    # [Loop1 M-7] every [FATAL] site renders the same way: whitespace collapsed, __notes__ appended.
+    from magi_rs_trio import MagiRsTrio
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
+    monkeypatch.setattr(
+        MagiRsTrio, "preflight", _raise(_noted(KeyExposedError("first line\nsecond line")))
+    )
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code == 1
+    _assert_one_fatal_line_with_the_note(capsys.readouterr().err)
+
+
+def test_the_vault_set_fatal_is_one_line_with_its_notes(monkeypatch, capsys):
+    _stub_vault_preflight(monkeypatch, key_error=_noted(KeyExposedError("first line\nsecond line")))
+    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("v"), is_tty=False) == 1
+    _assert_one_fatal_line_with_the_note(capsys.readouterr().err)
+
+
+def test_the_rotate_fatal_is_one_line_with_its_notes(monkeypatch, capsys):
+    failing = _raise(_noted(DigestMismatchError("first line\nsecond line")))
+    monkeypatch.setattr(
+        "run_magi.BinaryBootstrap", lambda *a, **k: SimpleNamespace(ensure=failing, verify=failing)
+    )
+    assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
+    _assert_one_fatal_line_with_the_note(capsys.readouterr().err)
