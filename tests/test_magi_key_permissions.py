@@ -16,6 +16,7 @@ from magi_key_permissions import (
     default_key_store,
     parse_sddl_dacl,
 )
+from magi_key_permissions import _NativeSecurity
 from magi_rs_env import EnvironmentPolicy
 
 ME = "S-1-5-21-1111-2222-3333-1001"
@@ -647,3 +648,100 @@ def test_verifying_a_path_whose_acl_cannot_be_read_is_unverifiable(tmp_path):
     with pytest.raises(KeyUnverifiableError) as raised:
         WindowsPermissionGuard().verify(str(tmp_path / "absent"), directory=False)
     assert "Win32 error" in str(raised.value)
+
+
+_FAKE_ADDRESS = 0x1000
+"""A non-NULL pointer value a native double writes into an out-parameter; never dereferenced."""
+
+
+def _native_double(**calls):
+    """A ``_NativeSecurity`` whose API functions are the given doubles (no DLL is loaded).
+
+    Every function not given fails the test if called; ``LocalFree`` records what it frees.
+    """
+    native = object.__new__(_NativeSecurity)
+    freed = []
+
+    def _unexpected(*args):
+        raise AssertionError("unexpected native call")
+
+    for name in (
+        "_get_named_security_info",
+        "_descriptor_to_string",
+        "_string_to_sid",
+        "_sid_to_string",
+    ):
+        setattr(native, name, calls.get(name, _unexpected))
+    native._local_free = lambda pointer: freed.append(pointer)
+    return native, freed
+
+
+def _set_out(argument, value=_FAKE_ADDRESS):
+    """Write ``value`` through a ``ctypes.byref`` out-parameter, as the API does."""
+    argument._obj.value = value
+
+
+def test_a_null_descriptor_after_a_reported_success_is_an_os_error():
+    # [n-1] fail closed: a success with a NULL out-pointer is never dereferenced.
+    native, _ = _native_double(_get_named_security_info=lambda *args: 0)
+    with pytest.raises(OSError) as raised:
+        native.read_sddl("k")
+    assert "GetNamedSecurityInfoW" in str(raised.value) and "NULL" in str(raised.value)
+
+
+def test_a_null_sddl_string_after_a_reported_success_is_an_os_error_and_frees_the_descriptor():
+    # [n-1] the descriptor the first call returned is still released.
+    native, freed = _native_double(
+        _get_named_security_info=lambda *args: _set_out(args[-1]) or 0,
+        _descriptor_to_string=lambda *args: 1,
+    )
+    with pytest.raises(OSError) as raised:
+        native.read_sddl("k")
+    message = str(raised.value)
+    assert "ConvertSecurityDescriptorToStringSecurityDescriptorW" in message and "NULL" in message
+    assert [pointer.value for pointer in freed] == [_FAKE_ADDRESS]
+
+
+def test_a_null_sid_after_a_reported_success_is_an_os_error():
+    native, _ = _native_double(_string_to_sid=lambda *args: 1)
+    with pytest.raises(OSError) as raised:
+        native.resolve_alias("BA")
+    assert "ConvertStringSidToSidW" in str(raised.value) and "NULL" in str(raised.value)
+
+
+def test_a_null_sid_string_after_a_reported_success_is_an_os_error_and_frees_the_sid():
+    native, freed = _native_double(
+        _string_to_sid=lambda *args: _set_out(args[-1]) or 1,
+        _sid_to_string=lambda *args: 1,
+    )
+    with pytest.raises(OSError) as raised:
+        native.resolve_alias("BA")
+    assert "ConvertSidToStringSidW" in str(raised.value) and "NULL" in str(raised.value)
+    assert [pointer.value for pointer in freed] == [_FAKE_ADDRESS]
+
+
+class _NativeAnswering:
+    """A native binding double whose alias resolution answers ``answer``."""
+
+    def __init__(self, answer):
+        self.answer = answer
+
+    def resolve_alias(self, alias):
+        return self.answer
+
+
+def test_an_alias_that_resolves_to_something_other_than_a_sid_is_an_os_error():
+    # [n-2] passes in Red by design: pins the SID-shape check the guard keeps on the native answer.
+    guard = WindowsPermissionGuard()
+    guard._native = _NativeAnswering("Administrators")
+    with pytest.raises(OSError):
+        guard.resolve_alias("BA")
+
+
+def test_a_dacl_whose_alias_resolves_to_a_non_sid_is_unverifiable():
+    # [n-2] the same check reached through verify: fail closed as "could not be verified".
+    guard = _windows_guard("D:PAI(A;;FA;;;LA)")
+    del guard.resolve_alias  # back to the real method, over the native double
+    guard._native = _NativeAnswering("not a sid")
+    with pytest.raises(KeyUnverifiableError):
+        guard.verify("k", directory=False)
