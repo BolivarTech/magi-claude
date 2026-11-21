@@ -934,7 +934,9 @@ def test_a_flagged_default_timeout_points_at_max_rotations_not_at_itself(capsys)
     assert "recommended --timeout is" not in lines[0]
 
 
-_CR_FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "magi-rs-code-review", "one-commit.json")
+_CR_FIXTURE = os.path.join(
+    os.path.dirname(__file__), "fixtures", "magi-rs-code-review", "one-commit.json"
+)
 
 
 def _cr_envelope():
@@ -997,7 +999,8 @@ def test_tokens_are_copied_from_batches_never_estimated():
     envelope = _cr_envelope()
     effort = CodeReviewResult.from_json(json.dumps(envelope)).effort()
     assert effort["tokens_by_batch"] == [
-        {k: b.get(k) for k in ("input_tokens", "output_tokens", "ms")} for b in envelope["code_review"]["batches"]
+        {k: b.get(k) for k in ("input_tokens", "output_tokens", "ms")}
+        for b in envelope["code_review"]["batches"]
     ]
 
 
