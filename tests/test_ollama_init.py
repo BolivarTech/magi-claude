@@ -439,3 +439,29 @@ def test_an_interrupt_propagates_as_itself_even_when_a_cleanup_note_is_needed(
         run_ollama_init(str(tmp_path), key_store=_Store())
     err = capsys.readouterr().err
     assert "delete it by hand" in err and err.count("\n") == 1
+
+
+def test_a_hardening_failure_reaches_the_init_fatal_line_with_the_tool_and_its_exit_code(
+    monkeypatch, tmp_path, capsys
+):
+    # [S1] the guard's own detail (tool, exit code, stderr headline) is part of the message, not only __cause__.
+    from magi_key_permissions import WindowsPermissionGuard
+
+    def _run(argv, **kwargs):
+        tool = argv[0].lower()
+        if tool.endswith("whoami.exe"):
+            return SimpleNamespace(stdout='"host\\me","S-1-5-21-1111-2222-3333-1001"\r\n')
+        if tool.endswith("icacls.exe"):
+            raise subprocess.CalledProcessError(5, argv, output="", stderr="Access is denied.\r\n")
+        os.makedirs(os.path.join(argv[argv.index("-w") + 1], ".magi"))
+        return _Completed()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("ollama_init.subprocess.run", _run)
+    monkeypatch.setattr("ollama_init.default_key_store", lambda: KeyStore(WindowsPermissionGuard()))
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    err = capsys.readouterr().err
+    assert exc.value.code == 1 and err.startswith("[FATAL]") and err.count("\n") == 1
+    assert "icacls.exe" in err and "exit code 5" in err and "Access is denied." in err
