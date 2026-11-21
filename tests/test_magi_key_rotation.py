@@ -1361,7 +1361,7 @@ def test_an_interrupt_while_restricting_the_backup_dir_ends_as_the_one_line_fail
     assert isinstance(exc.value.__cause__, KeyboardInterrupt)
     assert "nothing was moved" in message and "\n" not in message.strip()
     assert (work / ".magi" / "magi.toml").read_text() == "old"
-    assert os.listdir(tmp_path / "rotated") == []
+    assert not (tmp_path / "rotated").exists()  # [m-3] the parents the call created go too
 
 
 def test_a_move_that_failed_before_creating_the_copy_reports_the_source_unchanged(
@@ -1396,3 +1396,58 @@ def test_the_rotation_refuses_any_reparse_point_and_names_what_it_is(tmp_path, m
     message = str(exc.value)
     assert ".magi is a reparse point" in message and "is a link" not in message
     assert "\n" not in message
+
+
+class _InterruptedOnParentGuard(_NoopGuard):
+    """[m-3] Raises KeyboardInterrupt while hardening the backup root the rotation created."""
+
+    def harden(self, path, directory):
+        if os.path.basename(os.path.normpath(path)) == "rotated":
+            raise KeyboardInterrupt
+
+
+def test_an_interrupt_hardening_a_created_parent_removes_the_dirs_it_created(tmp_path):
+    # [m-3] one-line error chained from the interrupt; nothing the call created is left behind.
+    work = _project(tmp_path)
+    rotation, _ = _rotation(tmp_path, guard=_InterruptedOnParentGuard())
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert isinstance(exc.value.__cause__, KeyboardInterrupt)
+    assert "nothing was moved" in str(exc.value) and "\n" not in str(exc.value).strip()
+    assert not (tmp_path / "rotated").exists()
+    assert (work / ".magi" / "magi.toml").read_text() == "old"
+
+
+def test_an_interrupt_in_makedirs_ends_as_the_one_line_failure_and_cleans_up(tmp_path, monkeypatch):
+    # [m-3] makedirs may have created the leaf and its parents before the interrupt arrives.
+    work = _project(tmp_path)
+    real_makedirs = os.makedirs
+
+    def _makedirs(path, *args, **kwargs):
+        real_makedirs(path, *args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("magi_key_rotation.os.makedirs", _makedirs)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert isinstance(exc.value.__cause__, KeyboardInterrupt)
+    assert "nothing was moved" in str(exc.value) and "\n" not in str(exc.value).strip()
+    assert not (tmp_path / "rotated").exists()
+    assert (work / ".magi" / "magi.toml").read_text() == "old"
+
+
+def test_a_created_dir_that_cannot_be_removed_is_named(tmp_path, monkeypatch):
+    # [m-3] best effort: whatever stays is named so the operator can delete it.
+    work = _project(tmp_path)
+
+    def _rmdir(path):
+        raise OSError("in use")
+
+    monkeypatch.setattr("magi_key_rotation.os.rmdir", _rmdir)
+    rotation, _ = _rotation(tmp_path, guard=_InterruptedOnParentGuard())
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert str(tmp_path / "rotated") in message and "delete" in message
+    assert "\n" not in message.strip()
