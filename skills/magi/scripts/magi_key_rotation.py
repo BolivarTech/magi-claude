@@ -573,6 +573,10 @@ class KeyRotation:
         """
         if not os.path.isdir(magi_dir):
             return False
+        if not os.path.lexists(target):
+            return (
+                True  # the move failed before anything was copied: the source is trivially complete
+            )
         try:
             for current, dirs, files in os.walk(target, onerror=_raise_walk_error):
                 relative = os.path.relpath(current, target)
