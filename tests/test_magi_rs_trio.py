@@ -1254,6 +1254,11 @@ async def test_the_outer_clock_is_exactly_the_timeout_because_m4_found_no_oversh
     assert seen["timeout"] == _RUN_TIMEOUT
 
 
-@pytest.mark.parametrize("error", [KeyMissingError, KeyExposedError, KeyHardeningError])
+@pytest.mark.parametrize("error", [KeyMissingError, KeyExposedError])
 def test_every_new_preflight_error_is_rendered_fatal(error):
     assert error in FAIL_CLOSED_ERRORS
+
+
+def test_the_hardening_error_is_not_listed_as_a_preflight_error():
+    # [I-a] the --ollama preflight never raises it; init, rotation and vault render it through their own handlers.
+    assert KeyHardeningError not in FAIL_CLOSED_ERRORS
