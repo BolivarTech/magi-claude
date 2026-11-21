@@ -6,3 +6,6 @@
 
 `ls-empty.txt` is the same command against an empty vault (measurement M1): the single line
 `(vault empty)`, exit 0.
+
+`ls-one-key.txt` is the stdout of `magi-rs vault ls` from a real-binary smoke run (2026-11-21) against a
+vault holding one name: `OPENAI_API_KEY`. No value appears in it.

@@ -110,6 +110,14 @@ def test_ls_returns_names_from_the_captured_output():
     assert names == _LS_FIXTURE_NAMES  # declared next to the fixture, from M2
 
 
+def test_ls_returns_the_one_name_of_the_real_binary_smoke_output():
+    # [L2] the stdout of a real `magi-rs vault ls` (S-VAULT smoke, 2026-11-21): one key, no value in it.
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "magi-rs-vault", "ls-one-key.txt")
+    with open(path, encoding="utf-8") as handle:
+        captured = handle.read()
+    assert _client([], _Completed(stdout=captured)).ls() == ["OPENAI_API_KEY"]
+
+
 def test_ls_of_an_empty_vault_is_an_empty_list():
     # M1: magi-rs 0.25.0 prints "(vault empty)" with exit 0; it must not read as a failed ls.
     with open(_LS_EMPTY_FIXTURE, encoding="utf-8") as handle:
