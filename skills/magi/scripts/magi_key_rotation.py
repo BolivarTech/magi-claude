@@ -783,7 +783,8 @@ class KeyRotation:
             if store.holds_written_key(workdir):
                 raise RotationFailedError(
                     f"the new {MAGI_DIR}/ at {magi_dir} was created by this rotation but its key could not be "
-                    f"verified ({_reason(error)}); fix the cause and verify again, the old one is at "
+                    f"verified ({_reason(error)}); fix the cause, then run any --ollama command (its preflight "
+                    f"verifies the key); the old one is at "
                     f"{os.path.join(backup_dir, MAGI_DIR)}: do not move the exposed backup back"
                 ) from error
             raise _failure(_reason(error)) from error
