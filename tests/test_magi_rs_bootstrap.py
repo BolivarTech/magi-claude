@@ -40,6 +40,7 @@ from magi_rs_bootstrap import (
     sweep,
     verified_executable,
 )
+from magi_rs_env import EnvironmentPolicy
 from magi_rs_pin import Asset, Pin
 
 # --------------------------------------------------------------------------
@@ -1060,3 +1061,23 @@ def test_verified_executable_propagates_a_verification_failure():
     bootstrap = SimpleNamespace(ensure=lambda: "/bin/magi-rs", verify=_fail)
     with pytest.raises(VersionMismatchError):
         verified_executable(bootstrap)
+
+
+def test_the_version_probe_runs_with_the_allowlisted_environment_only(tmp_path, monkeypatch):
+    # The probe is a magi-rs child like any other: no API key, no passphrase, no loader variable.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-leak")
+    monkeypatch.setenv("MAGI_PASSPHRASE", "leak")
+    monkeypatch.setenv("LD_PRELOAD", "/tmp/evil.so")
+    seen: dict[str, object] = {}
+
+    def _run(argv, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(stdout="not-the-pinned-version", stderr="", returncode=0)
+
+    monkeypatch.setattr("magi_rs_bootstrap.subprocess.run", _run)
+    with pytest.raises(VersionMismatchError):
+        BinaryBootstrap(_pin_with("0" * 64), str(tmp_path))._require_version("magi-rs")
+    assert seen.get("env") == EnvironmentPolicy.build(os.environ)
+    env = seen.get("env")
+    assert isinstance(env, dict)
+    assert not {"OPENAI_API_KEY", "MAGI_PASSPHRASE", "LD_PRELOAD"} & set(env)
