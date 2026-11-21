@@ -106,8 +106,8 @@ _FILE_GRANT = "F"
 """Full control on the key file."""
 _DIRECTORY_GRANT = "(OI)(CI)F"
 """Full control on the directory, inherited by the files and folders inside it."""
-_REMOVE_GRANTS = "/remove:g"
-_REMOVE_DENIES = "/remove:d"
+_REMOVE_ENTRIES = "/remove"
+"""Removes every explicit entry, allow and deny alike, of the SIDs that follow it."""
 _DENY_ACE_TYPE = "D"
 """``ACCESS_DENIED_ACE_TYPE`` in SDDL. Used only to word a verify failure, never to pass one."""
 _ACE_TYPE_INDEX = 0
@@ -116,8 +116,8 @@ _ROTATE_COMMAND = "--ollama-rotate-key"
 _MKDIR_EXPLICIT_SIDS = ("S-1-3-4", "S-1-5-18", "S-1-5-32-544")
 """OWNER RIGHTS, SYSTEM and Administrators: the explicit ACEs ``os.mkdir(mode=0o700)`` writes on Windows.
 
-``/inheritance:r`` drops only inherited ACEs, so these are removed by name;
-any other explicit ACE survives hardening and is caught by ``verify``.
+``/inheritance:r`` drops only inherited ACEs, so these are removed by name,
+together with every other foreign SID the DACL holds (read before hardening).
 """
 
 _SID_PATTERN = re.compile(r"S-1-\d+(?:-\d+)+")
@@ -667,12 +667,13 @@ class WindowsPermissionGuard(PermissionGuard):
     def harden(self, path: str, directory: bool) -> None:
         """Cut inheritance and grant full control to the current user's SID only.
 
-        The same ``icacls`` call also removes the explicit allow ACEs
-        ``os.mkdir(mode=0o700)`` leaves on Windows (``_MKDIR_EXPLICIT_SIDS``)
-        and every explicit deny ACE the DACL holds (read natively first, aliases
-        resolved), so the DACL only ever narrows. A DACL the owner cannot read
-        (e.g. a deny of read control without the owner's implicit rights) fails
-        closed here.
+        The same ``icacls`` call removes, with one ``/remove`` (allow and deny
+        entries alike), every foreign SID: those ``os.mkdir(mode=0o700)`` leaves
+        on Windows (``_MKDIR_EXPLICIT_SIDS``) and every one the DACL holds (read
+        natively first, aliases resolved). A deny is never removed while its
+        SID's allow stays, so hardening never widens access; the DACL only ever
+        narrows. A DACL the owner cannot read (e.g. a deny of read control
+        without the owner's implicit rights) fails closed here.
 
         Args:
             path: The file or directory to restrict.
@@ -685,8 +686,8 @@ class WindowsPermissionGuard(PermissionGuard):
         try:
             grant = _DIRECTORY_GRANT if directory else _FILE_GRANT
             sid = self.current_sid()
-            removals = [f"*{other}" for other in _MKDIR_EXPLICIT_SIDS if other != sid]
-            denies = [f"*{other}" for other in self._foreign_deny_sids(path, sid)]
+            foreign = [other for other in _MKDIR_EXPLICIT_SIDS if other != sid]
+            foreign.extend(self._foreign_sids(path, sid))
             self._runner(
                 [
                     _system_tool(_ICACLS_PARTS),
@@ -694,9 +695,8 @@ class WindowsPermissionGuard(PermissionGuard):
                     _REMOVE_INHERITANCE,
                     _REPLACE_GRANT,
                     f"*{sid}:{grant}",
-                    _REMOVE_GRANTS,
-                    *removals,
-                    *([_REMOVE_DENIES, *denies] if denies else []),
+                    _REMOVE_ENTRIES,
+                    *(f"*{other}" for other in dict.fromkeys(foreign)),
                 ]
             )
         except (OSError, ValueError) as error:
@@ -704,8 +704,8 @@ class WindowsPermissionGuard(PermissionGuard):
                 f"cannot restrict {path} to its owner ({one_line(str(error))})"
             ) from error
 
-    def _foreign_deny_sids(self, path: str, sid: str) -> list[str]:
-        """Return the numeric SIDs, other than ``sid``, of every deny ACE on ``path``.
+    def _foreign_sids(self, path: str, sid: str) -> list[str]:
+        """Return the numeric SIDs, other than ``sid``, of every ACE on ``path``, whatever its type.
 
         Args:
             path: The file or directory.
@@ -720,11 +720,12 @@ class WindowsPermissionGuard(PermissionGuard):
         """
         _, aces = _parse_dacl_aces(self.read_sddl(path))
         resolved: dict[str, str] = {}
-        denied = []
-        for ace_type, ace_sid in aces:
-            if ace_type == _DENY_ACE_TYPE and self._is_foreign(ace_sid, sid, resolved):
-                denied.append(resolved.get(ace_sid, ace_sid))
-        return list(dict.fromkeys(denied))
+        foreign = [
+            resolved.get(ace_sid, ace_sid)
+            for _, ace_sid in aces
+            if self._is_foreign(ace_sid, sid, resolved)
+        ]
+        return list(dict.fromkeys(foreign))
 
     def verify(self, path: str, directory: bool) -> None:
         """Require a protected DACL whose every ACE is the current user's SID.
