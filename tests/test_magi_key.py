@@ -391,3 +391,34 @@ def test_comparing_a_key_that_cannot_be_encoded_never_raises_and_is_unequal():
     assert (odd == ascii_key) is False and (ascii_key == odd) is False
     assert (odd == MagiKey("\u00f1" * 44)) is False  # unencodable values never compare equal
     assert (ascii_key == MagiKey("a" * 44)) is True
+
+
+def _junction_or_skip(link, target):
+    """Make ``link`` a directory link to ``target`` (a junction on Windows); skip where impossible."""
+    try:
+        if sys.platform == "win32":
+            import _winapi
+
+            _winapi.CreateJunction(str(target), str(link))
+        else:
+            os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"cannot create a link here: {error}")
+
+
+@pytest.mark.parametrize("linked", [".magi", ".magi/.secret"])
+def test_persist_refuses_a_linked_key_directory_before_writing_anything(tmp_path, linked):
+    # [L1] the write path never follows a link: the key would land wherever the link points.
+    work = tmp_path / "work"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if linked == ".magi/.secret":
+        (work / ".magi").mkdir(parents=True)
+    else:
+        work.mkdir()
+    _junction_or_skip(work / linked, outside)
+    store = _store()
+    with pytest.raises(KeyHardeningError) as exc:
+        store.persist(str(work), store.new_key())
+    assert "is a link" in str(exc.value) and "\n" not in str(exc.value)
+    assert os.listdir(outside) == []
