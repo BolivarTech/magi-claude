@@ -107,6 +107,11 @@ _FILE_GRANT = "F"
 _DIRECTORY_GRANT = "(OI)(CI)F"
 """Full control on the directory, inherited by the files and folders inside it."""
 _REMOVE_GRANTS = "/remove:g"
+_REMOVE_DENIES = "/remove:d"
+_DENY_ACE_TYPE = "D"
+"""``ACCESS_DENIED_ACE_TYPE`` in SDDL. Used only to word a verify failure, never to pass one."""
+_ACE_TYPE_INDEX = 0
+_ROTATE_COMMAND = "--ollama-rotate-key"
 
 _MKDIR_EXPLICIT_SIDS = ("S-1-3-4", "S-1-5-18", "S-1-5-32-544")
 """OWNER RIGHTS, SYSTEM and Administrators: the explicit ACEs ``os.mkdir(mode=0o700)`` writes on Windows.
@@ -388,6 +393,42 @@ def _system_tool(parts: tuple[str, ...]) -> str:
     return ntpath.join(os.environ.get("SystemRoot", _DEFAULT_SYSTEM_ROOT), *parts)
 
 
+def _parse_dacl_aces(sddl: str) -> tuple[bool, list[tuple[str, str]]]:
+    """Return whether the DACL is protected and the ``(type, sid)`` of every ACE.
+
+    The parsing rules of :func:`parse_sddl_dacl`, which is built on it. O(n)
+    over the SDDL length.
+
+    Args:
+        sddl: A security descriptor in SDDL form.
+
+    Returns:
+        ``(protected, aces)``; ``aces`` lists each ACE's type field (``A``,
+        ``D``, ...) and SID field, in order.
+
+    Raises:
+        ValueError: As :func:`parse_sddl_dacl`.
+    """
+    descriptor = sddl.strip()
+    # Assumes the section order O:, G:, D:, then S: as Get-Acl emits it.
+    match = _DACL_PATTERN.search(descriptor)
+    if match is None:
+        raise ValueError("the security descriptor has no DACL")
+    rest = descriptor[match.end() :]
+    if rest and not rest.startswith(_SACL_PREFIX):
+        raise ValueError("the DACL holds a malformed ACE")
+    flags = match.group("flags")
+    if not _DACL_FLAGS_PATTERN.fullmatch(flags):
+        raise ValueError(f"the DACL has unknown flags {flags!r}")
+    aces = []
+    for ace in _ACE_PATTERN.findall(match.group("aces")):
+        fields = ace.split(";")
+        if len(fields) != _ACE_FIELD_COUNT or not fields[_ACE_SID_INDEX]:
+            raise ValueError("the DACL holds a malformed ACE")
+        aces.append((fields[_ACE_TYPE_INDEX], fields[_ACE_SID_INDEX]))
+    return _PROTECTED_FLAG in flags, aces
+
+
 def parse_sddl_dacl(sddl: str) -> tuple[bool, list[str]]:
     """Return whether the DACL is protected and the SID of every ACE.
 
@@ -411,24 +452,8 @@ def parse_sddl_dacl(sddl: str) -> tuple[bool, list[str]]:
         >>> parse_sddl_dacl("D:PAI(A;;FA;;;S-1-5-18)")
         (True, ['S-1-5-18'])
     """
-    descriptor = sddl.strip()
-    # Assumes the section order O:, G:, D:, then S: as Get-Acl emits it.
-    match = _DACL_PATTERN.search(descriptor)
-    if match is None:
-        raise ValueError("the security descriptor has no DACL")
-    rest = descriptor[match.end() :]
-    if rest and not rest.startswith(_SACL_PREFIX):
-        raise ValueError("the DACL holds a malformed ACE")
-    flags = match.group("flags")
-    if not _DACL_FLAGS_PATTERN.fullmatch(flags):
-        raise ValueError(f"the DACL has unknown flags {flags!r}")
-    sids = []
-    for ace in _ACE_PATTERN.findall(match.group("aces")):
-        fields = ace.split(";")
-        if len(fields) != _ACE_FIELD_COUNT or not fields[_ACE_SID_INDEX]:
-            raise ValueError("the DACL holds a malformed ACE")
-        sids.append(fields[_ACE_SID_INDEX])
-    return _PROTECTED_FLAG in flags, sids
+    protected, aces = _parse_dacl_aces(sddl)
+    return protected, [sid for _, sid in aces]
 
 
 class PermissionGuard(ABC):
@@ -642,9 +667,12 @@ class WindowsPermissionGuard(PermissionGuard):
     def harden(self, path: str, directory: bool) -> None:
         """Cut inheritance and grant full control to the current user's SID only.
 
-        The same ``icacls`` call also removes the explicit ACEs
-        ``os.mkdir(mode=0o700)`` leaves on Windows (``_MKDIR_EXPLICIT_SIDS``),
-        so the DACL only ever narrows.
+        The same ``icacls`` call also removes the explicit allow ACEs
+        ``os.mkdir(mode=0o700)`` leaves on Windows (``_MKDIR_EXPLICIT_SIDS``)
+        and every explicit deny ACE the DACL holds (read natively first, aliases
+        resolved), so the DACL only ever narrows. A DACL the owner cannot read
+        (e.g. a deny of read control without the owner's implicit rights) fails
+        closed here.
 
         Args:
             path: The file or directory to restrict.
@@ -652,12 +680,13 @@ class WindowsPermissionGuard(PermissionGuard):
                 inherited by what it contains.
 
         Raises:
-            KeyHardeningError: The SID could not be read or ``icacls`` failed.
+            KeyHardeningError: The SID or the DACL could not be read, or ``icacls`` failed.
         """
         try:
             grant = _DIRECTORY_GRANT if directory else _FILE_GRANT
             sid = self.current_sid()
             removals = [f"*{other}" for other in _MKDIR_EXPLICIT_SIDS if other != sid]
+            denies = [f"*{other}" for other in self._foreign_deny_sids(path, sid)]
             self._runner(
                 [
                     _system_tool(_ICACLS_PARTS),
@@ -667,12 +696,35 @@ class WindowsPermissionGuard(PermissionGuard):
                     f"*{sid}:{grant}",
                     _REMOVE_GRANTS,
                     *removals,
+                    *([_REMOVE_DENIES, *denies] if denies else []),
                 ]
             )
         except (OSError, ValueError) as error:
             raise KeyHardeningError(
                 f"cannot restrict {path} to its owner ({one_line(str(error))})"
             ) from error
+
+    def _foreign_deny_sids(self, path: str, sid: str) -> list[str]:
+        """Return the numeric SIDs, other than ``sid``, of every deny ACE on ``path``.
+
+        Args:
+            path: The file or directory.
+            sid: The current user's SID.
+
+        Returns:
+            The distinct SIDs, in DACL order, aliases resolved to numeric SIDs.
+
+        Raises:
+            OSError: The DACL could not be read or an alias resolved.
+            ValueError: The DACL does not parse.
+        """
+        _, aces = _parse_dacl_aces(self.read_sddl(path))
+        resolved: dict[str, str] = {}
+        denied = []
+        for ace_type, ace_sid in aces:
+            if ace_type == _DENY_ACE_TYPE and self._is_foreign(ace_sid, sid, resolved):
+                denied.append(resolved.get(ace_sid, ace_sid))
+        return list(dict.fromkeys(denied))
 
     def verify(self, path: str, directory: bool) -> None:
         """Require a protected DACL whose every ACE is the current user's SID.
@@ -683,25 +735,36 @@ class WindowsPermissionGuard(PermissionGuard):
 
         Raises:
             KeyUnverifiableError: The DACL, the current SID or an alias could
-                not be read or parsed; the message names the cause.
-            KeyExposedError: The DACL inherits or grants another SID. The
-                message is one line naming the foreign SIDs (never the current
-                user's) and whether the DACL is protected.
+                not be read or parsed; or every foreign entry is a deny entry
+                (it takes access away, so it is not an exposure; remove it).
+            KeyExposedError: The DACL inherits, or holds a non-deny entry for
+                another SID. The message is one line naming the foreign SIDs
+                (never the current user's) and whether the DACL is protected.
+
+        Any foreign ACE fails verification whatever its type: the type only
+        chooses between the two failures and their wording.
         """
         try:
             sid = self.current_sid()
-            protected, sids = parse_sddl_dacl(self.read_sddl(path))
+            protected, aces = _parse_dacl_aces(self.read_sddl(path))
             resolved: dict[str, str] = {}
-            foreign = [
-                ace_sid
-                for ace_sid in dict.fromkeys(sids)
-                if self._is_foreign(ace_sid, sid, resolved)
-            ]
+            foreign: dict[str, set[str]] = {}
+            for ace_type, ace_sid in aces:
+                if self._is_foreign(ace_sid, sid, resolved):
+                    foreign.setdefault(ace_sid, set()).add(ace_type)
         except (OSError, ValueError) as error:
             raise KeyUnverifiableError(f"cannot read the permissions of {path}: {error}") from error
         protection = f"(DACL protected: {_YES if protected else _NO})"
+        with_access = [ace_sid for ace_sid, types in foreign.items() if types != {_DENY_ACE_TYPE}]
+        if with_access:
+            raise KeyExposedError(
+                f"{path} has an access entry for {', '.join(with_access)} {protection}"
+            )
         if foreign:
-            raise KeyExposedError(f"{path} grants access to {', '.join(foreign)} {protection}")
+            raise KeyUnverifiableError(
+                f"{path} has a deny entry for {', '.join(foreign)}: remove it before considering "
+                f"{_ROTATE_COMMAND} {protection}"
+            )
         if not protected:
             raise KeyExposedError(f"{path} still inherits permissions from its parent {protection}")
 
