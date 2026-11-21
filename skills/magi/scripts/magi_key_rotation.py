@@ -212,6 +212,25 @@ def _raise_walk_error(error: OSError) -> None:
     raise error
 
 
+def _restore_instruction(destination: str, *, inspect_first: bool = False, item: str = "it") -> str:
+    """Return the recovery instruction that ends a rotation message: put the old ``.magi/`` back.
+
+    Args:
+        destination: The ``.magi/`` path the old tree goes back to.
+        inspect_first: True when something else now sits at ``destination``, so the
+            operator must look at it and move it aside before restoring.
+        item: How the instruction names what is moved back (``"it"``, ``"the old one"``).
+
+    Returns:
+        ``"move <item> back to <destination> to retry"``, preceded by the inspect-and-move-aside
+        step when ``inspect_first`` is true.
+    """
+    restore = f"move {item} back to {destination} to retry"
+    if inspect_first:
+        return f"inspect {destination} and move that aside, then {restore}"
+    return restore
+
+
 class _RecordingKeyStore(KeyStore):
     """The store handed to ``init``: a ``KeyStore`` that remembers the keys it was asked to persist.
 
@@ -594,7 +613,7 @@ class KeyRotation:
             if not os.path.lexists(magi_dir):
                 raise RotationFailedError(
                     f"moving {magi_dir} to {target} failed ({reason}) after the copy finished: the source is "
-                    f"gone and {target} holds the complete copy; move it back to {magi_dir} to retry"
+                    f"gone and {target} holds the complete copy; {_restore_instruction(magi_dir)}"
                 ) from error
             if not self._source_still_complete(magi_dir, target):
                 raise RotationFailedError(
@@ -645,7 +664,7 @@ class KeyRotation:
             raise RotationFailedError(
                 f"the old {MAGI_DIR}/ was moved to {os.path.join(backup_dir, MAGI_DIR)} but could not be "
                 f"restricted to its owner ({self._reason(error)}), so it may be exposed; no new "
-                f"{MAGI_DIR}/ was created: move it back to {os.path.join(workdir, MAGI_DIR)} to retry"
+                f"{MAGI_DIR}/ was created: {_restore_instruction(os.path.join(workdir, MAGI_DIR))}"
             ) from error
 
     @staticmethod
@@ -720,8 +739,8 @@ class KeyRotation:
             raise RotationFailedError(
                 f"a {MAGI_DIR}/ appeared at {magi_dir} before the new one could be created; it was left "
                 f"as it is because this rotation did not create it, and the old one is intact at "
-                f"{os.path.join(backup_dir, MAGI_DIR)}; inspect {magi_dir} and move that aside, then move "
-                f"the old one back to {magi_dir} to retry"
+                f"{os.path.join(backup_dir, MAGI_DIR)}; "
+                f"{_restore_instruction(magi_dir, inspect_first=True, item='the old one')}"
             ) from error
         except BaseException as error:  # noqa: BLE001 - any init failure, an interrupt included, ends in the described state
             detail = self._reason(error)
@@ -738,7 +757,7 @@ class KeyRotation:
                 leftover = self._unreported_leftover(workdir, magi_dir)
             raise RotationFailedError(
                 f"creating the new {MAGI_DIR}/ failed ({detail}){leftover}: the old one is intact at "
-                f"{os.path.join(backup_dir, MAGI_DIR)}; move it back to {magi_dir} to retry"
+                f"{os.path.join(backup_dir, MAGI_DIR)}; {_restore_instruction(magi_dir)}"
             ) from error
 
     def _unreported_leftover(self, workdir: str, magi_dir: str) -> str:
@@ -794,8 +813,8 @@ class KeyRotation:
             return RotationFailedError(
                 f"the {MAGI_DIR}/ now at {magi_dir} does not hold a verified key of this rotation "
                 f"({reason}); it was left as it is because this rotation may not have created it, "
-                f"and the old one is intact at {os.path.join(backup_dir, MAGI_DIR)}; inspect {magi_dir} and "
-                f"move that aside, then move it back to {magi_dir} to retry"
+                f"and the old one is intact at {os.path.join(backup_dir, MAGI_DIR)}; "
+                f"{_restore_instruction(magi_dir, inspect_first=True)}"
             )
 
         try:
