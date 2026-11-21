@@ -543,7 +543,9 @@ class KeyRotation:
         try:
             os.makedirs(candidate, mode=DIR_MODE)
         except BaseException as error:  # noqa: BLE001 - before the move, even an interrupt must end described
-            leftover = self._remove_created([*created_parents, candidate])
+            # A FileExistsError means another process made the leaf (and so its parents): nothing here is ours.
+            ours = [] if isinstance(error, FileExistsError) else [*created_parents, candidate]
+            leftover = self._remove_created(ours)
             raise RotationFailedError(
                 f"cannot create the rotation backup {candidate} ({self._reason(error)}){leftover}: "
                 "nothing was moved"
@@ -597,10 +599,12 @@ class KeyRotation:
         """
         if not os.path.isdir(magi_dir):
             return False
-        if not os.path.lexists(target):
-            return (
-                True  # the move failed before anything was copied: the source is trivially complete
-            )
+        try:
+            os.lstat(target)
+        except FileNotFoundError:
+            return True  # nothing was copied: the source is trivially complete
+        except OSError:
+            return False  # a copy that cannot be inspected cannot be proven absent
         try:
             for current, dirs, files in os.walk(target, onerror=_raise_walk_error):
                 relative = os.path.relpath(current, target)
