@@ -382,3 +382,12 @@ def test_read_unverified_of_an_unreadable_file_is_missing_but_not_empty(tmp_path
     with pytest.raises(KeyMissingError) as exc:
         _store().read_unverified(str(unreadable))
     assert not isinstance(exc.value, EmptyKeyError)
+
+
+def test_comparing_a_key_that_cannot_be_encoded_never_raises_and_is_unequal():
+    # [m-3] equality is part of every redaction/rotation path: it must not raise on odd text.
+    odd = MagiKey("\u00f1" * 44)
+    ascii_key = MagiKey("a" * 44)
+    assert (odd == ascii_key) is False and (ascii_key == odd) is False
+    assert (odd == MagiKey("\u00f1" * 44)) is False  # unencodable values never compare equal
+    assert (ascii_key == MagiKey("a" * 44)) is True
