@@ -617,9 +617,12 @@ class KeyRotation:
             ) from error
 
     def _reharden(self, backup_dir: str, workdir: str) -> None:
-        """Restrict ``<id>`` and every directory and file of the moved ``.magi/`` to the owner, then verify each.
+        """Restrict ``<id>`` again, then restrict and verify every directory and file of the moved ``.magi/``.
 
-        No path relies on inheritance: a move across volumes does not carry the
+        ``<id>`` itself was verified before the move (:meth:`_secure_backup_dir`)
+        and is only hardened again here; every entry of the moved ``.magi/``
+        (the directory itself included) is hardened and then verified. No path
+        relies on inheritance: a move across volumes does not carry the
         ACL, and a same-volume rename keeps each child's own, possibly loosened
         one. The tree is listed first, without following links, and any link or
         reparse point stops the rotation before anything is hardened: hardening
