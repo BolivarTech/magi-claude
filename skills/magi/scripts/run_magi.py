@@ -165,6 +165,14 @@ DEFAULT_MAX_ATTEMPTS = 2
 #: TOML "already validates this way". It did not: it accepted 1000 (MAGI gate, Balthasar).
 
 
+_VAULT_SET_FLAG = "--ollama-vault-set"
+_ROTATE_KEY_FLAG = "--ollama-rotate-key"
+_YES_FLAG = "--yes"
+"""The key subcommands and the flag that authorises a rotation: parse_args, main and the handlers use them."""
+_VAULT_VALUE_PROMPT = "API key value (input hidden): "
+_LINE_ENDINGS = "\r\n"
+
+
 def _max_attempts(raw: str) -> int:
     """Validate ``--max-attempts``: an integer in ``[MIN_ATTEMPTS, MAX_ATTEMPTS_CAP]``.
 
@@ -2170,13 +2178,6 @@ def _write_report_file(report_text: str, out_path: str) -> None:
         except OSError:
             pass
         raise
-
-
-_VAULT_SET_FLAG = "--ollama-vault-set"
-_ROTATE_KEY_FLAG = "--ollama-rotate-key"
-_VAULT_VALUE_PROMPT = "API key value (input hidden): "
-_LINE_ENDINGS = "\r\n"
-_YES_FLAG = "--yes"
 
 
 def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
