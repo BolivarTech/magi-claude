@@ -1381,3 +1381,18 @@ def test_a_move_that_failed_before_creating_the_copy_reports_the_source_unchange
     assert "is unchanged" in message and "both copies" not in message
     assert os.listdir(tmp_path / "rotated") == []
     assert (work / ".magi" / "magi.toml").read_text() == "old"
+
+
+def test_the_rotation_refuses_any_reparse_point_and_names_what_it_is(tmp_path, monkeypatch):
+    # [m-2] a cloud-sync placeholder is refused too (data safety), without being called a link.
+    from magi_key_rotation import _LinkInBackupError
+
+    magi = tmp_path / "id" / ".magi"
+    magi.mkdir(parents=True)
+    status = SimpleNamespace(st_mode=0o40700, st_file_attributes=0x400, st_reparse_tag=0x9000601A)
+    monkeypatch.setattr("magi_key_permissions.os.lstat", lambda path: status)
+    with pytest.raises(_LinkInBackupError) as exc:
+        KeyRotation._backup_entries(str(magi))
+    message = str(exc.value)
+    assert ".magi is a reparse point" in message and "is a link" not in message
+    assert "\n" not in message

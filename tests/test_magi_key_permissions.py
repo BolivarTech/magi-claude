@@ -944,3 +944,35 @@ def test_permission_tool_output_is_decoded_with_the_console_code_page_on_windows
     assert _run(["tool"]) == "out"
     assert captured.get("encoding") == expected_encoding
     assert captured["errors"] == "replace" and captured["text"] is True
+
+
+def _fake_lstat(monkeypatch, mode, attributes, tag):
+    status = SimpleNamespace(st_mode=mode, st_file_attributes=attributes, st_reparse_tag=tag)
+    monkeypatch.setattr("magi_key_permissions.os.lstat", lambda path: status)
+
+
+_REPARSE = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
+_PLAIN_FILE_MODE = 0o100600
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [0xA000000C, 0xA0000003],  # IO_REPARSE_TAG_SYMLINK, IO_REPARSE_TAG_MOUNT_POINT (a junction)
+)
+def test_verify_calls_a_symlink_or_junction_a_link(monkeypatch, tag):
+    # [m-2] the message tells the operator what the entry is.
+    _fake_lstat(monkeypatch, _PLAIN_FILE_MODE, _REPARSE, tag)
+    with pytest.raises(KeyUnverifiableError) as exc:
+        WindowsPermissionGuard(runner=lambda argv: "").verify("k", directory=False)
+    assert "k is a link: replace it with a real file/directory" in str(exc.value)
+
+
+def test_verify_fails_closed_on_another_reparse_point_and_says_so(monkeypatch):
+    # [m-2] a cloud-sync placeholder is not a link, but it is never trusted with a key either.
+    _fake_lstat(monkeypatch, _PLAIN_FILE_MODE, _REPARSE, 0x9000601A)  # a cloud-files tag
+    with pytest.raises(KeyUnverifiableError) as exc:
+        WindowsPermissionGuard(runner=lambda argv: "").verify("k", directory=False)
+    message = str(exc.value)
+    assert "is a reparse point" in message and "cloud-sync placeholder" in message
+    assert "is a link" not in message and "local, non-synced folder" in message
+    assert "\n" not in message
