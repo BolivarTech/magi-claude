@@ -1351,18 +1351,16 @@ def _default_agents_dir() -> str:
 def _render_fatal(exc: BaseException) -> str:
     """Render a fail-closed error as the ONE ``[FATAL]`` line every CLI site prints.
 
-    The notes a cleanup attached (``__notes__``, e.g. "delete it by hand") are
-    appended, and every run of whitespace -- newlines included -- collapses to
-    one space, so a multi-line message can never spill a second line.
+    Every run of whitespace -- newlines included -- collapses to one space, so a
+    multi-line message can never spill a second line.
 
     Args:
         exc: The error to render.
 
     Returns:
-        ``"[FATAL] <message> <notes...>"`` on a single line, without a newline.
+        ``"[FATAL] <message>"`` on a single line, without a newline.
     """
-    detail = " ".join([str(exc), *getattr(exc, "__notes__", [])])
-    return f"[FATAL] {one_line(detail)}"
+    return f"[FATAL] {one_line(str(exc))}"
 
 
 def check_prompts(agents_dir: str) -> None:

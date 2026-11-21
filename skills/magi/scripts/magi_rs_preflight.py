@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import os
 
-from magi_key import KeyStore, MagiKey
+from magi_key import KEY_DIR_PARTS, KeyStore, MagiKey
 
-_CONFIG_RELATIVE_PATH = os.path.join(".magi", "magi.toml")
+_CONFIG_RELATIVE_PATH = os.path.join(KEY_DIR_PARTS[0], "magi.toml")
 _INIT_COMMAND = "/magi --ollama-init"
 
 

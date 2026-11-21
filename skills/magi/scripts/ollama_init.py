@@ -19,12 +19,13 @@ import os
 import shutil
 import subprocess
 
-from magi_key import KEY_ENCODING, KeyStore, MagiKey
+from magi_key import KEY_DIR_PARTS, KeyMissingError, KeyStore, KeyStoreError, MagiKey
 from magi_key_permissions import default_key_store
 from magi_rs_bootstrap import BinaryBootstrap, verified_executable
 from magi_rs_env import EnvironmentPolicy
 from magi_rs_paths import bin_dir, pin_path, plugin_root
 from magi_rs_pin import Pin
+from one_line import one_line
 
 _INIT_SUBCOMMAND = "init"
 _WORKDIR_FLAG = "-w"
@@ -33,7 +34,7 @@ _INIT_TIMEOUT_SECONDS = 120
 far beyond any healthy run and only bounds a hung child."""
 
 
-_MAGI_DIR = ".magi"
+_MAGI_DIR = KEY_DIR_PARTS[0]
 _ALREADY_INITIALISED = (
     f"{_MAGI_DIR}/ already exists in {{workdir}}: left untouched (nothing was initialised, "
     "no key was created)."
@@ -79,26 +80,32 @@ _OTHER_PROCESS_NOTE = (
 )
 
 
-def _holds_other_key(key_file: str, key: MagiKey) -> bool:
-    """Tell whether ``key_file`` exists and holds anything but ``key``.
+def _holds_other_key(store: KeyStore, workdir: str, key: MagiKey) -> bool:
+    """Tell whether the key file under ``workdir`` holds a key other than ``key``.
 
-    A key file that cannot be read counts as someone else's, so a cleanup never
+    Read through ``store.read_unverified``, the key file's only reader. An
+    absent or empty key file holds no key. A key file that exists but cannot
+    be read counts as someone else's (``read_unverified`` chains the read
+    failure as the cause of its ``KeyMissingError``), so a cleanup never
     deletes a key it cannot prove is its own.
 
     Args:
-        key_file: ``<workdir>/.magi/.secret/magi.key``.
+        store: The key store of this call.
+        workdir: The project root.
         key: The key this call generated.
 
     Returns:
-        True when another key is there (or an unreadable one); False when
-        there is none or it is ``key``.
+        True when another key, or an unreadable one, is there; False when
+        there is none, it is empty, or it is ``key``.
     """
+    key_file = store.key_path(workdir)
     if not os.path.lexists(key_file):
         return False
     try:
-        with open(key_file, encoding=KEY_ENCODING) as handle:
-            return MagiKey(handle.read().strip()) != key
-    except (OSError, UnicodeDecodeError):
+        return store.read_unverified(key_file) != key
+    except KeyMissingError as error:
+        return error.__cause__ is not None
+    except (KeyStoreError, OSError):
         return True
 
 
@@ -118,10 +125,11 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
         MagiDirExistsError: ``<workdir>/.magi/`` already exists; nothing was
             called and nothing was written.
         Any exception from the child launch or the key store: the ``.magi/`` this call
-            created is removed first; if that removal fails the message says to delete it by hand.
-            A ``.magi/`` that holds a key this call did not write (another process initialised it
-            meanwhile, e.g. ``persist`` raised ``FileExistsError``) is never removed: the error
-            carries one line saying so and naming it.
+            created is removed first and the exception propagates unchanged. When something
+            needs saying instead (the removal failed, so the message says to delete it by hand;
+            or the ``.magi/`` now holds a key this call did not write, e.g. ``persist`` raised
+            ``FileExistsError`` because another process initialised it, so it is never removed),
+            an ``OllamaInitError`` carrying that sentence is raised from the original.
         OllamaInitError: ``magi-rs init`` exited non-zero; the message is its
             output with the new key redacted. No key is persisted and the
             ``.magi/`` this call saw appear is removed.
@@ -162,13 +170,12 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
             raise OllamaInitError(output)
         store.persist(workdir, key)
     except BaseException as error:
-        if _holds_other_key(store.key_path(workdir), key):
+        if _holds_other_key(store, workdir, key):
             note = _OTHER_PROCESS_NOTE.format(magi_dir=magi_dir)
         else:
             note = _remove_created_magi_dir(magi_dir)
-        if isinstance(error, OllamaInitError) and note:
-            raise OllamaInitError(f"{error}\n{note}") from error
-        if note:
-            error.add_note(note)
-        raise
+        if not note:
+            raise
+        detail = one_line(key.redact(str(error))) or type(error).__name__
+        raise OllamaInitError(f"{detail}\n{note}") from error
     return output

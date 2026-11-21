@@ -691,8 +691,7 @@ class KeyRotation:
                 f"the old one back to {magi_dir} to retry"
             ) from error
         except BaseException as error:  # noqa: BLE001 - any init failure, an interrupt included, ends in the described state
-            raw = " ".join([str(error), *getattr(error, "__notes__", [])])
-            detail = one_line(store.redact(old_key.redact(raw))) or type(error).__name__
+            detail = one_line(store.redact(old_key.redact(str(error)))) or type(error).__name__
             leftover = ""
             if store.holds_written_key(workdir):
                 leftover = self._own_key_leftover(magi_dir, error)
