@@ -39,9 +39,16 @@ creates a new ``<workdir>/.magi`` through ``init``.
 Error paths (state left on disk, the clause of the one-line message, what the
 operator is told to do). Each row is pinned by tests in ``tests/test_magi_key_rotation.py``:
 the ``init`` rows by the parametrized
-``test_the_rotation_words_the_failure_by_the_leftover_init_reported``, the others by the
-test named for their stage (move, re-harden, verify, names), so this table is a map of
-pinned behaviour and not a second, unchecked source::
+``test_the_rotation_words_the_failure_by_the_leftover_init_reported``; pre-move by
+``test_a_backup_dir_creation_failure_without_a_message_still_names_its_cause`` and
+``test_an_unlistable_source_entry_is_not_told_to_remove_a_link``; move by
+``test_a_move_that_failed_before_creating_the_copy_reports_the_source_unchanged`` and
+``test_a_move_that_copied_and_then_failed_mid_delete_keeps_both_copies_and_names_them``;
+re-harden by ``test_a_backup_that_cannot_be_rehardened_names_the_guards_reason``; verify by
+``test_a_magi_dir_the_rotation_did_not_create_is_never_reported_as_rotated``; names by
+``test_a_vault_listing_that_fails_reports_why_in_one_line``. An anchor test fails if any
+cited name stops existing, so this table is a map of pinned behaviour and not a second,
+unchecked source::
 
     stage        state left on disk                       message says           operator verb
     -----------  ---------------------------------------  ---------------------  --------------

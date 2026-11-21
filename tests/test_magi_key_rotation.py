@@ -1717,3 +1717,15 @@ def test_both_entry_points_give_the_same_line_when_there_is_no_magi_dir(
     with pytest.raises(RotationFailedError) as exc:
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert printed == f"ERROR: {exc.value}"
+
+
+def test_every_test_the_rotation_error_table_cites_exists():
+    # [M5] the table in magi_key_rotation's docstring maps rows to pinned tests: a rename fails here.
+    import re
+
+    import magi_key_rotation
+
+    cited = set(re.findall(r"(?<![/\w])test_\w+", magi_key_rotation.__doc__ or ""))
+    assert len(cited) >= 8
+    defined = set(globals())
+    assert cited <= defined, sorted(cited - defined)
