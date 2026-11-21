@@ -25,6 +25,7 @@ from magi_key import (
     KEY_DIR_PARTS,
     REGENERATION_GUIDANCE,
     KeyHardeningError,
+    EmptyKeyError,
     KeyMissingError,
     KeyStore,
     KeyStoreError,
@@ -128,10 +129,10 @@ def _holds_other_key(store: KeyStore, workdir: str, key: MagiKey) -> bool:
     """Tell whether the key file under ``workdir`` holds a key other than ``key``.
 
     Read through ``store.read_unverified``, the key file's only reader. An
-    absent or empty key file holds no key. A key file that exists but cannot
-    be read counts as someone else's (``read_unverified`` chains the read
-    failure as the cause of its ``KeyMissingError``), so a cleanup never
-    deletes a key it cannot prove is its own.
+    absent or empty key file (``EmptyKeyError``) holds no key. A key file that
+    exists but cannot be read counts as someone else's, decided by the error's
+    type and never by its cause, so a cleanup never deletes a key it cannot
+    prove is its own.
 
     Args:
         store: The key store of this call.
@@ -147,8 +148,10 @@ def _holds_other_key(store: KeyStore, workdir: str, key: MagiKey) -> bool:
         return False
     try:
         return store.read_unverified(key_file) != key
-    except KeyMissingError as error:
-        return error.__cause__ is not None
+    except EmptyKeyError:
+        return False
+    except KeyMissingError:
+        return True
     except (KeyStoreError, OSError):
         return True
 

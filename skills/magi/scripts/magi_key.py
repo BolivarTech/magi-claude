@@ -71,6 +71,10 @@ class KeyMissingError(KeyStoreError):
     """The key is absent, empty or unreadable."""
 
 
+class EmptyKeyError(KeyMissingError):
+    """The key file exists but holds no key (an unreadable file is a plain ``KeyMissingError``)."""
+
+
 class KeyExposedError(KeyStoreError):
     """The key or its directory is readable by someone other than its owner."""
 
@@ -389,7 +393,8 @@ class KeyStore:
             The key, with surrounding whitespace removed.
 
         Raises:
-            KeyMissingError: The file cannot be read or decoded, or is empty.
+            EmptyKeyError: The file exists and is empty (a ``KeyMissingError``).
+            KeyMissingError: The file cannot be read or decoded.
         """
         try:
             with open(key_file, encoding=KEY_ENCODING) as handle:
@@ -397,7 +402,7 @@ class KeyStore:
         except (OSError, UnicodeDecodeError) as error:
             raise KeyMissingError(f"cannot read the magi-rs memory key at {key_file}") from error
         if not value:
-            raise KeyMissingError(
+            raise EmptyKeyError(
                 f"the magi-rs memory key at {key_file} is empty: {REGENERATION_GUIDANCE}"
             )
         return MagiKey(value)
