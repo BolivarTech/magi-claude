@@ -77,8 +77,11 @@ _PS_MODULE_PATH_VARIABLE = "PSMODULEPATH"
 """Dropped from PowerShell's environment: a PowerShell 7 module path inherited by
 Windows PowerShell 5.1 keeps ``Get-Acl`` from loading; unset, 5.1 rebuilds its default."""
 
-_STDERR_TAIL_CHARS = 300
-"""How much of a failed tool's stderr an error message carries."""
+_STDERR_EXCERPT_CHARS = 300
+"""How much of a failed tool's stderr an error message carries, from its start (the headline)."""
+
+_YES = "yes"
+_NO = "no"
 
 _SDDL_COMMAND = f"(Get-Acl -LiteralPath $env:{_ACL_PATH_VARIABLE}).Sddl"
 _POWERSHELL_ARGS = ("-NoProfile", "-NonInteractive", "-Command", _SDDL_COMMAND)
@@ -117,20 +120,22 @@ _ACE_FIELD_COUNT = 6
 _ACE_SID_INDEX = 5
 
 
-def _stderr_tail(error: subprocess.SubprocessError) -> str:
-    """Return the end of a failed tool's stderr as one bounded line.
+def _stderr_excerpt(error: subprocess.SubprocessError) -> str:
+    """Return the start of a failed tool's stderr as one bounded line.
+
+    The start, because PowerShell writes its headline first and the trace after.
 
     Args:
         error: The failure raised by ``subprocess.run``.
 
     Returns:
-        At most ``_STDERR_TAIL_CHARS`` characters, whitespace collapsed; empty
+        At most ``_STDERR_EXCERPT_CHARS`` characters, whitespace collapsed; empty
         when the tool wrote nothing.
     """
     stderr = getattr(error, "stderr", None) or ""
     if isinstance(stderr, bytes):
         stderr = stderr.decode(errors="replace")
-    return " ".join(stderr.split())[-_STDERR_TAIL_CHARS:]
+    return " ".join(stderr.split())[:_STDERR_EXCERPT_CHARS]
 
 
 def _run(argv: list[str], env: Mapping[str, str] | None = None) -> str:
@@ -145,7 +150,7 @@ def _run(argv: list[str], env: Mapping[str, str] | None = None) -> str:
 
     Raises:
         OSError: The tool could not start, timed out or exited non-zero; the
-            message names the tool, the exit code or timeout, and the tail of
+            message names the tool, the exit code or timeout, and the start of
             its stderr.
     """
     tool = ntpath.basename(argv[0])
@@ -161,14 +166,14 @@ def _run(argv: list[str], env: Mapping[str, str] | None = None) -> str:
         )
     except subprocess.CalledProcessError as error:
         raise OSError(
-            f"{tool} failed with exit code {error.returncode}: {_stderr_tail(error)}"
+            f"{tool} failed with exit code {error.returncode}: {_stderr_excerpt(error)}"
         ) from error
     except subprocess.TimeoutExpired as error:
         raise OSError(
-            f"{tool} timed out after {_COMMAND_TIMEOUT_SECONDS} s: {_stderr_tail(error)}"
+            f"{tool} timed out after {_COMMAND_TIMEOUT_SECONDS} s: {_stderr_excerpt(error)}"
         ) from error
     except subprocess.SubprocessError as error:
-        raise OSError(f"{tool} failed: {_stderr_tail(error)}") from error
+        raise OSError(f"{tool} failed: {_stderr_excerpt(error)}") from error
     return completed.stdout
 
 
@@ -310,7 +315,7 @@ class PosixPermissionGuard(PermissionGuard):
         try:
             status = os.stat(path)
         except OSError as error:
-            raise KeyExposedError(f"cannot read the permissions of {path}") from error
+            raise KeyExposedError(f"cannot read the permissions of {path}: {error}") from error
         if status.st_uid != os.geteuid():
             raise KeyExposedError(f"{path} is owned by another user")
         if status.st_mode & _GROUP_AND_OTHER_BITS:
@@ -418,17 +423,21 @@ class WindowsPermissionGuard(PermissionGuard):
 
         Raises:
             KeyExposedError: The DACL inherits, grants another SID, or could
-                not be read or parsed.
+                not be read or parsed. The message is one line naming the
+                foreign SIDs (never the current user's) and whether the DACL is
+                protected, or the cause of the read failure.
         """
         try:
             sid = self.current_sid()
             protected, sids = parse_sddl_dacl(self.read_sddl(path))
         except (OSError, ValueError) as error:
-            raise KeyExposedError(f"cannot read the permissions of {path}") from error
+            raise KeyExposedError(f"cannot read the permissions of {path}: {error}") from error
+        foreign = list(dict.fromkeys(ace_sid for ace_sid in sids if ace_sid != sid))
+        protection = f"(DACL protected: {_YES if protected else _NO})"
+        if foreign:
+            raise KeyExposedError(f"{path} grants access to {', '.join(foreign)} {protection}")
         if not protected:
-            raise KeyExposedError(f"{path} still inherits permissions from its parent")
-        if any(ace_sid != sid for ace_sid in sids):
-            raise KeyExposedError(f"{path} grants access to someone other than its owner")
+            raise KeyExposedError(f"{path} still inherits permissions from its parent {protection}")
 
 
 def default_key_store() -> KeyStore:
