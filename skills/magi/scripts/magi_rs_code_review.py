@@ -216,8 +216,7 @@ class MagiRsCodeReview(TrioExecutor):
         self._executable = verified_executable(BinaryBootstrap(self._pin, self._bin_dir))
         self._key = ProjectPreflight.require_ready(self._workdir, self._key_store)
         argv = build_review_argv(self._executable, self._workdir, self._target, self._timeout)
-        stdout, stderr, overran = await self._launch(argv, on_state)
-        MagiRsTrio._persist_raw(output_dir, stdout)
+        stdout, stderr, overran = await self._launch(argv, on_state, output_dir)
         text = stdout.decode("utf-8", errors="replace")
         if overran:
             self._require_complete_envelope(text)
@@ -227,7 +226,7 @@ class MagiRsCodeReview(TrioExecutor):
         return MagiRsTrio._validate(self.last_result.consult, output_dir)
 
     async def _launch(
-        self, argv: list[str], on_state: Callable[[str, str], None] | None
+        self, argv: list[str], on_state: Callable[[str, str], None] | None, output_dir: str
     ) -> tuple[bytes, bytes, bool]:
         """Run the child to completion or to its deadline.
 
@@ -238,6 +237,8 @@ class MagiRsCodeReview(TrioExecutor):
         Args:
             argv: The command line.
             on_state: Optional progress callback.
+            output_dir: Where ``magi-rs-raw.json`` is written -- before a non-zero exit is
+                raised, so the paid output of a failed run is kept (redacted).
 
         Returns:
             ``(stdout, stderr, overran)``, both streams redacted of the key;
@@ -286,6 +287,7 @@ class MagiRsCodeReview(TrioExecutor):
             redact_captured(self._key, bytes(out)),
             redact_captured(self._key, bytes(err)),
         )
+        MagiRsTrio._persist_raw(output_dir, stdout)
         if not overran and process.returncode != 0:
             _emit(on_state, _TRIO_NODE, "failed")
             raise MagiRsProcessError(self._failure_message(process.returncode, stderr))
