@@ -888,3 +888,39 @@ def test_a_foreign_object_deny_beside_an_allow_for_the_same_sid_is_exposed():
     with pytest.raises(KeyExposedError) as raised:
         _windows_guard(sddl).verify("k", directory=False)
     assert not isinstance(raised.value, KeyUnverifiableError)
+
+
+def _link_or_skip(target, link, directory):
+    """Create a symlink (a junction for a directory on Windows); skip where the account cannot."""
+    try:
+        if sys.platform == "win32" and directory:
+            import _winapi
+
+            _winapi.CreateJunction(str(target), str(link))
+        else:
+            os.symlink(target, link, target_is_directory=directory)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"cannot create a link here: {error}")
+
+
+def _guard_for_this_platform():
+    return WindowsPermissionGuard() if sys.platform == "win32" else PosixPermissionGuard()
+
+
+@pytest.mark.parametrize("directory", [True, False])
+def test_verify_refuses_a_key_path_that_is_itself_a_link(tmp_path, directory):
+    # [V1] the rotation refuses links in .magi/; verify closes the same asymmetry for .secret/ and magi.key.
+    target = tmp_path / ("real-dir" if directory else "real-file")
+    if directory:
+        target.mkdir()
+    else:
+        target.write_text("x")
+    link = tmp_path / "link"
+    _link_or_skip(target, link, directory)
+    guard = _guard_for_this_platform()
+    guard.harden(str(target), directory)
+    with pytest.raises(KeyUnverifiableError) as exc:
+        guard.verify(str(link), directory)
+    message = str(exc.value)
+    assert str(link) in message and "is a link" in message and "\n" not in message
+    guard.verify(str(target), directory)
