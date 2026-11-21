@@ -30,7 +30,7 @@ from magi_key import (
     KeyStoreError,
     MagiKey,
 )
-from magi_key_permissions import default_key_store
+from magi_key_permissions import default_key_store, link_refusal
 from magi_rs_bootstrap import verified_plugin_executable
 from magi_rs_env import EnvironmentPolicy
 from one_line import one_line
@@ -188,6 +188,9 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
     Raises:
         MagiDirExistsError: ``<workdir>/.magi/`` already exists; nothing was
             called and nothing was written.
+        OllamaInitError: ``<workdir>/.magi`` is a link or reparse point (a broken one
+            included); nothing was called and nothing was written.
+        OSError: ``<workdir>/.magi`` exists but cannot be inspected.
         Any exception from the child launch or the key store: the ``.magi/`` this call
             created is removed first and the exception propagates unchanged. When something
             needs saying instead (the removal failed, so the message says to delete it by hand;
@@ -215,7 +218,11 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
         ``<workdir>/.magi/``; writes ``.magi/.secret/magi.key`` on success.
     """
     magi_dir = os.path.join(workdir, _MAGI_DIR)
-    if os.path.exists(magi_dir):
+    if os.path.lexists(magi_dir):
+        # lexists, not exists: a broken link reads as absent, and the key would be written through it.
+        refusal = link_refusal(magi_dir)
+        if refusal is not None:
+            raise OllamaInitError(refusal)
         raise MagiDirExistsError(_ALREADY_INITIALISED.format(workdir=workdir))
     store = key_store if key_store is not None else default_key_store()
     executable = verified_plugin_executable()
