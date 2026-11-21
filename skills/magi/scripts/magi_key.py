@@ -89,33 +89,19 @@ class KeyHardeningError(KeyStoreError):
 
 
 class KeyGuard(Protocol):
-    """Restricts and verifies owner-only permissions on a path.
+    """The structural type of a permission guard: ``harden`` and ``verify`` on a path.
 
-    Satisfied structurally by the platform permission guards; nothing needs to
-    inherit from it.
+    The contract of both methods (what they restrict or check, and which
+    errors they raise) is documented once, on
+    :class:`magi_key_permissions.PermissionGuard`; nothing needs to inherit
+    from this protocol.
     """
 
     def harden(self, path: str, directory: bool) -> None:
-        """Restrict ``path`` to its owner.
-
-        Args:
-            path: The file or directory to restrict.
-            directory: True when ``path`` is a directory.
-
-        Raises:
-            KeyHardeningError: The restriction could not be applied.
-        """
+        """Restrict ``path`` to its owner; see ``PermissionGuard.harden``."""
 
     def verify(self, path: str) -> None:
-        """Check that ``path`` is restricted to its owner.
-
-        Args:
-            path: The file or directory to check.
-
-        Raises:
-            KeyUnverifiableError: The permissions of ``path`` could not be read.
-            KeyExposedError: Someone other than the owner can access ``path``.
-        """
+        """Check that ``path`` is restricted to its owner; see ``PermissionGuard.verify``."""
 
 
 class MagiKey:
