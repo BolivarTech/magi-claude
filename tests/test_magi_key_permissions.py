@@ -993,3 +993,29 @@ def test_windows_verify_of_a_null_or_absent_dacl_is_exposed_not_unverifiable(sdd
         _windows_guard(sddl).verify("k", directory=False)
     assert not isinstance(raised.value, KeyUnverifiableError)
     assert "full access" in str(raised.value) and "\n" not in str(raised.value)
+
+
+def test_a_ctypes_failure_in_the_native_layer_is_unverifiable_on_verify():
+    # [Z6] a marshalling error is not an OSError: it must still end as a described, fail-closed failure.
+    import ctypes
+
+    def _boom(path):
+        raise ctypes.ArgumentError("argument 1: wrong type")
+
+    guard = _windows_guard(f"D:PAI(A;;FA;;;{ME})")
+    guard.read_sddl = _boom
+    with pytest.raises(KeyUnverifiableError) as raised:
+        guard.verify("k", directory=False)
+    assert "\n" not in str(raised.value)
+
+
+def test_a_ctypes_failure_in_the_native_layer_is_a_hardening_error_on_harden():
+    import ctypes
+
+    def _boom(path):
+        raise ctypes.ArgumentError("argument 1: wrong type")
+
+    guard = _windows_guard(f"D:PAI(A;;FA;;;{ME})")
+    guard.read_sddl = _boom
+    with pytest.raises(KeyHardeningError):
+        guard.harden("k", directory=False)
