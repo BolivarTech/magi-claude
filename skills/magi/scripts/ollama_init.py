@@ -42,13 +42,23 @@ class OllamaInitError(Exception):
     """``magi-rs init`` failed; the message carries what it printed (a sibling of ``ValidationError``)."""
 
 
-def _remove_created_magi_dir(magi_dir: str) -> None:
+def _remove_created_magi_dir(magi_dir: str) -> str:
     """Remove a ``.magi/`` this call created, so a retry is not told it is initialised.
 
     Args:
         magi_dir: The directory to remove; absent is fine.
+
+    Returns:
+        An empty string when it was removed; otherwise a sentence telling the
+        operator to delete the directory by hand before retrying.
     """
-    shutil.rmtree(magi_dir, ignore_errors=True)
+    try:
+        shutil.rmtree(magi_dir)
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return f"{magi_dir} could not be removed: delete it by hand before retrying."
+    return ""
 
 
 def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
@@ -64,6 +74,8 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
         ``magi-rs init`` printed (stdout, then stderr), relayed verbatim.
 
     Raises:
+        Any exception from the child launch or the key store: the ``.magi/`` this call
+            created is removed first; if that removal fails the message says to delete it by hand.
         OllamaInitError: ``magi-rs init`` exited non-zero. No key is persisted
             and the ``.magi/`` this call saw appear is removed.
         KeyHardeningError: The key could not be restricted to its owner. The
@@ -88,22 +100,25 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
     bootstrap.ensure()
     executable = bootstrap.verify()
     key = store.new_key()
-    completed = subprocess.run(
-        [executable, _INIT_SUBCOMMAND, _WORKDIR_FLAG, workdir],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=EnvironmentPolicy.build(os.environ, passphrase=key),
-        timeout=_INIT_TIMEOUT_SECONDS,
-    )
-    output = "".join(part for part in (completed.stdout, completed.stderr) if part)
-    if completed.returncode != 0:
-        _remove_created_magi_dir(magi_dir)
-        raise OllamaInitError(output)
     try:
+        completed = subprocess.run(
+            [executable, _INIT_SUBCOMMAND, _WORKDIR_FLAG, workdir],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=EnvironmentPolicy.build(os.environ, passphrase=key),
+            timeout=_INIT_TIMEOUT_SECONDS,
+        )
+        output = "".join(part for part in (completed.stdout, completed.stderr) if part)
+        if completed.returncode != 0:
+            raise OllamaInitError(output)
         store.persist(workdir, key)
-    except BaseException:
-        _remove_created_magi_dir(magi_dir)
+    except BaseException as error:
+        note = _remove_created_magi_dir(magi_dir)
+        if isinstance(error, OllamaInitError) and note:
+            raise OllamaInitError(f"{error}\n{note}") from error
+        if note:
+            error.add_note(note)
         raise
     return output
