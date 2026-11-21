@@ -108,8 +108,9 @@ _DIRECTORY_GRANT = "(OI)(CI)F"
 """Full control on the directory, inherited by the files and folders inside it."""
 _REMOVE_ENTRIES = "/remove"
 """Removes every explicit entry, allow and deny alike, of the SIDs that follow it."""
-_DENY_ACE_TYPE = "D"
-"""``ACCESS_DENIED_ACE_TYPE`` in SDDL. Used only to word a verify failure, never to pass one."""
+_DENY_ACE_TYPES = frozenset({"D", "OD"})
+"""``ACCESS_DENIED_ACE_TYPE`` and ``ACCESS_DENIED_OBJECT_ACE_TYPE`` in SDDL. Used only to word a verify
+failure, never to pass one."""
 _ACE_TYPE_INDEX = 0
 _ROTATE_COMMAND = "--ollama-rotate-key"
 
@@ -756,7 +757,9 @@ class WindowsPermissionGuard(PermissionGuard):
         except (OSError, ValueError) as error:
             raise KeyUnverifiableError(f"cannot read the permissions of {path}: {error}") from error
         protection = f"(DACL protected: {_YES if protected else _NO})"
-        with_access = [ace_sid for ace_sid, types in foreign.items() if types != {_DENY_ACE_TYPE}]
+        with_access = [
+            ace_sid for ace_sid, types in foreign.items() if not types <= _DENY_ACE_TYPES
+        ]
         if with_access:
             raise KeyExposedError(
                 f"{path} has an access entry for {', '.join(with_access)} {protection}"
