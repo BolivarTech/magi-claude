@@ -63,7 +63,8 @@ from bundle_segmenter import (  # noqa: E402
     SegmentTooLargeError,
     mentions,
 )
-from magi_rs_result import ConsultResult, describe_reasoning  # noqa: E402
+from magi_rs_code_review import MagiRsCodeReview  # noqa: E402
+from magi_rs_result import CodeReviewResult, ConsultResult, describe_reasoning  # noqa: E402
 from magi_rs_trio import (  # noqa: E402
     DEFAULT_OLLAMA_TIMEOUT_SECONDS,
     FAIL_CLOSED_ERRORS,
@@ -79,10 +80,11 @@ from magi_rs_bootstrap import (  # noqa: E402
 )
 from magi_rs_preflight import ProjectPreflight  # noqa: E402
 from magi_key import MagiKey  # noqa: E402
-from magi_rs_targets import DEFAULT_BASE  # noqa: E402
+from magi_rs_targets import DEFAULT_BASE, InvalidTargetError, ReviewTarget  # noqa: E402
 from magi_key_rotation import (  # noqa: E402
     KeyRotation,
     magi_dir_problem,
+    rotation_backup_root,
     RotationFailedError,
     RotationNotAuthorisedError,
 )
@@ -879,6 +881,69 @@ def _select_executor(args: argparse.Namespace, timeout: int) -> MagiRsTrio | Non
     )
 
 
+def _run_git(argv: list[str]) -> str:
+    """Run ``git <argv>`` in the current directory and return its stdout.
+
+    Args:
+        argv: The git arguments, without the leading ``git``.
+
+    Returns:
+        The captured stdout.
+
+    Raises:
+        OSError: ``git`` cannot be started.
+        subprocess.SubprocessError: ``git`` exits non-zero.
+    """
+    return subprocess.run(
+        ["git", *argv], capture_output=True, text=True, check=True, cwd=os.getcwd()
+    ).stdout
+
+
+def _resolve_review_target(args: argparse.Namespace) -> ReviewTarget:
+    """Validate the ``code-review --ollama`` target flags before anything else runs.
+
+    Args:
+        args: Parsed CLI namespace (the target flags and ``.input`` are read).
+
+    Returns:
+        The validated target.
+
+    Raises:
+        InvalidTargetError: The flags do not name one reviewable target.
+    """
+    return ReviewTarget.resolve(
+        path=args.input,
+        commit=args.commit,
+        from_=args.from_,
+        to=args.to,
+        base=args.base,
+        head=args.head,
+        uncommitted=args.uncommitted,
+        workdir=os.getcwd(),
+        forbidden_roots=[rotation_backup_root()],
+        git=_run_git,
+    )
+
+
+def _select_review_executor(target: ReviewTarget, timeout: int) -> MagiRsCodeReview:
+    """Build the native ``code-review`` executor bound to the resolved timeout.
+
+    Args:
+        target: The validated review target.
+        timeout: The wall-clock ceiling already resolved (and reported) for this run.
+
+    Returns:
+        A :class:`MagiRsCodeReview` for the current working directory, whose
+        constructor timeout is the only source of the child's deadline.
+
+    Raises:
+        PluginRootError: ``CLAUDE_PLUGIN_ROOT`` is set but is not a directory.
+        PinFormatError: The shipped pin does not parse.
+    """
+    pin, directory = plugin_binary_location()
+    return MagiRsCodeReview(os.getcwd(), target, timeout, bin_dir=directory, pin=pin)
+
+
 # --- MS4b: segmentation of a bundle that does not fit the consult ceiling ----------------
 #
 # The transport ceiling is a measured fact (MS0: 262 144 bytes of stdin, inclusive), and a
@@ -1496,6 +1561,73 @@ _CLOCK_ROTATIONS_WARNING = (
 """The flag on a timeout at or below the recommended one points at the config:
 recommending the value already in use would contradict itself (measured
 2026-09-29: max_rotations = 0 turns 16820 into a 7005 s per-mage ceiling)."""
+
+
+_REVIEW_BANNER_PREFIX = "|  "
+_NOT_A_LIST = "n/a"
+_MODEL_USED_NOTE = (
+    "the code-review envelope names the trio as one joined string, not per mage; "
+    "no per-mage model is attributed"
+)
+
+
+def format_target_banner(target: ReviewTarget) -> str:
+    """Render the reviewed target for the startup banner.
+
+    Args:
+        target: The validated review target.
+
+    Returns:
+        ``"|  Target: <label>"``.
+    """
+    return f"{_REVIEW_BANNER_PREFIX}Target: {target.label}"
+
+
+def _count(value: Any) -> Any:
+    """Length of a list field, or ``n/a`` when magi-rs did not send a list."""
+    return len(value) if isinstance(value, list) else _NOT_A_LIST
+
+
+def format_review_banner(result: CodeReviewResult) -> list[str]:
+    """Render the review summary an operator needs (REQ-06), one line per datum.
+
+    Args:
+        result: The parsed code-review result.
+
+    Returns:
+        Banner lines: batches, discarded, filtered by the gate, judged fraction,
+        skipped, masked; plus ``gate stopped``/``gate causes`` (verbatim, never
+        interpreted) and ``without_memory``/``without_embedder`` only when they
+        appear.
+    """
+    review = result.code_review
+    lines = [
+        f"batches: {review.get('batches_completed')}/{review.get('batches_planned')}",
+        f"discarded: {_count(review.get('discarded'))}",
+        f"filtered by the gate: {_count(review.get('filtered'))}",
+        f"judged: {review.get('judged_fraction')}",
+        f"skipped: {_count(review.get('skipped'))}",
+        f"masked: {_count(review.get('masked'))}",
+    ]
+    if review.get("gate_stopped") is not None:
+        lines.append(f"gate stopped: {review.get('gate_stopped')}")
+        lines.append(f"gate causes: {json.dumps(review.get('gate_causes'), sort_keys=True)}")
+    for flag in ("without_memory", "without_embedder"):
+        if review.get(flag) is True:
+            lines.append(flag)
+    return [f"{_REVIEW_BANNER_PREFIX}{line}" for line in lines]
+
+
+def code_review_report_blocks(result: CodeReviewResult) -> dict[str, Any]:
+    """Build the code-review additions to the report's ``magi_rs`` block.
+
+    Args:
+        result: The parsed code-review result.
+
+    Returns:
+        ``{"code_review": <the object, verbatim>, "effort": <result.effort()>}``.
+    """
+    return {"code_review": result.code_review, "effort": result.effort()}
 
 
 def build_report_block(result: ConsultResult, *, timeout_seconds: int) -> dict[str, Any]:
@@ -2395,6 +2527,17 @@ def main() -> None:
     if args.check_prompts:
         check_prompts(_default_agents_dir())
 
+    # ``code-review --ollama`` is a native magi-rs review: its target (a path or a git
+    # revision) is validated FIRST (CP2-M20), so a bad one never touches the binary,
+    # the key or the network. No input is read, enriched, guarded or segmented there.
+    review_target: ReviewTarget | None = None
+    if args.ollama and args.mode == "code-review":
+        try:
+            review_target = _resolve_review_target(args)
+        except InvalidTargetError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     # v6: the open-weight executor is chosen and verified HERE, before any input is
     # read -- see _select_executor. ``executor`` stays None on the Claude path.
     executor: TrioExecutor | None = None
@@ -2415,7 +2558,11 @@ def main() -> None:
         if timeout_warning is not None:
             print(f"[!] WARNING: {timeout_warning}", file=sys.stderr)
         try:
-            executor = _select_executor(args, resolved_timeout)
+            executor = (
+                _select_review_executor(review_target, resolved_timeout)
+                if review_target is not None
+                else _select_executor(args, resolved_timeout)
+            )
             # Bootstrap + project preflight BEFORE the payload is built (spec
             # §3.2): both are fail-closed and free; a bundle built for a run
             # that cannot start is pure waste. (``None`` is the Claude path's
@@ -2430,42 +2577,46 @@ def main() -> None:
             print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
 
-    try:
-        input_content, input_label = _load_input_content(args.input)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
+    input_content, input_label = "", ""
+    est_tokens, oversize, raw_input_chars = 0, False, 0
+    review_diff, enrich_note, prompt = "", None, ""
+    if review_target is None:
+        try:
+            input_content, input_label = _load_input_content(args.input)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
 
-    # Input-size telemetry: estimate token footprint and flag oversized inputs.
-    # Pure/total — never raises. Runs after load so the enriched content is NOT
-    # measured here (enrichment happens below); we measure the raw user input.
-    est_tokens, oversize = check_input_size(input_content, args.warn_input_tokens)
-    raw_input_chars = len(input_content)  # capture BEFORE _maybe_enrich reassigns input_content
+        # Input-size telemetry: estimate token footprint and flag oversized inputs.
+        # Pure/total — never raises. Runs after load so the enriched content is NOT
+        # measured here (enrichment happens below); we measure the raw user input.
+        est_tokens, oversize = check_input_size(input_content, args.warn_input_tokens)
+        raw_input_chars = len(input_content)  # capture BEFORE _maybe_enrich reassigns input_content
 
-    # A2: resolve the review diff ONCE (code-review only) and thread the same
-    # value to BOTH the enrichment path and the finding guard so they can never
-    # diverge. ``resolve_diff`` is TOTAL (returns "" on any failure); "" makes
-    # the guard a no-op.
-    review_diff = (
-        resolve_diff(input_content, os.getcwd(), args.base or DEFAULT_BASE)
-        if args.mode == "code-review"
-        else ""
-    )
+        # A2: resolve the review diff ONCE (code-review only) and thread the same
+        # value to BOTH the enrichment path and the finding guard so they can never
+        # diverge. ``resolve_diff`` is TOTAL (returns "" on any failure); "" makes
+        # the guard a no-op.
+        review_diff = (
+            resolve_diff(input_content, os.getcwd(), args.base or DEFAULT_BASE)
+            if args.mode == "code-review"
+            else ""
+        )
 
-    input_content, enrich_note = _maybe_enrich(
-        args.mode,
-        input_content,
-        base_ref=args.base or DEFAULT_BASE,
-        enrich=args.enrich,
-        max_chars=args.enrich_max_chars,
-        diff=review_diff,
-    )
+        input_content, enrich_note = _maybe_enrich(
+            args.mode,
+            input_content,
+            base_ref=args.base or DEFAULT_BASE,
+            enrich=args.enrich,
+            max_chars=args.enrich_max_chars,
+            diff=review_diff,
+        )
 
-    try:
-        prompt = build_user_prompt(args.mode, input_content)
-    except InvalidInputError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
+        try:
+            prompt = build_user_prompt(args.mode, input_content)
+        except InvalidInputError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     agents_dir = _default_agents_dir()
 
@@ -2527,7 +2678,10 @@ def main() -> None:
     print("|          MAGI SYSTEM -- INITIALIZING              |")
     print("+==================================================+")
     print(f"|  Mode: {args.mode}")
-    print(f"|  Input: {input_label}")
+    if review_target is not None:
+        print(format_target_banner(review_target))
+    else:
+        print(f"|  Input: {input_label}")
     if enrich_note is not None:
         print(f"|  Context: {enrich_note}")
     if args.ollama:
@@ -2544,7 +2698,7 @@ def main() -> None:
     # is split at section boundaries and evaluated one segment at a time. The whole
     # prompt is what travels, so the wrapper sanitize adds is charged against the
     # ceiling. Decided BEFORE anything runs; a section too large to fit is refused.
-    if executor is not None:
+    if executor is not None and review_target is None:
         sections = split_sections(input_content)
         wrapper_bytes = len(build_user_prompt(args.mode, "").encode("utf-8"))
         try:
@@ -2633,20 +2787,23 @@ def main() -> None:
     # mode-agnostic (it never receives the diff); the guard runs here, on the
     # successful agents, using the single resolved ``review_diff`` shared with
     # enrichment. ``files`` empty (non-code-review or no diff) makes it a no-op.
-    files, ranges = _diff_files_and_ranges(review_diff)
-    # FIX 3b: emit ONE stderr line in code-review so a no-diff no-op is visible.
-    if args.mode == "code-review":
-        if files:
-            print(f"[guard] active: {len(files)} file(s) in diff", file=sys.stderr)
-        else:
-            print("[guard] skipped: no resolvable diff", file=sys.stderr)
-    # F4: collect the guard's observable effect into the report so an agent that
-    # votes but has all its findings dropped is explained in the audit artifact.
-    guard_summary: dict[str, Any] = {}
-    report["agents"] = _apply_finding_guard(
-        report["agents"], args.mode, files, ranges, summary=guard_summary
-    )
-    report["guard"] = guard_summary
+    # The native review has no plugin-side diff to ground against: magi-rs judges
+    # its own findings (REQ-04).
+    if review_target is None:
+        files, ranges = _diff_files_and_ranges(review_diff)
+        # FIX 3b: emit ONE stderr line in code-review so a no-diff no-op is visible.
+        if args.mode == "code-review":
+            if files:
+                print(f"[guard] active: {len(files)} file(s) in diff", file=sys.stderr)
+            else:
+                print("[guard] skipped: no resolvable diff", file=sys.stderr)
+        # F4: collect the guard's observable effect into the report so an agent that
+        # votes but has all its findings dropped is explained in the audit artifact.
+        guard_summary: dict[str, Any] = {}
+        report["agents"] = _apply_finding_guard(
+            report["agents"], args.mode, files, ranges, summary=guard_summary
+        )
+        report["guard"] = guard_summary
 
     # A5: outside code-review there is no diff to ground file/line against, so
     # strip them to ``None`` — this forces title-based dedup for design/analysis
@@ -2666,7 +2823,7 @@ def main() -> None:
     # ``>= 2`` precondition of ``determine_consensus`` — real runs always reach
     # here with >= 2 agents (the orchestrator raised otherwise), so this only
     # skips the refresh under stubbed/degenerate agent lists.
-    if len(report["agents"]) >= 2:
+    if review_target is None and len(report["agents"]) >= 2:
         report["consensus"] = determine_consensus(report["agents"])
 
     report_text = format_report(report["agents"], report["consensus"])
@@ -2711,12 +2868,17 @@ def main() -> None:
     # ``cost`` block discipline: set BEFORE json.dump). ``est_tokens``,
     # ``oversize``, and ``raw_input_chars`` were all computed right after
     # _load_input_content, before _maybe_enrich could reassign input_content.
-    report["input_size"] = {
-        "chars": raw_input_chars,
-        "est_tokens": est_tokens,
-        "oversize": oversize,
-        "warn_threshold_tokens": args.warn_input_tokens,
-    }
+    # None for the native review: its input is a target, not text the plugin measures.
+    report["input_size"] = (
+        None
+        if review_target is not None
+        else {
+            "chars": raw_input_chars,
+            "est_tokens": est_tokens,
+            "oversize": oversize,
+            "warn_threshold_tokens": args.warn_input_tokens,
+        }
+    )
 
     # Attribution (5.4.0): record which model produced this verdict, same
     # set-before-json.dump discipline as the two blocks above.
@@ -2743,9 +2905,25 @@ def main() -> None:
     # MS4: the magi-rs telemetry travels VERBATIM into the report (R15/R16),
     # from the executor's last parsed envelope -- same set-before-json.dump
     # discipline as the blocks above. Absent on the Claude path (additive).
-    magi_rs_result: ConsultResult | None = getattr(executor, "last_result", None)
+    review_result: CodeReviewResult | None = (
+        executor.last_result if isinstance(executor, MagiRsCodeReview) else None
+    )
+    magi_rs_result: ConsultResult | None = (
+        review_result.consult
+        if review_result is not None
+        else getattr(executor, "last_result", None)
+    )
     if magi_rs_result is not None:
         report.update(build_report_block(magi_rs_result, timeout_seconds=resolved_timeout))
+    if review_result is not None:
+        report["magi_rs"].update(code_review_report_blocks(review_result))
+        # PM-S-7: never invent a per-mage model out of the joined string.
+        report["magi_rs"]["model_used"] = None
+        report["magi_rs"]["model_used_note"] = _MODEL_USED_NOTE
+        if review_result.without_embedder:
+            # REQ-07: context was lost, so the run approves no gate.
+            report["degraded"] = True
+            report.setdefault("degraded_causes", []).append("without_embedder")
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
@@ -2756,9 +2934,28 @@ def main() -> None:
     if magi_rs_result is not None:
         announce_magi_rs_telemetry(
             magi_rs_result,
-            degraded_locally=bool(report.get("degraded", False)),
+            degraded_locally=(
+                bool(report.get("failed_agents"))
+                if review_result is not None
+                else bool(report.get("degraded", False))
+            ),
             timeout_seconds=resolved_timeout,
         )
+    if review_result is not None:
+        for line in format_review_banner(review_result):
+            print(line)
+        if review_result.without_embedder:
+            print(
+                "[!] WARNING: the review ran without the embedder (no documentation or history "
+                "context). The run is DEGRADED and the gate is INVALID whatever the verdict says.",
+                file=sys.stderr,
+            )
+        if isinstance(executor, MagiRsCodeReview) and executor.history_recorded is False:
+            print(
+                "[!] WARNING: the review history was not recorded; the report above stays valid "
+                "but the next review will not see this one.",
+                file=sys.stderr,
+            )
 
     # R18 made ACTIVE: filing the counts was not enough (MAGI gate, Caspar). Announced here,
     # after the report exists, so the message and the file it points to always agree.
@@ -2768,7 +2965,8 @@ def main() -> None:
     total_usd = report["cost"]["total_usd"]
     cost_label = "unpriced (magi-rs exposes no usage)" if total_usd is None else f"${total_usd:.4f}"
     print(f"Cost: {cost_label} ({len(report['agents'])} agents)")
-    print(f"Input size: ~{est_tokens} tokens ({raw_input_chars} chars)")
+    if review_target is None:
+        print(f"Input size: ~{est_tokens} tokens ({raw_input_chars} chars)")
     if oversize:
         print(
             f"[!] WARNING: input ~{est_tokens} tokens is very large; MAGI reviews it whole "
