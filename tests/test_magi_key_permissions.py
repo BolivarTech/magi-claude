@@ -1,3 +1,4 @@
+import ntpath
 import os
 import sys
 
@@ -150,7 +151,7 @@ def test_windows_harden_uses_the_sid_never_a_localised_name():
 
     WindowsPermissionGuard(runner=runner).harden("k", directory=False)
     # [CP2-M45] whoami by absolute path: on PATH, git-bash would answer with coreutils' whoami (M9).
-    assert os.path.isabs(seen[0][0]) and seen[0][0].lower().endswith("system32\\whoami.exe")
+    assert ntpath.isabs(seen[0][0]) and seen[0][0].lower().endswith("system32\\whoami.exe")
     icacls = next(a for a in seen if "icacls" in a[0].lower())
     assert "/inheritance:r" in icacls
     assert any(part.startswith(f"*{ME}:") for part in icacls)
