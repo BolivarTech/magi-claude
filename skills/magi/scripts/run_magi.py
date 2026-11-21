@@ -238,6 +238,37 @@ def _resolve_timeout(flag: int | None) -> float:
     return DEFAULT_TIMEOUT_SECONDS
 
 
+def _check_subcommands(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject a key subcommand mixed with a mode, an input, another subcommand, or a stray ``--yes``.
+
+    A destructive rotation must never be honoured from any position of a
+    normal run, so the mix is an argument error before anything runs.
+
+    Args:
+        parser: Reports the error.
+        args: The parsed arguments.
+
+    Raises:
+        SystemExit: Exit code 2, via ``parser.error``, for any invalid mix.
+    """
+    chosen = [
+        flag
+        for flag, given in (
+            ("--ollama-init", args.ollama_init),
+            (_VAULT_SET_FLAG, args.ollama_vault_set is not None),
+            (_ROTATE_KEY_FLAG, args.ollama_rotate_key),
+        )
+        if given
+    ]
+    if len(chosen) > 1:
+        parser.error(f"{' and '.join(chosen)} cannot be combined; run one at a time")
+    if args.yes and not args.ollama_rotate_key:
+        parser.error(f"{_YES_FLAG} applies only to {_ROTATE_KEY_FLAG}")
+    key_command = args.ollama_vault_set is not None or args.ollama_rotate_key
+    if key_command and (args.mode is not None or args.input is not None):
+        parser.error(f"{chosen[0]} takes no mode or input")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments.
 
@@ -379,6 +410,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Initialise this project for magi-rs (`magi-rs init -w <cwd>`, creates .magi/) and exit.",
     )
+    parser.add_argument(
+        _VAULT_SET_FLAG,
+        metavar="NAME",
+        default=None,
+        help=(
+            f"Store one API key in the magi-rs vault of .magi/ and exit. NAME is one of "
+            f"{', '.join(VAULT_KEY_NAMES)}; the value is read from stdin, or from a hidden prompt at a "
+            "terminal, never from the command line. Takes no mode or input."
+        ),
+    )
+    parser.add_argument(
+        _ROTATE_KEY_FLAG,
+        action="store_true",
+        help=(
+            "Replace an exposed magi-rs key: move .magi/ to a backup outside the project, create a new "
+            "one and list the API keys to revoke, then exit. Asks for confirmation at a terminal; "
+            f"elsewhere it needs {_YES_FLAG}. Takes no mode or input."
+        ),
+    )
+    parser.add_argument(
+        _YES_FLAG,
+        action="store_true",
+        help=f"With {_ROTATE_KEY_FLAG} only: authorise the rotation without asking.",
+    )
     # ``model_source`` is declared here with its siblings, not only assigned in
     # the body below: a hand-built Namespace (tests, embedders) would otherwise
     # reach the report step without it and crash AFTER the verdict exists.
@@ -398,7 +453,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.warn_input_tokens <= 0:
         parser.error("--warn-input-tokens must be a positive integer")
-    if not args.check_prompts and (args.mode is None or args.input is None):
+    _check_subcommands(parser, args)
+    standalone = args.ollama_init or args.ollama_vault_set is not None or args.ollama_rotate_key
+    if not args.check_prompts and not standalone and (args.mode is None or args.input is None):
         parser.error("the following arguments are required: mode, input")
     if args.ollama and args.model is not None:
         parser.error(
@@ -2229,12 +2286,14 @@ def main() -> None:
     # happened on an earlier print.
     _enable_utf8_console_io()
 
-    # Short-circuit: --ollama-init delegates to ``magi-rs init`` and exits
-    # before parse_args() so that mode/input positional arguments are not
-    # required. We screen sys.argv directly; the flag is unambiguous (no value
-    # follows it). The whole command is ONE call (R5): no config of the
-    # plugin's own is written, nothing under .claude/ is read.
-    if "--ollama-init" in sys.argv[1:]:
+    args = parse_args()
+
+    # The standalone subcommands are dispatched from the PARSED args, so argparse
+    # lists them in --help, expands their abbreviations and rejects any mix with a
+    # mode, an input or each other before anything runs (parse_args). None of
+    # them needs a mode or an input. --ollama-init is ONE call (R5): no config of
+    # the plugin's own is written, nothing under .claude/ is read.
+    if args.ollama_init:
         try:
             output = run_ollama_init(os.getcwd())
         except MagiDirExistsError as exc:
@@ -2250,17 +2309,11 @@ def main() -> None:
         print(output, end="" if output.endswith("\n") else "\n")
         sys.exit(0)
 
-    # Key subcommands short-circuit the same way: neither takes a mode or an input.
     # The value of --ollama-vault-set never comes from argv, only its NAME does.
-    argv_tail = sys.argv[1:]
-    if _VAULT_SET_FLAG in argv_tail:
-        flag_index = argv_tail.index(_VAULT_SET_FLAG)
-        sys.exit(vault_set_main(argv_tail[flag_index + 1 :], sys.stdin, sys.stdin.isatty()))
-    if _ROTATE_KEY_FLAG in argv_tail:
-        flag_index = argv_tail.index(_ROTATE_KEY_FLAG)
-        sys.exit(rotate_main(argv_tail[flag_index + 1 :], sys.stdin.isatty()))
-
-    args = parse_args()
+    if args.ollama_vault_set is not None:
+        sys.exit(vault_set_main([args.ollama_vault_set], sys.stdin, sys.stdin.isatty()))
+    if args.ollama_rotate_key:
+        sys.exit(rotate_main([_YES_FLAG] if args.yes else [], sys.stdin.isatty()))
 
     # A dry run of the prompt guard: no mode, no input, no tokens. Decided from the PARSED
     # args, not by scanning sys.argv -- a raw scan duplicates the flag name as a magic string
