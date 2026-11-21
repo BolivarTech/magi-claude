@@ -25,9 +25,12 @@ replaces everything:
    operator learns which API keys to revoke (names only, never values).
 
 Every failure leaves a described state in one line and never prints either
-key. A hard stop (killed process, power loss) between steps 3 and 4 prints
-nothing: the root then has no ``.magi/`` and the old one is intact in the
-backup, from where it can be moved back.
+key. Every step after the move handles any exception, ``KeyboardInterrupt``
+and ``SystemExit`` included: it reaches its described state first, then raises
+:class:`RotationFailedError` naming the backup, chained to the cause. Only a
+hard stop (killed process, power loss) between steps 3 and 4 prints nothing:
+the root then has no ``.magi/`` and the old one is intact in the backup, from
+where it can be moved back.
 
 Side effects of :meth:`KeyRotation.rotate`: creates ``<backup root>/<id>/``,
 moves ``<workdir>/.magi`` into it, restricts the backup's permissions, and
@@ -308,7 +311,7 @@ class KeyRotation:
         self._reharden(backup_dir, workdir)
         self._create_new(workdir, backup_dir, old_key)
         self._verify_new(workdir, backup_dir, old_key)
-        names, from_vault = self._names_to_revoke(backup_dir, old_key)
+        names, from_vault = self._names_to_revoke(workdir, backup_dir, old_key)
         return RotationReport(backup_dir, names, from_vault)
 
     @staticmethod
@@ -495,8 +498,8 @@ class KeyRotation:
             workdir: The project root, named in the recovery instruction.
 
         Raises:
-            RotationFailedError: Hardening or verification failed; the backup
-                is kept and no new ``.magi/`` is created.
+            RotationFailedError: Hardening or verification failed, or was
+                interrupted; the backup is kept and no new ``.magi/`` is created.
         """
         guard = self._store.guard
         try:
@@ -505,7 +508,7 @@ class KeyRotation:
             for path, directory in entries:
                 guard.harden(path, directory)
                 guard.verify(path, directory)
-        except (KeyStoreError, OSError, _LinkInBackupError) as error:
+        except BaseException as error:  # noqa: BLE001 - after the move, even an interrupt must name the backup
             raise RotationFailedError(
                 f"the old {MAGI_DIR}/ was moved to {os.path.join(backup_dir, MAGI_DIR)} but could not be "
                 f"restricted to its owner ({_reason(error)}), so it may be exposed; no new "
@@ -567,7 +570,8 @@ class KeyRotation:
             old_key: Redacted from the failure detail.
 
         Raises:
-            RotationFailedError: ``init`` failed with any exception.
+            RotationFailedError: ``init`` failed with any exception,
+                ``KeyboardInterrupt`` and ``SystemExit`` included.
         """
         magi_dir = os.path.join(workdir, MAGI_DIR)
         try:
@@ -579,7 +583,7 @@ class KeyRotation:
                 f"{os.path.join(backup_dir, MAGI_DIR)}; inspect {magi_dir} and move that aside, then move "
                 f"the old one back to {magi_dir} to retry"
             ) from error
-        except Exception as error:  # noqa: BLE001 - any init failure must end in the described state
+        except BaseException as error:  # noqa: BLE001 - any init failure, an interrupt included, ends in the described state
             raw = " ".join([str(error), *getattr(error, "__notes__", [])])
             detail = _one_line(old_key.redact(raw)) or type(error).__name__
             leftover = ""
@@ -614,7 +618,7 @@ class KeyRotation:
 
         Raises:
             RotationFailedError: The key is absent, unreadable, not owner-only,
-                or the old key. The ``.magi/`` at the root is left as it is (this
+                or the old key, or the check was interrupted. The ``.magi/`` at the root is left as it is (this
                 rotation may not have created it); the message names it and the
                 backup, never either key.
         """
@@ -631,23 +635,38 @@ class KeyRotation:
 
         try:
             new_key = self._store.load(workdir)
-        except (KeyStoreError, OSError) as error:
+        except BaseException as error:  # noqa: BLE001 - after the move, even an interrupt must name the backup
             raise _failure(_reason(error)) from error
         if new_key == old_key:
             raise _failure("it holds the old key")
 
-    def _names_to_revoke(self, backup_dir: str, old_key: MagiKey) -> tuple[list[str], bool]:
+    def _names_to_revoke(
+        self, workdir: str, backup_dir: str, old_key: MagiKey
+    ) -> tuple[list[str], bool]:
         """List the old vault's names with the old key: the key's only use after the move.
 
         Args:
+            workdir: The project root, whose new ``.magi/`` is named if the listing is interrupted.
             backup_dir: ``<backup root>/<id>``, the backup's working directory.
             old_key: The exposed key.
 
         Returns:
             ``(names, True)`` from the vault, or ``(list(VAULT_KEY_NAMES), False)``
             when the vault cannot be read for any reason.
+
+        Raises:
+            RotationFailedError: The listing was interrupted (``KeyboardInterrupt``,
+                ``SystemExit``). The new ``.magi/`` is already in place; the
+                message names it and the backup and lists every name to revoke.
         """
         try:
             return list(self._vault_ls(backup_dir, old_key)), True
         except Exception:  # noqa: BLE001 - an unreadable old vault falls back to the closed list, reported
             return list(VAULT_KEY_NAMES), False
+        except BaseException as error:
+            raise RotationFailedError(
+                f"the new {MAGI_DIR}/ is in place at {os.path.join(workdir, MAGI_DIR)} and the old one is at "
+                f"{os.path.join(backup_dir, MAGI_DIR)}, but listing the old vault was interrupted "
+                f"({_reason(error)}): treat every API key it may have held as compromised, revoke each one "
+                f"at its provider ({', '.join(VAULT_KEY_NAMES)}) and store the new values"
+            ) from error
