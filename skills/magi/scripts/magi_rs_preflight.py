@@ -10,6 +10,7 @@ import os
 from cli_commands import INIT_FLAG, command
 from link_guard import link_refusal
 from one_line import one_line
+from magi_rs_embedder import EmbedderProbe
 from magi_key import KEY_DIR_PARTS, REGENERATION_GUIDANCE, KeyStore, MagiKey
 
 _CONFIG_RELATIVE_PATH = os.path.join(KEY_DIR_PARTS[0], "magi.toml")
@@ -81,14 +82,18 @@ class ProjectPreflight:
         )
 
     @staticmethod
-    def require_ready(workdir: str, key_store: KeyStore) -> MagiKey:
-        """Run the ordered preflight: project config first, then the key.
+    def require_ready(
+        workdir: str, key_store: KeyStore, probe: EmbedderProbe | None = None
+    ) -> MagiKey:
+        """Run the ordered preflight: project config, then the key, then the embedder.
 
-        An uninitialised project stops before the key store is touched.
+        An uninitialised project stops before the key store is touched; a key
+        failure stops before the embedder is probed.
 
         Args:
             workdir: Project root, the same path passed to ``magi-rs`` as ``-w``.
             key_store: Store the key is loaded from.
+            probe: Embedder probe, given only on the code-review path.
 
         Returns:
             The loaded key, ready to be injected into the child environment.
@@ -98,9 +103,14 @@ class ProjectPreflight:
             KeyMissingError: The key file is absent, empty or unreadable.
             KeyUnverifiableError: The key's permissions could not be read.
             KeyExposedError: The key's permissions are looser than owner-only.
+            EmbedderUnreachableError: The probe found the embedder unreachable.
 
         Side effects:
-            Reads the filesystem. Writes nothing.
+            Reads the filesystem; one network request when ``probe`` is given.
+            Writes nothing.
         """
-        ProjectPreflight.require_initialised(workdir)
-        return key_store.load(workdir)
+        config = ProjectPreflight.require_initialised(workdir)
+        key = key_store.load(workdir)
+        if probe is not None:
+            probe.check(config)
+        return key

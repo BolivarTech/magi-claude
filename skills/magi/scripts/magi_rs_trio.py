@@ -32,6 +32,7 @@ from magi_rs_bootstrap import (
 from magi_rs_env import PASSPHRASE_VARIABLE, EnvironmentPolicy
 from magi_rs_paths import PluginRootError
 from magi_rs_pin import Pin, PinFormatError, UnsupportedPlatformError
+from magi_rs_embedder import EmbedderUnreachableError
 from magi_rs_preflight import ProjectNotInitialisedError, ProjectPreflight
 from magi_rs_result import ConsultResult, MagiRsContractError
 from synthesize import ValidationError, load_agent_output
@@ -122,6 +123,7 @@ FAIL_CLOSED_ERRORS: tuple[type[Exception], ...] = (
     ProjectNotInitialisedError,
     KeyMissingError,
     KeyExposedError,
+    EmbedderUnreachableError,
 )
 
 
