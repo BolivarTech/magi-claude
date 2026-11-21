@@ -33,6 +33,7 @@ KIND_BRANCH = "branch"
 KIND_UNCOMMITTED = "uncommitted"
 
 _MAGI_DIRNAME = ".magi"
+_OPTION_PREFIX = "-"
 _GIT_COUNT_ARGV = ["rev-list", "--count"]
 _EMPTY_RANGE_COUNT = 0
 TARGETS_HELP = "a path (file or directory), --commit <C>, --from <A> --to <B>, --base <B> --head <H>, or --uncommitted"
@@ -109,6 +110,15 @@ class ReviewTarget:
             kinds.append(KIND_UNCOMMITTED)
         if any(v == "" for values in given.values() for v in values):
             raise InvalidTargetError(f"an empty target value is not allowed; use {TARGETS_HELP}")
+        for flag, value in (
+            ("--commit", commit),
+            ("--from", from_),
+            ("--to", to),
+            ("--base", base),
+            ("--head", head),
+        ):
+            if value is not None and value.startswith(_OPTION_PREFIX):
+                raise InvalidTargetError(f"the value of {flag} must not start with '-'")
         if len(kinds) > 1:
             raise InvalidTargetError(
                 f"choose one review target, not {' and '.join(kinds)}; use {TARGETS_HELP}"
