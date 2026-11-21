@@ -550,22 +550,31 @@ class KeyRotation:
     def _source_still_complete(magi_dir: str, target: str) -> bool:
         """Tell whether every path copied to ``target`` still exists under ``magi_dir``.
 
-        One walk of the copied tree: O(n) in the number of copied entries.
+        One walk of the copied tree: O(n) in the number of copied entries. A
+        directory the walk cannot list is never skipped: completeness that
+        cannot be proven is reported as not complete, so the caller keeps both
+        copies (the partial one may hold the only copy of what the source lost).
 
         Args:
             magi_dir: The source ``.magi/``.
             target: The (possibly partial) copy.
 
         Returns:
-            True when nothing that reached ``target`` is missing from the source.
+            True only when every path that reached ``target`` provably still
+            exists in the source.
         """
         if not os.path.isdir(magi_dir):
             return False
-        for current, dirs, files in os.walk(target):
-            relative = os.path.relpath(current, target)
-            for name in (*dirs, *files):
-                if not os.path.lexists(os.path.normpath(os.path.join(magi_dir, relative, name))):
-                    return False
+        try:
+            for current, dirs, files in os.walk(target, onerror=_raise_walk_error):
+                relative = os.path.relpath(current, target)
+                for name in (*dirs, *files):
+                    if not os.path.lexists(
+                        os.path.normpath(os.path.join(magi_dir, relative, name))
+                    ):
+                        return False
+        except OSError:
+            return False
         return True
 
     @classmethod
