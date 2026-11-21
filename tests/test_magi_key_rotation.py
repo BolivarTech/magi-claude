@@ -1540,3 +1540,34 @@ def test_a_failed_move_with_an_unchanged_source_also_removes_the_parents_it_crea
     assert "is unchanged" in str(exc.value) and "\n" not in str(exc.value).strip()
     assert not (tmp_path / "rotated").exists()
     assert (work / ".magi" / "magi.toml").read_text() == "old"
+
+
+def test_an_unlistable_source_entry_is_not_told_to_remove_a_link(tmp_path, monkeypatch):
+    # [X7] an OSError is not a link: the advice is to fix its cause.
+    work = _project(tmp_path)
+
+    def _entries(magi_dir):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(KeyRotation, "_backup_entries", staticmethod(_entries))
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert "fix the cause (denied) and retry" in message and "remove the link" not in message
+    assert "nothing was moved" in message and "\n" not in message.strip()
+
+
+def test_a_link_in_the_source_is_told_to_remove_the_link(tmp_path, monkeypatch):
+    from magi_key_rotation import _LinkInBackupError
+
+    work = _project(tmp_path)
+
+    def _entries(magi_dir):
+        raise _LinkInBackupError("x is a link: replace it with a real file/directory")
+
+    monkeypatch.setattr(KeyRotation, "_backup_entries", staticmethod(_entries))
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert "remove the link and retry" in str(exc.value)
