@@ -305,6 +305,12 @@ class KeyStore:
                 call created is removed (none exists when the directory could
                 not be hardened first).
             OSError: The directory or the file could not be created.
+
+        Residual, declared: a link planted at ``.magi`` or ``.secret`` between the link
+        refusal and ``makedirs``/``os.open`` is followed. The verification that follows
+        refuses it and ``_discard`` removes the file through the same path, so nothing
+        persists; a local process racing inside the owner's own ``.magi/`` is outside
+        the threat model (DIR-4).
         """
         key_file = self.key_path(workdir)
         secret_dir = os.path.dirname(key_file)

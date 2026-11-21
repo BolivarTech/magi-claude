@@ -515,16 +515,19 @@ class KeyRotation:
     def _refuse_links_in_source(self, magi_dir: str) -> None:
         """Refuse a source ``.magi/`` that holds a link or reparse point, before anything moves.
 
-        A same-volume rename keeps every entry as it is; across volumes
+        A same-volume rename keeps every entry as it is. Across volumes
         ``shutil.move`` falls back to ``copytree(..., symlinks=True)``, which
-        recreates a link as a link and does not follow it. Either way a link
-        would end up inside the backup, and the post-move re-hardening would
-        then change the permissions of whatever it points at, outside the
-        backup: so it is refused before anything moves. The walk itself never
-        follows one (``_backup_entries``). O(n) in the entries of ``.magi/``.
+        recreates symlinks but, on Python 3.12 and later, follows a Windows
+        junction (it is not a symlink to ``DirEntry.is_symlink``) and copies its
+        target into the backup, and reads (hydrates) other reparse points. The
+        scan therefore refuses every link and reparse point before anything
+        moves, so a rotation never copies data from outside ``.magi/`` and never
+        ends in the "moved but could not be restricted" state: the post-move
+        walk never hardens through a link (``_backup_entries`` raises first).
+        The walk itself never follows one. O(n) in the entries of ``.magi/``.
 
         Residual, declared: a link planted between this scan and the move is
-        carried into the backup. That needs a local process racing the rotation
+        not seen by the scan. That needs a local process racing the rotation
         inside the owner's own ``.magi/``, which is outside the threat model
         (DIR-4); the post-move walk then refuses to harden it.
 
@@ -569,16 +572,19 @@ class KeyRotation:
             ) from error
 
     @staticmethod
-    def _remove_created(created: list[str]) -> str:
+    def _remove_created(created: list[str], neutral: bool = False) -> str:
         """Remove the empty directories a failed backup creation made, innermost first, best effort.
 
         Args:
             created: The directories the call created, outermost first; one that
                 does not exist is skipped.
+            neutral: True when another process may have put something in them (a
+                ``FileExistsError``): the clause then does not tell the operator to delete.
 
         Returns:
             An empty string when all were removed; otherwise a clause naming
-            those that could not be (non-empty or in use) so the operator can delete them.
+            those that could not be (non-empty or in use). With ``neutral`` the clause only says
+            they were left in place, because another process may have put something in them.
         """
         stuck = []
         for directory in reversed(created):
@@ -590,6 +596,8 @@ class KeyRotation:
                 stuck.append(directory)
         if not stuck:
             return ""
+        if neutral:
+            return f" (left in place: {', '.join(stuck)})"
         return f" (these empty directories could not be removed, delete them: {', '.join(stuck)})"
 
     def _feature_root(self) -> str:
@@ -677,7 +685,7 @@ class KeyRotation:
                 if isinstance(error, FileExistsError)
                 else [*created_parents, candidate]
             )
-            leftover = self._remove_created(ours)
+            leftover = self._remove_created(ours, neutral=isinstance(error, FileExistsError))
             raise RotationFailedError(
                 f"cannot create the rotation backup {candidate} ({self._reason(error)}){leftover}: "
                 "nothing was moved"
