@@ -17,6 +17,10 @@ from unittest.mock import patch
 import pytest
 
 import run_magi
+from _magi_rs_fakes import _CR_FIXTURE, _StreamingProcess, _cr_payload
+from magi_rs_result import CodeReviewResult
+from magi_rs_targets import ReviewTarget
+from run_magi import code_review_report_blocks, format_review_banner, format_target_banner
 from magi_key import KeyExposedError, KeyHardeningError, KeyStore, KeyUnverifiableError, MagiKey
 from magi_key_rotation import RotationFailedError, RotationNotAuthorisedError, RotationReport
 from magi_rs_bootstrap import DigestMismatchError, VersionMismatchError
@@ -5937,3 +5941,322 @@ def test_code_review_ollama_needs_no_positional_input():
 def test_design_ollama_still_requires_its_input(capsys):
     with pytest.raises(SystemExit):
         run_magi.parse_args(["design", "--ollama"])
+
+
+def test_the_banner_always_prints_the_reviewed_target():
+    target = ReviewTarget("path", ("bundle.md",), "path bundle.md")
+    assert format_target_banner(target) == "|  Target: path bundle.md"
+
+
+def test_the_review_banner_shows_what_an_operator_needs():
+    result = CodeReviewResult.from_json(open(_CR_FIXTURE, encoding="utf-8").read())
+    lines = " | ".join(format_review_banner(result))
+    for label in (
+        "batches:",
+        "discarded:",
+        "filtered by the gate:",
+        "judged:",
+        "skipped:",
+        "masked:",
+    ):
+        assert label in lines
+    assert "without_embedder" not in lines
+    assert (
+        "files" not in lines.lower()
+    )  # [CP2-C10] [CP2-C21] the 0.25.0 envelope has no file list; none is invented
+
+
+def test_the_review_banner_shows_without_embedder_when_present():
+    # [CP2-M8] REQ-06 positive case
+    result = CodeReviewResult.from_json(_cr_payload(without_embedder=True).decode("utf-8"))
+    assert "without_embedder" in " | ".join(format_review_banner(result))
+
+
+def test_the_report_carries_the_review_block_verbatim_and_the_effort():
+    result = CodeReviewResult.from_json(open(_CR_FIXTURE, encoding="utf-8").read())
+    blocks = code_review_report_blocks(result)
+    assert blocks["code_review"] == result.code_review
+    assert blocks["effort"] == result.effort()
+
+
+def test_code_review_ollama_never_enriches_guards_or_segments(monkeypatch, tmp_path):
+    called = []
+
+    def recorder(label):
+        return lambda *a, **k: called.append(label)
+
+    for name in ("_load_input_content", "_maybe_enrich", "_apply_finding_guard"):
+        monkeypatch.setattr(f"run_magi.{name}", recorder(name))
+    monkeypatch.setattr("run_magi.BundleSegmenter.plan", lambda *a, **k: called.append("segment"))
+    _run_main_with_fake_review(
+        monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
+    )
+    assert called == []
+
+
+def test_an_invalid_target_stops_before_any_preflight_or_launch(monkeypatch, tmp_path, capsys):
+    launched = []
+    monkeypatch.setattr(
+        "run_magi.MagiRsCodeReview.preflight", lambda self: launched.append("preflight")
+    )
+
+    async def _no_launch(self, *args, **kwargs):  # [CP2-B6] nothing is launched either
+        launched.append("run_trio")
+
+    monkeypatch.setattr("run_magi.MagiRsCodeReview.run_trio", _no_launch)
+    with pytest.raises(SystemExit) as exc:
+        _run_main(monkeypatch, tmp_path, ["code-review", "--ollama", "texto que no es ruta"])
+    assert exc.value.code == 1 and launched == []
+    assert capsys.readouterr().err.startswith("ERROR:")
+
+
+def test_without_embedder_marks_the_report_degraded_with_its_cause(monkeypatch, tmp_path, capsys):
+    report = _run_main_with_fake_review(
+        monkeypatch,
+        tmp_path,
+        ["code-review", "--ollama", "--commit", "abc"],
+        overrides={"without_embedder": True},
+    )
+    assert report["degraded"] is True and "without_embedder" in report["degraded_causes"]
+    assert "WARNING" in capsys.readouterr().err
+
+
+def test_an_agent_that_breaks_the_seven_key_contract_degrades_the_run(monkeypatch, tmp_path):
+    # [CP2-M8] BDD-08: the seven-key validation runs on the code-review path too.
+    envelope = json.loads(_cr_payload())
+    del envelope["consult"]["agents"][0]["summary"]
+    report = _run_main_with_fake_review(
+        monkeypatch,
+        tmp_path,
+        ["code-review", "--ollama", "--commit", "abc"],
+        payload=json.dumps(envelope).encode("utf-8"),
+    )
+    assert report["degraded"] is True
+    assert (
+        envelope["consult"]["agents"][0]["agent"] in report["failed_agents"]
+    )  # [CP2-C22] names the agent
+
+
+def test_without_memory_is_one_error_line_and_no_report(monkeypatch, tmp_path, capsys):
+    # [CP2-M12] BDD-11 at main(): fail-closed, never a degraded report.
+    with pytest.raises(SystemExit) as exc:
+        _run_main_with_fake_review(
+            monkeypatch,
+            tmp_path,
+            ["code-review", "--ollama", "--commit", "abc"],
+            overrides={"without_memory": True},
+        )
+    assert exc.value.code == 1
+    assert (
+        len([line for line in capsys.readouterr().err.splitlines() if line.startswith("ERROR:")])
+        == 1
+    )
+    assert not (tmp_path / "out" / "magi-report.json").exists()
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--commit", "abc"],
+        ["--from", "a", "--to", "b"],
+        ["--base", "dev", "--head", "feat"],
+        ["--uncommitted"],
+    ],
+)
+def test_each_target_flag_reaches_the_child_argv(monkeypatch, tmp_path, flags):
+    # [CP2-M13] parse_args -> ReviewTarget.resolve -> build_review_argv, end to end (--from/--to dest included).
+    report = _run_main_with_fake_review(monkeypatch, tmp_path, ["code-review", "--ollama", *flags])
+    argv = report["_argv_seen"]
+    assert argv[1] == "code-review" and argv[2 : 2 + len(flags)] == flags
+
+
+def test_main_writes_the_review_block_and_prints_both_banners(monkeypatch, tmp_path, capsys):
+    # [CP2-M19] REQ-03/06/06a end to end; BDD-22 on this path.
+    report = _run_main_with_fake_review(
+        monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
+    )
+    assert report["magi_rs"]["code_review"] == json.loads(_cr_payload())["code_review"]
+    assert "effort" in report["magi_rs"]
+    out = capsys.readouterr().out
+    assert "Target: commit abc" in out and "batches:" in out
+    assert _CR_KEY.reveal() not in json.dumps(report) + out
+
+
+def test_an_unreachable_embedder_is_fatal_before_any_launch(monkeypatch, tmp_path, capsys):
+    # [CP2-C18] BDD-09 at main(): [FATAL], exit 1, nothing launched.
+    import run_magi
+    from magi_rs_code_review import MagiRsCodeReview
+    from magi_rs_embedder import EmbedderUnreachableError
+
+    def _preflight(self):
+        raise EmbedderUnreachableError(
+            "embedder http://localhost:11434/v1 (nomic-embed-text-v2-moe) is unreachable"
+        )
+
+    launched = []
+
+    async def _no_launch(self, *args, **kwargs):
+        launched.append("run_trio")
+
+    monkeypatch.setattr(MagiRsCodeReview, "preflight", _preflight)
+    monkeypatch.setattr(MagiRsCodeReview, "run_trio", _no_launch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["run_magi.py", "code-review", "--ollama", "--commit", "abc", "--no-status"]
+    )
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code == 1 and launched == []
+    assert capsys.readouterr().err.startswith("[FATAL]")
+
+
+def test_main_refuses_a_target_inside_a_rotation_backup(monkeypatch, tmp_path, capsys):
+    # [CP2-C12] BDD-17, backup half: main passes rotation_backup_root() as a forbidden root.
+    backup = tmp_path / "state" / "rotated" / "x" / ".magi"
+    backup.mkdir(parents=True)
+    monkeypatch.setattr(
+        "run_magi.rotation_backup_root", lambda: str(tmp_path / "state" / "rotated")
+    )
+    with pytest.raises(SystemExit) as exc:
+        _run_main(monkeypatch, tmp_path, ["code-review", "--ollama", str(backup)])
+    assert exc.value.code == 1
+    assert capsys.readouterr().err.startswith("ERROR:")
+
+
+def test_a_lost_history_window_warns_and_keeps_the_report(monkeypatch, tmp_path, capsys):
+    report = _run_main_with_fake_review(
+        monkeypatch,
+        tmp_path,
+        ["code-review", "--ollama", "--commit", "abc"],
+        history_recorded=False,
+    )
+    assert report["consensus"] is not None
+    assert "history was not recorded" in capsys.readouterr().err
+
+
+def test_code_review_without_ollama_is_unchanged(monkeypatch, tmp_path):
+    called = []
+    monkeypatch.setattr(
+        "run_magi._maybe_enrich", lambda *a, **k: called.append("enrich") or (a[0], None)
+    )
+    _run_main_claude_path(monkeypatch, tmp_path, ["code-review", "bundle.md"])
+    assert called == ["enrich"]
+
+
+def test_the_claude_path_still_enriches_against_main_when_base_is_omitted(monkeypatch, tmp_path):
+    # [RD-D35] --base is shared and its parser default is None; the Claude path keeps "main".
+    seen = []
+    monkeypatch.setattr(
+        "run_magi._maybe_enrich",
+        lambda mode, content, **k: seen.append(k["base_ref"]) or (content, None),
+    )
+    _run_main_claude_path(monkeypatch, tmp_path, ["code-review", "bundle.md"])
+    assert seen == ["main"]
+
+
+def _exec_recording(process):
+    """A `create_subprocess_exec` fake that returns `process` and remembers the argv it got."""
+
+    async def _fake_exec(*argv, **kwargs):
+        _fake_exec.seen["argv"] = argv
+        return process
+
+    _fake_exec.seen = {}
+    return _fake_exec
+
+
+# [RD-D28] the imports of this task live at module level (helpers section); MagiKey is already imported (MS1 RD-D16).
+
+
+_CR_KEY = MagiKey("main-review-key-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=")
+
+
+def _run_main_with_fake_review(
+    monkeypatch, tmp_path, argv, overrides=None, history_recorded=True, payload=None
+):
+    """Run main() on `code-review --ollama` with a faked magi-rs child; return the report or None."""
+    import run_magi
+    from magi_rs_code_review import MagiRsCodeReview
+
+    def _preflight(self):
+        self._key = _CR_KEY
+        self._executable = "magi-rs"
+        return "magi-rs"
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(MagiRsCodeReview, "preflight", _preflight)
+    if not history_recorded:
+        monkeypatch.setattr("magi_rs_code_review.HISTORY_WINDOW_SECONDS", 0.1)
+    stdout = (
+        payload if payload is not None else _cr_payload(**(overrides or {}))
+    )  # [CP2-M8] a mutated envelope
+    process = _StreamingProcess(stdout, exits_after=0.0 if history_recorded else None)
+    fake_exec = _exec_recording(process)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    out = tmp_path / "out"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_magi.py", *argv, "--timeout", "1", "--no-status", "--output-dir", str(out)],
+    )
+    try:
+        run_magi.main()
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            raise
+    path = out / "magi-report.json"
+    report = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    if report is not None:
+        report["_argv_seen"] = list(fake_exec.seen.get("argv", ()))
+    return report
+
+
+def _run_main(monkeypatch, tmp_path, argv):
+    """Like `_run_main_with_fake_review`, letting a non-zero SystemExit propagate to the test."""
+    return _run_main_with_fake_review(monkeypatch, tmp_path, argv)
+
+
+def _run_main_claude_path(monkeypatch, tmp_path, argv):
+    """Run main() on the Claude path up to the orchestrator, which is stopped there."""
+    import run_magi
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bundle.md").write_text("# bundle\n", encoding="utf-8")
+    monkeypatch.setattr(run_magi.shutil, "which", lambda _: "/bin/claude")
+
+    async def _stop(*a, **k):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(run_magi, "run_orchestrator", _stop)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", *argv, "--no-status"])
+    with pytest.raises(SystemExit):
+        run_magi.main()
+
+
+def test_code_review_ollama_without_timeout_passes_the_default_to_magi_rs(monkeypatch, tmp_path):
+    # [PM-MS2-C6] REQ-14: the default reaches the child's argv (the helper's --timeout 1 is overridden here).
+    import run_magi
+    from magi_rs_code_review import MagiRsCodeReview
+    from magi_rs_trio import DEFAULT_OLLAMA_TIMEOUT_SECONDS
+
+    seen = {}
+
+    async def _stop(self, *a, **k):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(MagiRsCodeReview, "run_trio", _stop)
+    original = MagiRsCodeReview.__init__
+
+    def _spy(self, workdir, target, timeout, *a, **k):
+        seen["timeout"] = timeout
+        original(self, workdir, target, timeout, *a, **k)
+
+    monkeypatch.setattr(MagiRsCodeReview, "__init__", _spy)
+    monkeypatch.setattr(MagiRsCodeReview, "preflight", lambda self: "magi-rs")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["run_magi.py", "code-review", "--ollama", "--commit", "abc", "--no-status"]
+    )
+    with pytest.raises(SystemExit):
+        run_magi.main()
+    assert seen["timeout"] == DEFAULT_OLLAMA_TIMEOUT_SECONDS
