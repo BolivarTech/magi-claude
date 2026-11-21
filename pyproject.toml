@@ -38,7 +38,7 @@ follow_imports = "skip"
 # adding tests/ to mypy_path would duplicate the two ``conftest`` modules. Treat
 # the bare import as untyped; the module itself is still checked under tests.*.
 [[tool.mypy.overrides]]
-module = "rotation_harness"
+module = ["rotation_harness", "_magi_rs_fakes"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

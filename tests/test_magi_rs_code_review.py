@@ -1,0 +1,157 @@
+# Author: Julian Bolivar
+# Version: 7.1.0
+# Date: 2026-11-21
+"""Tests for MagiRsCodeReview, the executor of one ``magi-rs code-review`` (MS2 Task 3).
+
+Every child process is faked: nothing here launches a binary or reaches the network.
+"""
+
+import asyncio
+
+import pytest
+
+from _magi_rs_fakes import _StreamingProcess, _cr_payload, _stub_bootstrap, _stub_pin
+from magi_key import MagiKey
+from magi_rs_code_review import (
+    HISTORY_WARNING_MARKER,
+    HISTORY_WINDOW_SECONDS,
+    TIMEOUT_REJECTION_MARKER,
+    MagiRsCodeReview,
+    build_review_argv,
+)
+from magi_rs_targets import ReviewTarget
+from magi_rs_trio import MagiRsProcessError
+
+_KEY = MagiKey("review-key-EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE=")
+_TARGET = ReviewTarget("branch", ("--base", "main", "--head", "HEAD"), "branch main...HEAD")
+
+
+def test_the_argv_maps_the_target_and_never_passes_no_memory_or_the_key():
+    argv = build_review_argv("/bin/magi-rs", "/repo", _TARGET, 16820)
+    assert argv == [
+        "/bin/magi-rs",
+        "code-review",
+        "--base",
+        "main",
+        "--head",
+        "HEAD",
+        "--output-format",
+        "json",
+        "--structured-verdicts",
+        "-w",
+        "/repo",
+        "--timeout",
+        "16820",
+    ]
+    assert "--no-memory" not in argv and _KEY.reveal() not in " ".join(argv)
+
+
+def _review(monkeypatch, tmp_path, process, timeout=1):
+    monkeypatch.setattr(
+        "magi_rs_code_review.ProjectPreflight.require_ready", staticmethod(lambda *a, **k: _KEY)
+    )
+    _stub_bootstrap(monkeypatch, module="magi_rs_code_review")
+    seen = {}
+
+    async def _exec(*argv, **kwargs):
+        seen["argv"], seen["env"], seen["stdin"] = argv, kwargs["env"], kwargs.get("stdin")
+        seen["calls"] = seen.get("calls", 0) + 1
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _exec)
+    executor = MagiRsCodeReview(str(tmp_path), _TARGET, timeout, str(tmp_path / "bin"), _stub_pin())
+    executor.preflight()  # stores the key, as main() does
+    return executor, seen
+
+
+def test_the_review_preflight_passes_an_embedder_probe(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(
+        "magi_rs_code_review.ProjectPreflight.require_ready",
+        staticmethod(lambda workdir, ks, probe=None: seen.append(probe) or _KEY),
+    )
+    _stub_bootstrap(monkeypatch, module="magi_rs_code_review")
+    MagiRsCodeReview(str(tmp_path), _TARGET, 1, str(tmp_path / "bin"), _stub_pin()).preflight()
+    assert len(seen) == 1 and seen[0] is not None
+
+
+@pytest.mark.asyncio
+async def test_the_key_travels_by_environment_and_stdin_is_closed(monkeypatch, tmp_path):
+    executor, seen = _review(monkeypatch, tmp_path, _StreamingProcess(_cr_payload()))
+    await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    assert seen["env"]["MAGI_PASSPHRASE"] == _KEY.reveal()
+    assert seen["stdin"] == asyncio.subprocess.DEVNULL
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_records_history_within_the_window_is_not_killed(monkeypatch, tmp_path):
+    process = _StreamingProcess(_cr_payload(), exits_after=0.2)
+    executor, _ = _review(monkeypatch, tmp_path, process, timeout=0)  # outer = 0 + window
+    await executor.run_trio("", "agents", str(tmp_path), 0, {}, 1)
+    assert process.killed is False and executor.history_recorded is True
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_overruns_the_window_is_killed_but_its_report_stays_valid(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("magi_rs_code_review.HISTORY_WINDOW_SECONDS", 0.1)
+    process = _StreamingProcess(_cr_payload(), exits_after=None, hold_eof=True)  # a wedged child
+    executor, _ = _review(monkeypatch, tmp_path, process, timeout=0)
+    verdicts = await asyncio.wait_for(executor.run_trio("", "agents", str(tmp_path), 0, {}, 1), 5)
+    assert process.killed is True and executor.history_recorded is False
+    assert len(verdicts) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_killed_child_with_an_incomplete_envelope_is_a_process_error(monkeypatch, tmp_path):
+    monkeypatch.setattr("magi_rs_code_review.HISTORY_WINDOW_SECONDS", 0.1)
+    process = _StreamingProcess(_cr_payload()[:50], exits_after=None, hold_eof=True)
+    executor, _ = _review(monkeypatch, tmp_path, process, timeout=0)
+    with pytest.raises(MagiRsProcessError):
+        await asyncio.wait_for(executor.run_trio("", "agents", str(tmp_path), 0, {}, 1), 5)
+    assert process.killed is True
+
+
+@pytest.mark.asyncio
+async def test_the_outer_deadline_is_the_timeout_plus_the_window(monkeypatch, tmp_path):
+    # A child exiting at 1.2 s survives only under timeout + window (1 + 0.5);
+    # a timeout-only (1.0) or window-only (0.5) deadline kills it.
+    monkeypatch.setattr("magi_rs_code_review.HISTORY_WINDOW_SECONDS", 0.5)
+    process = _StreamingProcess(_cr_payload(), exits_after=1.2)
+    executor, _ = _review(monkeypatch, tmp_path, process, timeout=1)
+    await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    assert process.killed is False
+
+
+@pytest.mark.asyncio
+async def test_an_insufficient_timeout_is_one_error_naming_timeout(monkeypatch, tmp_path):
+    process = _StreamingProcess(b"", TIMEOUT_REJECTION_MARKER.encode(), returncode=1)
+    executor, seen = _review(monkeypatch, tmp_path, process)
+    with pytest.raises(MagiRsProcessError) as exc:
+        await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    assert "--timeout" in str(exc.value)
+    assert seen["calls"] == 1  # REQ-14 "without retrying"
+
+
+@pytest.mark.asyncio
+async def test_no_failure_message_contains_the_key(monkeypatch, tmp_path):
+    process = _StreamingProcess(b"", _KEY.reveal().encode(), returncode=1)
+    executor, _ = _review(monkeypatch, tmp_path, process)
+    with pytest.raises(MagiRsProcessError) as exc:
+        await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    assert _KEY.reveal() not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_magi_rs_own_history_warning_means_history_was_not_recorded(monkeypatch, tmp_path):
+    process = _StreamingProcess(
+        _cr_payload(), stderr=HISTORY_WARNING_MARKER.encode(), exits_after=0.0
+    )
+    executor, _ = _review(monkeypatch, tmp_path, process)
+    await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    assert process.killed is False and executor.history_recorded is False
+
+
+def test_the_history_window_covers_magi_rs_thirty_seconds():
+    assert HISTORY_WINDOW_SECONDS >= 30
