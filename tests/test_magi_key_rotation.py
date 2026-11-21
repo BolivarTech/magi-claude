@@ -952,6 +952,8 @@ def test_an_unverifiable_key_this_rotation_wrote_is_owned_and_the_backup_stays_p
     message = str(exc.value)
     assert "created by this rotation" in message and "could not be verified" in message
     assert "S-1-5-11" in message and "do not move the exposed backup back" in message
+    # [n-4] the action that verifies the key again is named: any --ollama command runs that preflight.
+    assert "run any --ollama command" in message and "preflight verifies the key" in message
     assert "may not have created it" not in message and "\n" not in message.strip()
 
 
