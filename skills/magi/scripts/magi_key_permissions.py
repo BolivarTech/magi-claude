@@ -79,9 +79,37 @@ _WHOAMI_ARGS = ("/user", "/fo", "csv", "/nh")
 _ACL_PATH_VARIABLE = "MAGI_ACL_PATH"
 """Environment variable that carries the path to PowerShell; never interpolated into the command."""
 
-_POWERSHELL_CACHE_VARIABLES = ("LOCALAPPDATA", "APPDATA")
-"""Where Windows PowerShell 5.1 keeps its module-analysis cache. Not secret; without them a
-cold start rebuilds the cache on every run and outlived ``_COMMAND_TIMEOUT_SECONDS`` on CI."""
+_WINDOWS_SYSTEM_VARIABLES = (
+    "LOCALAPPDATA",
+    "APPDATA",
+    "WINDIR",
+    "SYSTEMDRIVE",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "PROGRAMDATA",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "COMMONPROGRAMW6432",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "ALLUSERSPROFILE",
+    "PUBLIC",
+    "COMPUTERNAME",
+    "USERNAME",
+    "USERDOMAIN",
+    "HOMEDRIVE",
+    "HOMEPATH",
+)
+"""Non-secret Windows system variables the permission tools get on top of the allowlist, upper case.
+
+ENUMERATED, matched case-insensitively, copied only when the parent has them.
+A cold Windows PowerShell 5.1 on the CI runner outlived ``_COMMAND_TIMEOUT_SECONDS``
+without the system environment (``LOCALAPPDATA``/``APPDATA``, its module-analysis
+cache, were not enough), while the full environment minus ``PSModulePath`` started
+in time. None of these names carries a credential."""
 
 _STDERR_EXCERPT_CHARS = 300
 """How much of a failed tool's stderr an error message carries, from its start (the headline)."""
@@ -157,14 +185,17 @@ def _stderr_excerpt(error: subprocess.SubprocessError) -> str:
 
 
 def _tool_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Return the environment of a permission tool: the magi-rs allowlist, PowerShell's cache dirs, ``extra``.
+    """Return the environment of a permission tool: the allowlist, the Windows system variables, ``extra``.
 
     The same allowlist the ``magi-rs`` child gets (``EnvironmentPolicy``), so no
     API key and no parent ``MAGI_PASSPHRASE`` reach whoami, icacls or
-    PowerShell. ``_POWERSHELL_CACHE_VARIABLES`` are added when the parent has
-    them, so PowerShell can use its module-analysis cache. ``PSModulePath`` is
-    not allowlisted: a PowerShell 7 module path inherited by Windows PowerShell
-    5.1 keeps ``Get-Acl`` from loading, and unset, 5.1 rebuilds its default.
+    PowerShell. The ``_WINDOWS_SYSTEM_VARIABLES`` the parent has are added,
+    whatever their case. ``PSModulePath`` is not among either: a PowerShell 7
+    module path inherited by Windows PowerShell 5.1 keeps ``Get-Acl`` from
+    loading, and unset, 5.1 rebuilds its default.
+
+    Complexity: O(n) in the number of parent variables (each checked against
+    22 names), once per tool run.
 
     Args:
         extra: The variables that carry the tool's input, added on top.
@@ -174,7 +205,11 @@ def _tool_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:
     """
     env = EnvironmentPolicy.build(os.environ)
     env.update(
-        {name: os.environ[name] for name in _POWERSHELL_CACHE_VARIABLES if name in os.environ}
+        {
+            name: value
+            for name, value in os.environ.items()
+            if name.upper() in _WINDOWS_SYSTEM_VARIABLES
+        }
     )
     env.update(extra or {})
     return env
