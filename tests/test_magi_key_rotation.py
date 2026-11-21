@@ -707,3 +707,63 @@ def test_a_failed_init_never_removes_a_magi_dir_holding_another_process_key(tmp_
     message = str(exc.value)
     assert os.listdir(tmp_path / "rotated")[0] in message and "another process" in message
     assert "\n" not in message.strip() and FOREIGN.reveal() not in message
+
+
+class _InterruptingGuard(_NoopGuard):
+    """Raises KeyboardInterrupt on the first harden of a path inside the moved backup."""
+
+    def harden(self, path, directory):
+        parts = os.path.normpath(path).split(os.sep)
+        if "rotated" in parts and ".magi" in parts[parts.index("rotated") :]:
+            raise KeyboardInterrupt
+
+
+class _InterruptingVerifyGuard(_NoopGuard):
+    """Raises KeyboardInterrupt when the new key at the project root is verified."""
+
+    def __init__(self, work):
+        self.work = str(work)
+
+    def verify(self, path, directory):
+        if path.startswith(self.work) and not directory:
+            raise KeyboardInterrupt
+
+
+def _interrupt(*args, **kwargs):
+    raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize("step", ["reharden", "init", "verify", "vault-ls"])
+def test_an_interrupt_after_the_move_ends_as_one_line_naming_the_backup(tmp_path, step):
+    # [W1] REQ-13h: a Ctrl-C after the move never leaves the operator without the backup's location.
+    work = _project(tmp_path)
+    extra = {
+        "reharden": {"guard": _InterruptingGuard()},
+        "init": {"init": _interrupt},
+        "verify": {"guard": _InterruptingVerifyGuard(work)},
+        "vault-ls": {"vault_ls": _interrupt},
+    }[step]
+    rotation, _ = _rotation(tmp_path, **extra)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    backups = os.listdir(tmp_path / "rotated")
+    assert len(backups) == 1
+    assert (tmp_path / "rotated" / backups[0] / ".magi" / "magi.toml").read_text() == "old"
+    message = str(exc.value)
+    assert os.path.join(backups[0], ".magi") in message
+    assert isinstance(exc.value.__cause__, KeyboardInterrupt)
+    assert "\n" not in message.strip() and OLD.reveal() not in message
+
+
+def test_an_interrupted_init_leaves_no_half_made_magi_dir(tmp_path):
+    # [W1] the described safe state: the old .magi/ in the backup, none at the root, "move it back".
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        os.makedirs(os.path.join(workdir, ".magi"))
+        raise KeyboardInterrupt
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert not (work / ".magi").exists() and "move it back" in str(exc.value)

@@ -5685,3 +5685,30 @@ def test_the_rotate_fatal_is_one_line_with_its_notes(monkeypatch, capsys):
     )
     assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
     _assert_one_fatal_line_with_the_note(capsys.readouterr().err)
+
+
+def test_rotate_main_turns_an_interrupted_init_into_one_line_and_exit_1(
+    monkeypatch, tmp_path, capsys
+):
+    # [W1] a KeyboardInterrupt inside magi-rs init, after the move: one line naming the backup, never a traceback.
+    class _OpenGuard:
+        def harden(self, path, directory):
+            pass
+
+        def verify(self, path, directory):
+            pass
+
+    work = tmp_path / "repo"
+    (work / ".magi" / ".secret").mkdir(parents=True)
+    (work / ".magi" / ".secret" / "magi.key").write_text("old-key-" + "E" * 36, encoding="ascii")
+    state = tmp_path / "state"
+    monkeypatch.setenv("LOCALAPPDATA" if sys.platform == "win32" else "XDG_STATE_HOME", str(state))
+    monkeypatch.chdir(work)
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr("run_magi.default_key_store", lambda: KeyStore(_OpenGuard()))
+    monkeypatch.setattr("run_magi.run_ollama_init", _raise(KeyboardInterrupt()))
+    assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
+    err = capsys.readouterr().err
+    (backup,) = os.listdir(state / "magi" / "rotated")
+    assert err.startswith("ERROR:") and err.count("\n") == 1 and "Traceback" not in err
+    assert backup in err and "move it back" in err
