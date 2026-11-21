@@ -62,7 +62,7 @@ do with memory, and where your data goes are in
 [`docs/ollama-backend.md`](docs/ollama-backend.md).
 
 **New in v7.1.0: `magi-rs` 0.25.0.** The pinned `magi-rs` moves from 0.24.1 to 0.25.0. A
-`.magi/` created with 7.0.x keeps working as it is, and flags, defaults and the report are
+`.magi/` created with 7.0.x keeps working as it is (under 7.1.0; see v8.0.0 above), and flags, defaults and the report are
 unchanged. The new binary brings `magi-rs`'s own `code-review` command, which the plugin
 does not use yet, and fixes from 0.24.2 and 0.24.3, among them clearer transport errors and
 patched TLS dependencies. Details in [`docs/ollama-backend.md`](docs/ollama-backend.md)
@@ -243,7 +243,7 @@ python skills/magi/scripts/run_magi.py <mode> <file_or_text> [--model opus] [--t
 | `--ollama-rotate-key` | — | Replace an exposed key, the database and the vault; asks `y/N` in a terminal, needs `--yes` without one |
 | `--yes` | off | Authorises `--ollama-rotate-key` without a terminal prompt |
 | `--commit`, `--from`/`--to`, `--base`/`--head`, `--uncommitted` | `--base main --head HEAD` | Targets of `code-review --ollama`; pick one, or pass a path as the input |
-| `--timeout` | `900` / `16820` | Per-agent timeout in seconds (`900` on the Claude path; `16820` with `--ollama`, where it also sets each mage's per-attempt budget) |
+| `--timeout` | `900` / `16820` | Per-agent timeout in seconds (`900` on the Claude path; `16820` with `--ollama`, where it also sets each mage's per-attempt budget; for `code-review --ollama` it is the total for the review, see `docs/ollama-backend.md` section 1a) |
 | `--output-dir` | auto | Directory for agent outputs (default: temp dir) |
 | `-o`, `--out` | — | Redirect the human-readable verdict report to a file (suppressing it on stdout); on a write failure it warns and falls back to stdout so the verdict is never lost |
 

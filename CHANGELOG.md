@@ -24,6 +24,8 @@ release.
   the old one.
 - `--ollama-init` exits 1 with a `[FATAL]` line when it fails. In 7.x it relayed the refusal
   and exited 0.
+- `code-review --ollama` needs the `[embedding]` endpoint to answer. 7.x ran without an
+  embedder; now the run stops with `[FATAL]` before any model is called.
 
 ### Added
 
@@ -35,8 +37,8 @@ release.
   prompt. `--ollama-rotate-key [--yes]` replaces an exposed key, the database and the vault,
   moving the old `.magi/` to a backup outside every working tree and listing the names of
   the keys to revoke. A lost key cannot be recovered.
-- `code-review --ollama` checks that the `[embedding]` endpoint answers before reading the
-  target. The `code_review` object of `magi-rs` is copied to `magi_rs.code_review`, with an
+- `code-review --ollama` checks that the `[embedding]` endpoint answers before any model is
+  called. The `code_review` object of `magi-rs` is copied to `magi_rs.code_review`, with an
   effort block. `without_embedder` marks the run degraded; `without_memory` is an error.
 - The release check on marker adherence now measures `analysis --ollama` in a throwaway
   workspace. Its series starts again at 8.0.0 and the artifact declares `schema: "v8"`.

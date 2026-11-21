@@ -15,7 +15,8 @@ where the configuration lives, and what `--timeout` does.
 Version 8.0.0 changes two more things. `code-review --ollama` now hands the whole review to
 `magi-rs`'s own `code-review` command (section 1a), and every `--ollama` run opens the
 project's `magi-rs` state with a key the plugin generates and keeps (section 2a). A `.magi/`
-created by 7.x has to be regenerated (section 2).
+created by 7.x has to be regenerated (section 2). For `code-review --ollama` the plugin builds
+no payload and makes no `consult` call; read the paragraphs above with that exception (section 1a).
 
 ## 1. Quick start
 
@@ -90,8 +91,8 @@ is reviewed as a file, and its content is never read as instructions.
 
 **The embedder is a prerequisite.** `magi-rs code-review` gets documentation and earlier
 findings through the embedder configured in `[embedding]` of `.magi/magi.toml` (the
-`base_url` is inherited from the top level when `[embedding]` does not set one). Before it
-reads the target, the plugin sends one small request to that endpoint. If the connection
+`base_url` is inherited from the top level when `[embedding]` does not set one). Before any
+model is called, the plugin sends one small request to that endpoint. If the connection
 fails or times out, the run stops with one `[FATAL]` line that names the endpoint and the
 model. The probe measures reachability only: any HTTP answer counts, a 401 or 403 included,
 so a key that is missing or wrong passes the probe and fails later, during the review, with
@@ -120,8 +121,8 @@ spending anything (measured with 0.25.0: a floor of 114 s per batch), and the pl
 that as one `ERROR:` line naming `--timeout`. It does not retry with another value. After
 the report is printed, `magi-rs` records the review history, which can take up to 30 s. The
 plugin gives the child 45 s beyond `--timeout` to finish that, and only then ends it. If
-the history could not be recorded, `magi-rs` says so on stderr, the plugin relays it as a
-warning, and the report already written stays valid.
+the history could not be recorded, `magi-rs` says so on stderr; the plugin detects that
+line and prints its own warning, and the report already written stays valid.
 
 **Framing a gate.** Without a bundle, what the mages are told is settled comes from the
 documentation `magi-rs` indexes: `README.md` and `CLAUDE.md` at the root, `docs/**/*.md`,
@@ -154,7 +155,7 @@ of `magi.toml` on this side.
 
 **Upgrading from 6.x or 7.x: `.magi/` has to be regenerated (8.0.0).** A `.magi/` created
 by 7.x has no key, and the plugin does not adapt it. Every `--ollama` mode stops with a
-`[FATAL]` line that gives the procedure, the same one 7.0.0 asked of 6.x users. From the
+`[FATAL]` line that gives the procedure. From the
 project root:
 
 1. Move the old state directory aside, to somewhere outside the project. A backup left in
@@ -171,7 +172,7 @@ project root:
 Do not bring back the old `.magi-rs-memory.db`; the plugin never reads it. `--ollama-init`
 on a project that already has a `.magi/` touches nothing in it (config, key and database)
 and says so. A key that exists is never overwritten, and a database is never deleted or
-recreated. To go back to 7.x, restore the backup.
+recreated.
 
 An older migration works the same way, with `magi-rs`'s message as the guide. In a
 `magi.toml` written by a `magi-rs` older than 0.18.0, the
@@ -230,8 +231,9 @@ already left. Instead it:
    its provider and load the new one with `--ollama-vault-set`.
 
 The memory and the review history are lost, and the new `magi.toml` is the binary's default.
-Destroy the backup once you no longer need it. If a rotation stops midway, the message
-describes what was left; the old `.magi/` is intact in the backup, and you can move it back.
+Destroy the backup once you no longer need it. If a rotation stops midway, its one-line
+message says where the old `.magi/` is and whether a new one must be removed before you move
+it back; follow it.
 
 **There is no recovery of a lost key.** If the key file is gone, so is what it protected: the
 memory and the vault contents. Regenerate the project's `.magi/` as described in section 2.
@@ -289,6 +291,9 @@ the evidence of a run that failed. When the child dies or hangs, the error names
 allowlist as a suspect and lists the parent variables that were withheld, by name only.
 
 ## 4. `--timeout` has two effects
+
+For `code-review --ollama` there is no payload and no consult: `--timeout` is the total for
+the review (section 1a).
 
 `--timeout` is still the wall-clock ceiling of the run. It is also the number `magi-rs`
 derives each mage's per-attempt budget from. The default on this path is **16820**, not the
