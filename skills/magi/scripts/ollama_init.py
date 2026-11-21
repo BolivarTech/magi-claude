@@ -24,6 +24,7 @@ from enum import Enum
 from magi_key import (
     KEY_DIR_PARTS,
     REGENERATION_GUIDANCE,
+    KeyHardeningError,
     KeyMissingError,
     KeyStore,
     KeyStoreError,
@@ -172,7 +173,9 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
             needs saying instead (the removal failed, so the message says to delete it by hand;
             or the ``.magi/`` now holds a key this call did not write, e.g. ``persist`` raised
             ``FileExistsError`` because another process initialised it, so it is never removed),
-            an ``OllamaInitError`` carrying that sentence is raised from the original. An
+            an ``OllamaInitError`` carrying that sentence and its ``leftover``
+            (:class:`InitLeftover`) is raised from the original. A failed child
+            always ends as an ``OllamaInitError`` with its ``leftover``. An
             interrupt (``KeyboardInterrupt``, ``SystemExit``) is re-raised as itself; its
             sentence is written to stderr as one ``[!] WARNING:`` line first.
         OllamaInitError: ``magi-rs init`` exited non-zero; the message is its
@@ -214,16 +217,44 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
             raise OllamaInitError(output)
         store.persist(workdir, key)
     except BaseException as error:
-        if _holds_other_key(store, workdir, key):
-            note = _OTHER_PROCESS_NOTE.format(magi_dir=magi_dir)
-        else:
-            note = _remove_created_magi_dir(magi_dir)
-        if not note:
-            raise
+        leftover, note = _clean_up(store, workdir, key, error)
         if not isinstance(error, Exception):
             # An interrupt stays an interrupt; its cleanup sentence goes to stderr, one line.
-            print(f"[!] WARNING: {one_line(note)}", file=sys.stderr)
+            if note:
+                print(f"[!] WARNING: {one_line(note)}", file=sys.stderr)
+            raise
+        if leftover is InitLeftover.REMOVED and not isinstance(error, OllamaInitError):
             raise
         detail = one_line(key.redact(str(error))) or type(error).__name__
-        raise OllamaInitError(f"{detail}\n{note}") from error
+        raise OllamaInitError(f"{detail}\n{note}" if note else detail, leftover=leftover) from error
     return output
+
+
+def _clean_up(
+    store: KeyStore, workdir: str, key: MagiKey, error: BaseException
+) -> tuple[InitLeftover, str]:
+    """Remove what a failed initialisation created, or keep what is not this call's; say which.
+
+    The one place that decides whether the key at ``workdir`` is this call's.
+
+    Args:
+        store: The key store of this call.
+        workdir: The project root.
+        key: The key this call generated.
+        error: What stopped the initialisation.
+
+    Returns:
+        ``(leftover, note)``: what is left at ``.magi/`` and the sentence the
+        operator needs about it (empty when it was removed).
+    """
+    magi_dir = os.path.join(workdir, _MAGI_DIR)
+    if _holds_other_key(store, workdir, key):
+        return InitLeftover.FOREIGN_KEPT, _OTHER_PROCESS_NOTE.format(magi_dir=magi_dir)
+    note = _remove_created_magi_dir(magi_dir)
+    if not note:
+        return InitLeftover.REMOVED, ""
+    if not os.path.lexists(store.key_path(workdir)):
+        return InitLeftover.HALF_MADE_KEPT, note
+    if isinstance(error, KeyHardeningError):
+        return InitLeftover.HARDENING_FAILED_KEPT, note
+    return InitLeftover.KEY_WRITTEN_KEPT, note

@@ -53,13 +53,12 @@ from magi_key import (
     DIR_MODE,
     KEY_DIR_PARTS,
     KeyGuard,
-    KeyHardeningError,
     KeyStore,
     KeyStoreError,
     MagiKey,
 )
 from magi_rs_vault import VAULT_KEY_NAMES
-from ollama_init import MagiDirExistsError
+from ollama_init import InitLeftover, MagiDirExistsError, OllamaInitError
 from one_line import one_line
 
 MAGI_DIR = KEY_DIR_PARTS[0]
@@ -96,6 +95,24 @@ _CONFIRM_PROMPT = (
 
 class RotationNotAuthorisedError(Exception):
     """The rotation was not authorised; nothing changed (a sibling of ``ValidationError``)."""
+
+
+_LEFTOVER_CLAUSES = {
+    InitLeftover.REMOVED: "",
+    InitLeftover.KEY_WRITTEN_KEPT: (
+        " (the new {magi_dir} was kept: initialisation failed after its key was written; remove it first)"
+    ),
+    InitLeftover.HARDENING_FAILED_KEPT: (
+        " (the new {magi_dir} was kept: its key could not be hardened and may be readable by others; "
+        "remove it first)"
+    ),
+    InitLeftover.FOREIGN_KEPT: (
+        " (and the {magi_dir} now there holds a key this rotation did not write: another process "
+        "initialised it, so it was left in place; move it aside first)"
+    ),
+    InitLeftover.HALF_MADE_KEPT: " (and the half-made {magi_dir} could not be removed: delete it first)",
+}
+"""The clause of a failed ``init``'s message, by what ``run_ollama_init`` reported it left."""
 
 
 class _LinkInBackupError(Exception):
@@ -670,11 +687,14 @@ class KeyRotation:
     ) -> None:
         """Create the new ``.magi/``; on any failure, leave none of this rotation's at the root.
 
-        A ``.magi/`` that ``init`` found already there (``MagiDirExistsError``),
-        or one holding a key that ``init`` did not persist through this
-        rotation's store, is another process's: it is left as it is and named.
-        One holding the key ``init`` just persisted (an interrupt between the
-        write and the return) is kept and named as this rotation's.
+        What a failed ``init`` left is taken from its typed report
+        (``OllamaInitError.leftover``, decided by ``run_ollama_init``'s own
+        cleanup); the rotation never decides who owns a key. A ``.magi/`` that
+        ``init`` found already there (``MagiDirExistsError``) is left as it is
+        and named. An interrupt after this rotation's store persisted the key
+        keeps the new ``.magi/`` with the interrupt wording. Any other failure
+        gets the generic wording: a key-less ``.magi/`` is removed, one holding a
+        key is left as it is.
 
         Args:
             workdir: The project root.
@@ -698,55 +718,43 @@ class KeyRotation:
             ) from error
         except BaseException as error:  # noqa: BLE001 - any init failure, an interrupt included, ends in the described state
             detail = one_line(store.redact(old_key.redact(str(error)))) or type(error).__name__
-            leftover = ""
-            if store.holds_written_key(workdir):
-                leftover = self._own_key_leftover(magi_dir, error)
-            elif os.path.lexists(self._store.key_path(workdir)):
+            if isinstance(error, (KeyboardInterrupt, SystemExit)) and store.holds_written_key(
+                workdir
+            ):
                 leftover = (
-                    f" (and the {magi_dir} now there holds a key this rotation did not write: another "
-                    "process initialised it, so it was left in place; move it aside first)"
+                    f" (the new {magi_dir} was kept: initialisation was interrupted after its key was written; "
+                    "move it aside first)"
                 )
-            elif os.path.lexists(magi_dir):
-                try:
-                    shutil.rmtree(magi_dir)
-                except OSError:
-                    leftover = (
-                        f" (and the half-made {magi_dir} could not be removed: delete it first)"
-                    )
+            elif isinstance(error, OllamaInitError) and error.leftover is not None:
+                leftover = _LEFTOVER_CLAUSES[error.leftover].format(magi_dir=magi_dir)
+            else:
+                leftover = self._unreported_leftover(workdir, magi_dir)
             raise RotationFailedError(
                 f"creating the new {MAGI_DIR}/ failed ({detail}){leftover}: the old one is intact at "
                 f"{os.path.join(backup_dir, MAGI_DIR)}; move it back to {magi_dir} to retry"
             ) from error
 
-    @staticmethod
-    def _own_key_leftover(magi_dir: str, error: BaseException) -> str:
-        """Describe a new ``.magi/`` that holds this rotation's key after ``init`` failed, by the cause.
+    def _unreported_leftover(self, workdir: str, magi_dir: str) -> str:
+        """Handle a ``.magi/`` that an init failure left without a typed report, guessing nothing.
 
-        The error and its ``__cause__`` are both classified: ``run_ollama_init``
-        folds a cleanup sentence into an ``OllamaInitError`` chained from the
-        original failure.
+        A ``.magi/`` without a key holds nothing secret and is removed; one
+        holding a key is left as it is, whoever wrote it.
 
         Args:
+            workdir: The project root.
             magi_dir: ``<workdir>/.magi``.
-            error: What stopped ``init``.
 
         Returns:
-            The parenthetical clause of the failure message: an interrupt, a key
-            that could not be hardened (and may be readable by others), or any
-            other failure after the key was written.
+            The parenthetical clause of the failure message; empty when nothing is left.
         """
-        causes = (error, error.__cause__)
-        if any(isinstance(cause, (KeyboardInterrupt, SystemExit)) for cause in causes):
-            return (
-                f" (the new {magi_dir} was kept: initialisation was interrupted after its key was written; "
-                "move it aside first)"
-            )
-        if any(isinstance(cause, KeyHardeningError) for cause in causes):
-            return (
-                f" (the new {magi_dir} was kept: its key could not be hardened and may be readable by others; "
-                "remove it first)"
-            )
-        return f" (the new {magi_dir} was kept: initialisation failed after its key was written; remove it first)"
+        if os.path.lexists(self._store.key_path(workdir)):
+            return f" (a {magi_dir} holding a key was left as it is: move it aside first)"
+        if os.path.lexists(magi_dir):
+            try:
+                shutil.rmtree(magi_dir)
+            except OSError:
+                return f" (and the half-made {magi_dir} could not be removed: delete it first)"
+        return ""
 
     def _verify_new(
         self, workdir: str, backup_dir: str, old_key: MagiKey, store: _RecordingKeyStore
