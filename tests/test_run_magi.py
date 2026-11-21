@@ -5468,6 +5468,19 @@ def test_rotate_main_verifies_the_binary_before_rotating(monkeypatch, capsys):
     assert rotated == [] and capsys.readouterr().err.startswith("[FATAL]")
 
 
+def test_rotate_main_renders_any_bootstrap_error_as_one_fatal_line(monkeypatch, capsys):
+    # [fix 3] the same exception set as vault_set_main: never a traceback.
+    rotated = []
+    failing = _raise(RuntimeError("unexpected"))
+    monkeypatch.setattr(
+        "run_magi.BinaryBootstrap", lambda *a, **k: SimpleNamespace(ensure=failing, verify=failing)
+    )
+    monkeypatch.setattr("run_magi.KeyRotation.rotate", lambda self, *a, **k: rotated.append(a))
+    assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
+    err = capsys.readouterr().err
+    assert rotated == [] and err.startswith("[FATAL]") and len(err.strip().splitlines()) == 1
+
+
 def test_rotate_main_renders_a_failed_rotation_as_one_line_naming_the_backup(monkeypatch, capsys):
     # [CP2-C35] REQ-13h's most dangerous state (no .magi/ at the root) reaches the operator, never as a traceback.
     _stub_rotation_bootstrap(monkeypatch)

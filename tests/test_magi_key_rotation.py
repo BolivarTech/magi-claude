@@ -96,10 +96,20 @@ class _RecordingGuard(_NoopGuard):
 
 
 class _FailingOnBackupGuard(_NoopGuard):
-    """[CP2-M18] Fails to harden anything under the rotation backup root."""
+    """[CP2-M18] Fails to harden anything inside the moved backup, ``<backup>/<id>/.magi``."""
 
     def harden(self, path, directory):
-        if "rotated" in os.path.normpath(path).split(os.sep):
+        parts = os.path.normpath(path).split(os.sep)
+        if "rotated" in parts and ".magi" in parts[parts.index("rotated") :]:
+            raise KeyHardeningError(f"cannot harden {path}")
+
+
+class _FailingOnBackupIdGuard(_NoopGuard):
+    """[CP2-M32] Fails to harden the backup directory ``<backup>/<id>`` itself."""
+
+    def harden(self, path, directory):
+        parts = os.path.normpath(path).split(os.sep)
+        if len(parts) >= 2 and parts[-2] == "rotated":
             raise KeyHardeningError(f"cannot harden {path}")
 
 
@@ -303,6 +313,7 @@ def test_the_backup_key_and_its_directory_are_hardened_and_verified(tmp_path):
         report.backup_dir,
         True,
     ) in guard.calls  # [CP2-C44] the backup directory itself
+    assert ("verify", report.backup_dir, True) in guard.calls  # [fix 1] verified, not only hardened
 
 
 def test_a_failed_move_leaves_the_magi_dir_in_place_and_no_partial_backup(tmp_path, monkeypatch):
@@ -408,3 +419,72 @@ def test_no_output_of_a_rotation_contains_either_key(tmp_path, capsys):
     out = capsys.readouterr()
     text = repr(report) + out.out + out.err
     assert OLD.reveal() not in text and NEW.reveal() not in text
+
+
+def test_a_backup_dir_that_cannot_be_hardened_stops_before_anything_moves(tmp_path):
+    # [CP2-M32] REQ-13g.1: <backup>/<id> is restricted before the old .magi/ goes into it.
+    work = _project(tmp_path)
+    rotation, _ = _rotation(tmp_path, guard=_FailingOnBackupIdGuard())
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert (work / ".magi" / "magi.toml").read_text() == "old"
+    assert (work / ".magi" / ".secret" / "magi.key").read_text() == OLD.reveal()
+    assert list((tmp_path / "rotated").glob("*")) == []
+    message = str(exc.value)
+    assert (
+        "nothing was moved" in message
+        and "\n" not in message.strip()
+        and OLD.reveal() not in message
+    )
+
+
+def test_a_move_that_lost_any_source_file_keeps_both_copies_and_names_them(tmp_path, monkeypatch):
+    # [fix 2] REQ-13h: "complete" compares contents, not only magi.toml and the key.
+    work = _project(tmp_path)
+    (work / ".magi" / ".magi-rs-memory.db").write_bytes(b"memory")
+
+    def _move(src, dst):
+        shutil.copytree(src, dst)
+        os.remove(os.path.join(src, ".magi-rs-memory.db"))
+        raise OSError("file in use")
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    backups = os.listdir(tmp_path / "rotated")
+    assert len(backups) == 1
+    full = tmp_path / "rotated" / backups[0] / ".magi"
+    assert (full / ".magi-rs-memory.db").read_bytes() == b"memory"
+    assert (work / ".magi" / "magi.toml").read_text() == "old"
+    message = str(exc.value)
+    assert backups[0] in message and str(work / ".magi") in message
+    assert (
+        "unchanged" not in message and "\n" not in message.strip() and OLD.reveal() not in message
+    )
+
+
+def test_an_eof_at_the_confirmation_prompt_is_not_an_authorisation(tmp_path):
+    # [fix 3] a closed stdin at the prompt changes nothing.
+    work = _project(tmp_path)
+    rotation, _ = _rotation(tmp_path)
+
+    def _eof(prompt):
+        raise EOFError
+
+    with pytest.raises(RotationNotAuthorisedError):
+        rotation.rotate(str(work), assume_yes=False, is_tty=True, confirm=_eof)
+    assert (work / ".magi" / "magi.toml").read_text() == "old"
+
+
+def test_an_init_error_quoting_the_old_key_is_redacted(tmp_path):
+    # [fix 3] passes in Red by design (the redaction exists); pins it across the reorder.
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        raise RuntimeError(f"bad passphrase {OLD.reveal()}\nsecond line")
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert OLD.reveal() not in str(exc.value) and "<redacted>" in str(exc.value)
