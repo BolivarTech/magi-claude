@@ -52,6 +52,13 @@ release.
   receives, and the defaults `--ollama-init` writes, including the local `clef-flash` and
   `nimble` fallbacks.
 
+### Known limitations
+
+- With the cloud trio, `magi-rs` 0.25.0 cannot measure the models' context windows and sizes
+  each review batch against its 32 768-token default, which caps a batch near 16 000 tokens.
+  A changed unit larger than that stops `code-review --ollama` before any model is called (a
+  new 806-line Python file did, in our measurement). Review a smaller commit or range.
+
 ## [7.1.0] - 2026-11-19
 
 ### Changed

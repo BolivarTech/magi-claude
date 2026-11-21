@@ -124,6 +124,15 @@ plugin gives the child 45 s beyond `--timeout` to finish that, and only then end
 the history could not be recorded, `magi-rs` says so on stderr; the plugin detects that
 line and prints its own warning, and the report already written stays valid.
 
+**Size of a batch.** `magi-rs` lets one batch, code and context together, take up to half of the
+smallest context window in the pool (the trio plus its fallbacks). A model whose window it could
+not measure counts as 32 768 tokens, and the report lists those models in
+`magi_rs.code_review.unmeasured_models`. With the cloud trio the windows go unmeasured, so a batch
+is capped near 16 000 tokens. A changed unit that does not fit in one batch by itself stops the
+review before any model is called: in our measurement with 0.25.0, a new Python file of 806 lines
+needed 19 281 tokens against a limit of 16 268. The plugin shows the refusal as one `ERROR:` line.
+Review a smaller target instead, such as a commit or a range whose changed units fit.
+
 **Framing a gate.** Without a bundle, what the mages are told is settled comes from the
 documentation `magi-rs` indexes: `README.md` and `CLAUDE.md` at the root, `docs/**/*.md`,
 `adr/**/*.md` and doc comments. For a commit, a range or a branch it reads those files from
@@ -421,6 +430,7 @@ a different mode and are not comparable.
 | `[FATAL]` about the key's permissions | The key file or its directory is reachable by others. Treat the database and the vault as compromised and run `--ollama-rotate-key` (section 2a). |
 | `[FATAL]` naming the embedder endpoint | `code-review --ollama` could not connect to the `[embedding]` endpoint. Start it, or fix `base_url` in `.magi/magi.toml` (section 1a). |
 | `ERROR:` naming `--timeout` on a `code-review --ollama` | `magi-rs` refused the total as too small for the batches before spending anything. Pass a larger `--timeout` (section 1a). |
+| `ERROR:` with `does not fit in one batch` on a `code-review --ollama` | A changed unit is larger than one batch, which is capped near 16 000 tokens when the trio's windows are unmeasured. Review a smaller commit or range (section 1a). |
 | `degraded: true` with `without_embedder` | The embedder failed during the review. The report is written but approves no gate; fix the embedder and run again. |
 
 ## 8. References
