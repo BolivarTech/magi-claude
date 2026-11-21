@@ -12,7 +12,7 @@ import sys
 import pytest
 
 from _magi_rs_fakes import _StreamingProcess, _cr_payload, _stub_bootstrap, _stub_pin
-from magi_key import MagiKey
+from magi_key import KeyExposedError, MagiKey
 from magi_rs_code_review import (
     HISTORY_WARNING_MARKER,
     HISTORY_WINDOW_SECONDS,
@@ -20,6 +20,7 @@ from magi_rs_code_review import (
     MagiRsCodeReview,
     build_review_argv,
 )
+from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_targets import ReviewTarget
 from magi_rs_trio import MagiRsProcessError
 
@@ -74,6 +75,50 @@ def test_the_review_preflight_passes_an_embedder_probe(monkeypatch, tmp_path):
     _stub_bootstrap(monkeypatch, module="magi_rs_code_review")
     MagiRsCodeReview(str(tmp_path), _TARGET, 1, str(tmp_path / "bin"), _stub_pin()).preflight()
     assert len(seen) == 1 and seen[0] is not None
+
+
+@pytest.mark.asyncio
+async def test_a_key_loosened_after_the_preflight_is_refused_before_the_launch(
+    monkeypatch, tmp_path
+):
+    # Loop 1 m3 (R4): run_trio re-verifies the key and the binary, without the embedder probe.
+    calls = []
+
+    def _require_ready(workdir, key_store, probe=None):
+        calls.append(probe)
+        if len(calls) > 1:
+            raise KeyExposedError("key loosened")
+        return _KEY
+
+    monkeypatch.setattr(
+        "magi_rs_code_review.ProjectPreflight.require_ready", staticmethod(_require_ready)
+    )
+    _stub_bootstrap(monkeypatch, module="magi_rs_code_review")
+    launched = []
+
+    async def _exec(*argv, **kwargs):
+        launched.append(argv)
+        return _StreamingProcess(_cr_payload())
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _exec)
+    executor = MagiRsCodeReview(str(tmp_path), _TARGET, 1, str(tmp_path / "bin"), _stub_pin())
+    executor.preflight()
+    with pytest.raises(KeyExposedError):
+        await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    assert launched == [] and calls[0] is not None and calls[1] is None
+
+
+@pytest.mark.asyncio
+async def test_a_binary_that_stops_verifying_is_refused_before_the_launch(monkeypatch, tmp_path):
+    executor, seen = _review(monkeypatch, tmp_path, _StreamingProcess(_cr_payload()))
+
+    def _fails(bootstrap):
+        raise DigestMismatchError("digest differs")
+
+    monkeypatch.setattr("magi_rs_code_review.verified_executable", _fails)
+    with pytest.raises(DigestMismatchError):
+        await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    assert "calls" not in seen
 
 
 @pytest.mark.asyncio
