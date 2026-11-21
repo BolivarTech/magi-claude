@@ -999,7 +999,7 @@ def test_tokens_are_copied_from_batches_never_estimated():
     envelope = _cr_envelope()
     effort = CodeReviewResult.from_json(json.dumps(envelope)).effort()
     assert effort["tokens_by_batch"] == [
-        {k: b.get(k) for k in ("input_tokens", "output_tokens", "ms")}
+        {k: b.get(k) for k in ("index", "input_tokens", "output_tokens", "ms")}
         for b in envelope["code_review"]["batches"]
     ]
 
@@ -1022,3 +1022,12 @@ def test_both_flags_are_false_on_the_clean_capture():
 def test_a_non_boolean_flag_is_an_off_contract_envelope(field, value):
     with pytest.raises(MagiRsContractError, match=field):
         CodeReviewResult.from_json(_raw(**{field: value}))
+
+
+def test_a_failed_batch_does_not_shift_the_batch_index():
+    # Loop 1 m6: batch 2 failed, so list position 1 is batch 3; the index must say so.
+    envelope = _cr_envelope()
+    batches = envelope["code_review"]["batches"]
+    batches[:] = [dict(batches[0], index=1), dict(batches[0], index=3)]
+    effort = CodeReviewResult.from_json(json.dumps(envelope)).effort()
+    assert [entry["index"] for entry in effort["tokens_by_batch"]] == [1, 3]
