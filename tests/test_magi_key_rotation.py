@@ -838,3 +838,56 @@ def test_an_init_interrupted_after_writing_its_key_is_never_blamed_on_another_pr
     assert "interrupted after" in message and "key was written" in message
     assert os.listdir(tmp_path / "rotated")[0] in message
     assert "\n" not in message.strip() and OLD.reveal() not in message
+
+
+def test_a_new_key_that_could_not_be_hardened_is_never_reported_as_an_interruption(
+    tmp_path, monkeypatch
+):
+    # [R2] persist wrote the key, hardening failed and its discard failed too: the key may be readable by
+    # others, which is a different state (and a different remedy) from an interrupt.
+    work = _project(tmp_path)
+    new_key_file = os.path.join(str(work), ".magi", ".secret", "magi.key")
+
+    class _NewKeyUnhardenableGuard(_NoopGuard):
+        def harden(self, path, directory):
+            if os.path.normcase(path) == os.path.normcase(new_key_file):
+                raise KeyHardeningError(f"cannot harden {path}")
+
+    real_remove = os.remove
+
+    def _remove(path, *args, **kwargs):
+        if os.path.normcase(str(path)) == os.path.normcase(new_key_file):
+            raise OSError("file in use")
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr("magi_key.os.remove", _remove)
+
+    def _init(workdir, store):
+        store.persist(workdir, store.new_key())
+        return "initialised"
+
+    rotation, _ = _rotation(tmp_path, init=_init, guard=_NewKeyUnhardenableGuard())
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert "interrupted" not in message
+    assert "could not be hardened" in message and "may be readable by others" in message
+    assert os.listdir(tmp_path / "rotated")[0] in message and "\n" not in message.strip()
+
+
+def test_an_init_error_echoing_the_new_key_is_redacted(tmp_path):
+    # [I-1] the keys this rotation persisted are redacted from the failure detail, not only the old one.
+    work = _project(tmp_path)
+    written = []
+
+    def _init(workdir, store):
+        key = store.new_key()
+        written.append(key)
+        store.persist(workdir, key)
+        raise RuntimeError(f"init echoed {key.reveal()}")
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert written[0].reveal() not in message and "<redacted>" in message
