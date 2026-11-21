@@ -984,7 +984,16 @@ def test_windows_verify_of_an_inheriting_dacl_with_only_a_foreign_deny_is_expose
     assert "inherits" in str(raised.value)
 
 
-@pytest.mark.parametrize("sddl", [f"O:{ME}G:{ME}", "D:NO_ACCESS_CONTROL"])
+@pytest.mark.parametrize(
+    "sddl",
+    [
+        f"O:{ME}G:{ME}",
+        "D:NO_ACCESS_CONTROL",
+        "D:PNO_ACCESS_CONTROL",
+        "D:AINO_ACCESS_CONTROL",
+        "D:PAINO_ACCESS_CONTROL",
+    ],
+)
 def test_windows_verify_of_a_null_or_absent_dacl_is_exposed_not_unverifiable(sddl):
     # [Z5] a NULL DACL grants everyone full access: that is an exposure, not an unreadable descriptor.
     with pytest.raises(KeyExposedError) as raised:
@@ -1017,3 +1026,8 @@ def test_a_ctypes_failure_in_the_native_layer_is_a_hardening_error_on_harden():
     guard.read_sddl = _boom
     with pytest.raises(KeyHardeningError):
         guard.harden("k", directory=False)
+
+
+def test_windows_verify_accepts_a_protected_empty_dacl_for_the_owner_only_case():
+    # [I-1] "D:P" is a real, protected, empty DACL (nobody listed): it is not the NULL-DACL token.
+    _windows_guard("D:P").verify("k")
