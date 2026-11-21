@@ -767,3 +767,74 @@ def test_an_interrupted_init_leaves_no_half_made_magi_dir(tmp_path):
     with pytest.raises(RotationFailedError) as exc:
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert not (work / ".magi").exists() and "move it back" in str(exc.value)
+
+
+def test_an_interrupted_move_with_the_source_complete_removes_the_partial_copy(
+    tmp_path, monkeypatch
+):
+    # [m-1] a Ctrl-C during a cross-volume copytree: same contract as a failed move, one line, chained.
+    work = _project(tmp_path)
+
+    def _move(src, dst):
+        os.makedirs(os.path.join(dst, ".secret"))
+        shutil.copy2(
+            os.path.join(src, ".secret", "magi.key"), os.path.join(dst, ".secret", "magi.key")
+        )
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert (work / ".magi" / "magi.toml").read_text() == "old"
+    assert os.listdir(tmp_path / "rotated") == []  # the partial copy is gone
+    message = str(exc.value)
+    assert "is unchanged" in message and "KeyboardInterrupt" in message
+    assert isinstance(exc.value.__cause__, KeyboardInterrupt)
+    assert "\n" not in message.strip() and OLD.reveal() not in message
+
+
+def test_an_interrupted_move_after_source_files_went_keeps_both_copies_and_names_them(
+    tmp_path, monkeypatch
+):
+    # [m-1] the interrupt lands in the delete half of a cross-volume move: nothing is deleted, both are named.
+    work = _project(tmp_path)
+
+    def _move(src, dst):
+        shutil.copytree(src, dst)
+        os.remove(os.path.join(src, "magi.toml"))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    (backup,) = os.listdir(tmp_path / "rotated")
+    full = tmp_path / "rotated" / backup / ".magi"
+    assert (full / "magi.toml").read_text() == "old" and (full / ".secret" / "magi.key").exists()
+    message = str(exc.value)
+    assert (
+        backup in message and str(work / ".magi") in message and "both copies were kept" in message
+    )
+    assert isinstance(exc.value.__cause__, KeyboardInterrupt)
+    assert "\n" not in message.strip() and OLD.reveal() not in message
+
+
+def test_an_init_interrupted_after_writing_its_key_is_never_blamed_on_another_process(tmp_path):
+    # [m-3] the key at the root is the one this rotation's init just wrote: kept, and said so truthfully.
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        os.makedirs(os.path.join(workdir, ".magi"))
+        store.persist(workdir, store.new_key())
+        raise KeyboardInterrupt
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert (work / ".magi" / ".secret" / "magi.key").exists()
+    message = str(exc.value)
+    assert "another process" not in message
+    assert "interrupted after" in message and "key was written" in message
+    assert os.listdir(tmp_path / "rotated")[0] in message
+    assert "\n" not in message.strip() and OLD.reveal() not in message
