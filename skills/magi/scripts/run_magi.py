@@ -1569,6 +1569,15 @@ _MODEL_USED_NOTE = (
     "the code-review envelope names the trio as one joined string, not per mage; "
     "no per-mage model is attributed"
 )
+#: One stderr sentence per cause of :attr:`CodeReviewResult.degrading_causes`.
+_DEGRADING_CAUSE_TEXT = {
+    "without_embedder": (
+        "without_embedder: the review ran without the embedder (no documentation or history "
+        "context)."
+    ),
+    "failed_batches": "failed_batches: at least one review batch failed and was not reviewed.",
+    "undelivered_units": "undelivered_units: some changed units never reached the mages.",
+}
 
 
 def format_target_banner(target: ReviewTarget) -> str:
@@ -2931,10 +2940,10 @@ def main() -> None:
         # PM-S-7: never invent a per-mage model out of the joined string.
         report["magi_rs"]["model_used"] = None
         report["magi_rs"]["model_used_note"] = _MODEL_USED_NOTE
-        if review_result.without_embedder:
-            # REQ-07: context was lost, so the run approves no gate.
+        for cause in review_result.degrading_causes:
+            # REQ-07 / integrity rule: context was lost, so the run approves no gate.
             report["degraded"] = True
-            report.setdefault("degraded_causes", []).append("without_embedder")
+            report.setdefault("degraded_causes", []).append(cause)
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
@@ -2955,10 +2964,10 @@ def main() -> None:
     if review_result is not None:
         for line in format_review_banner(review_result):
             print(line)
-        if review_result.without_embedder:
+        for cause in review_result.degrading_causes:
             print(
-                "[!] WARNING: the review ran without the embedder (no documentation or history "
-                "context). The run is DEGRADED and the gate is INVALID whatever the verdict says.",
+                f"[!] WARNING: {_DEGRADING_CAUSE_TEXT[cause]} The run is DEGRADED and the gate is "
+                "INVALID whatever the verdict says.",
                 file=sys.stderr,
             )
         if isinstance(executor, MagiRsCodeReview) and executor.history_recorded is False:

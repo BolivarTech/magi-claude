@@ -249,6 +249,32 @@ class CodeReviewResult:
         """True when the review reports it ran without the embedder."""
         return self.code_review.get("without_embedder") is True
 
+    @property
+    def degrading_causes(self) -> list[str]:
+        """Return the causes that make this review approve no gate, in a stable order.
+
+        Lost context is truncation under the integrity rule: ``without_embedder``; a batch
+        that failed (``failed_batches`` non-empty, or ``batches_completed`` short of
+        ``batches_planned``) although magi-rs still consolidated the rest; and
+        ``undelivered_units`` (listed, or only counted as unlisted).
+
+        Returns:
+            The matching names among ``without_embedder``, ``failed_batches``,
+            ``undelivered_units``; empty for a complete review.
+        """
+        review = self.code_review
+        causes: list[str] = []
+        if self.without_embedder:
+            causes.append("without_embedder")
+        planned, completed = review.get("batches_planned"), review.get("batches_completed")
+        if review.get("failed_batches") or (
+            isinstance(planned, int) and isinstance(completed, int) and completed != planned
+        ):
+            causes.append("failed_batches")
+        if review.get("undelivered_units") or review.get("undelivered_units_unlisted"):
+            causes.append("undelivered_units")
+        return causes
+
     def effort(self) -> dict[str, Any]:
         """Return the review-effort telemetry; an absent field is ``None``.
 
