@@ -1184,3 +1184,43 @@ def test_a_non_init_error_from_the_injected_init_gets_the_generic_wording(tmp_pa
     for wording in _LEFTOVER_WORDING.values():
         assert wording not in message
     assert "left as it is" in message and (work / ".magi" / ".secret" / "magi.key").exists()
+
+
+def test_a_move_that_lost_the_whole_source_says_the_backup_holds_the_complete_copy(
+    tmp_path, monkeypatch
+):
+    # [T1] the copy finishes before the delete starts: with no source left, the backup IS the complete copy.
+    work = _project(tmp_path)
+
+    def _move(src, dst):
+        shutil.copytree(src, dst)
+        shutil.rmtree(src)
+        raise OSError("interrupted after the delete")
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert "the source is gone" in message and "holds the complete copy" in message
+    assert "compare" not in message and os.listdir(tmp_path / "rotated")[0] in message
+
+
+def test_a_move_that_lost_part_of_the_source_asks_to_compare_both_copies(tmp_path, monkeypatch):
+    work = _project(tmp_path)
+
+    def _move(src, dst):
+        shutil.copytree(src, dst)
+        os.remove(os.path.join(src, "magi.toml"))
+        raise OSError("file in use")
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert (
+        "both copies were kept" in message
+        and "compare" in message
+        and "the source is gone" not in message
+    )
