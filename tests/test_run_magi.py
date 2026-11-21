@@ -18,6 +18,7 @@ import pytest
 
 import run_magi
 from _magi_rs_fakes import _CR_FIXTURE, _StreamingProcess, _cr_payload
+from magi_rs_code_review import MagiRsCodeReview
 from magi_rs_result import CodeReviewResult
 from magi_rs_targets import ReviewTarget
 from run_magi import code_review_report_blocks, format_review_banner, format_target_banner
@@ -6171,9 +6172,7 @@ def _exec_recording(process):
 _CR_KEY = MagiKey("main-review-key-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=")
 
 
-from magi_rs_code_review import MagiRsCodeReview as _ReviewExecutor  # noqa: E402
-
-_ORIGINAL_REVIEW_PREFLIGHT = _ReviewExecutor.preflight
+_ORIGINAL_REVIEW_PREFLIGHT = MagiRsCodeReview.preflight
 
 
 def _run_main_with_fake_review(
