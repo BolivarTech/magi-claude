@@ -403,7 +403,7 @@ class KeyRotation:
         self._reharden(backup_dir, workdir)
         new_store = _RecordingKeyStore(self._store.guard)
         self._redactors.append(new_store.redact)
-        self._create_new(workdir, backup_dir, old_key, new_store)
+        self._create_new(workdir, backup_dir, new_store)
         self._verify_new(workdir, backup_dir, old_key, new_store)
         names, from_vault = self._names_to_revoke(workdir, backup_dir, old_key)
         return RotationReport(backup_dir, names, from_vault)
@@ -755,9 +755,7 @@ class KeyRotation:
                 entries.append((path, False))
         return entries
 
-    def _create_new(
-        self, workdir: str, backup_dir: str, old_key: MagiKey, store: _RecordingKeyStore
-    ) -> None:
+    def _create_new(self, workdir: str, backup_dir: str, store: _RecordingKeyStore) -> None:
         """Create the new ``.magi/``; on any failure, leave none of this rotation's at the root.
 
         What a failed ``init`` left is taken from its typed report
@@ -772,8 +770,9 @@ class KeyRotation:
         Args:
             workdir: The project root.
             backup_dir: ``<backup root>/<id>``, named in the recovery instruction.
-            old_key: Redacted from the failure detail.
             store: The store handed to ``init``; it records the keys persisted.
+                The failure detail is redacted through ``self._redactors``, which
+                :meth:`rotate` filled with the old key and this store.
 
         Raises:
             RotationFailedError: ``init`` failed with any exception,
