@@ -17,7 +17,7 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from magi_key import KeyExposedError, KeyHardeningError, KeyMissingError, KeyStore, MagiKey
+from magi_key import KeyExposedError, KeyMissingError, KeyStore, MagiKey
 from magi_key_permissions import default_key_store
 from magi_rs_bootstrap import (
     BinaryBootstrap,
@@ -121,7 +121,6 @@ FAIL_CLOSED_ERRORS: tuple[type[Exception], ...] = (
     ProjectNotInitialisedError,
     KeyMissingError,
     KeyExposedError,
-    KeyHardeningError,  # Listed for the --ollama-init/rotation paths; the --ollama preflight never raises it.
 )
 
 
