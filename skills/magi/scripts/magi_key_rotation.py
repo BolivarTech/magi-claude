@@ -73,7 +73,6 @@ _CONFIRM_PROMPT = (
     "Rotate the magi-rs key of {workdir}? The current .magi/ is moved to a backup and its memory "
     "and history are lost. [y/N] "
 )
-_REDACTED = "<redacted>"
 
 
 class RotationNotAuthorisedError(Exception):
@@ -473,7 +472,7 @@ class KeyRotation:
             self._init(workdir, self._store)
         except Exception as error:  # noqa: BLE001 - any init failure must end in the described state
             raw = " ".join([str(error), *getattr(error, "__notes__", [])])
-            detail = _one_line(raw.replace(old_key.reveal(), _REDACTED)) or type(error).__name__
+            detail = _one_line(old_key.redact(raw)) or type(error).__name__
             leftover = ""
             if os.path.lexists(magi_dir):
                 try:

@@ -134,7 +134,7 @@ class MagiKey:
         'c2VjcmV0'
     """
 
-    _REDACTED = "MagiKey(<redacted>)"
+    _REDACTED = f"MagiKey({REDACTION_MARKER})"
 
     def __init__(self, value: str) -> None:
         """Wrap the passphrase text.
@@ -173,7 +173,8 @@ class MagiKey:
             text: Text that may echo the key, e.g. a child's output.
 
         Returns:
-            ``text`` with the key replaced; unchanged when it does not occur.
+            ``text`` with the key replaced; unchanged when it does not occur
+            or the key is empty (an empty pattern would match everywhere).
 
         Complexity:
             O(n) in the length of ``text``.
@@ -182,10 +183,12 @@ class MagiKey:
             >>> MagiKey("c2VjcmV0").redact("got c2VjcmV0")
             'got <redacted>'
         """
+        if not self._value:
+            return text
         return text.replace(self._value, REDACTION_MARKER)
 
     def redact_bytes(self, data: bytes) -> bytes:
-        """Replace every occurrence of the key's UTF-8 bytes in ``data`` with ``REDACTION_MARKER``.
+        """Replace every occurrence of the key's ASCII bytes in ``data`` with ``REDACTION_MARKER``.
 
         Same exact-bytes scope as :meth:`redact`.
 
@@ -193,11 +196,14 @@ class MagiKey:
             data: Bytes that may echo the key, e.g. a child's captured stream.
 
         Returns:
-            ``data`` with the key replaced; unchanged when it does not occur.
+            ``data`` with the key replaced; unchanged when it does not occur
+            or the key is empty.
 
         Complexity:
             O(n) in the length of ``data``.
         """
+        if not self._value:
+            return data
         return data.replace(self._value.encode(KEY_ENCODING), REDACTION_MARKER.encode(KEY_ENCODING))
 
     def __eq__(self, other: object) -> bool:

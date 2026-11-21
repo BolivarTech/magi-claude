@@ -16,7 +16,7 @@ import re
 import subprocess
 from collections.abc import Callable
 
-from magi_key import MagiKey
+from magi_key import REDACTION_MARKER, MagiKey
 from magi_rs_env import EnvironmentPolicy
 from validate import ValidationError
 
@@ -43,7 +43,6 @@ _LS_MIN_COLUMNS = 3
 _LS_NAME_PATTERN = re.compile(r"[A-Za-z0-9_]+")
 _LS_EMPTY_VAULT = "(vault empty)"
 """What magi-rs 0.25.0 prints, with exit 0, when the vault holds nothing (measurement M1)."""
-_REDACTED = "<redacted>"
 
 
 class InvalidVaultNameError(ValidationError):
@@ -185,16 +184,22 @@ class VaultClient:
     def _redact(self, text: str, secrets: tuple[str, ...]) -> str:
         """Replace the key and any given secret in ``text``.
 
+        Scope: only exact occurrences are replaced; a secret whose whitespace was
+        collapsed or that was split or re-encoded is not recognised, so this runs
+        before any such transformation.
+
         Args:
             text: Text that may echo a secret.
             secrets: Values to scrub besides the key.
 
         Returns:
-            ``text`` with each non-empty secret replaced by a marker.
+            ``text`` with the key and each non-empty secret replaced by
+            ``REDACTION_MARKER``.
         """
-        for secret in (self._key.reveal(), *secrets):
+        text = self._key.redact(text)
+        for secret in secrets:
             if secret:
-                text = text.replace(secret, _REDACTED)
+                text = text.replace(secret, REDACTION_MARKER)
         return text
 
     @staticmethod

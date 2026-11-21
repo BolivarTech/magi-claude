@@ -92,13 +92,11 @@ on 2026-09-29 against the pinned binary, and unchanged with 0.24.1 on
 _RECOMMENDED_MIN_TIMEOUT_SECONDS = DEFAULT_OLLAMA_TIMEOUT_SECONDS
 """Below the default the derived ceiling falls under the only value measured
 with the 65 536-token output cap, so a lower value warns (D2)."""
-_REDACTION_MARKER = "[redacted]"
-"""Replaces the key wherever the child echoed it (BDD-22)."""
 _VAULT_HINT = (
     "If this is an authentication failure, load the API keys the config needs with "
     "`--ollama-vault-set <NAME>`."
 )
-"""Every child failure carries it: magi-rs offers no free check for a missing key (REQ-13d)."""
+"""Every non-zero exit carries it: magi-rs offers no free check for a missing key (REQ-13d)."""
 _STDERR_EXCERPT_CHARS = 2000
 _STDERR_ELISION_MARKER = "[... earlier stderr elided ...] "
 """Prefixed to a failure's stderr excerpt when its head was cut. Since 0.20 magi-rs
@@ -539,16 +537,16 @@ class MagiRsTrio(TrioExecutor):
             captured: The child's stdout or stderr.
 
         Returns:
-            ``captured`` with every occurrence of the key replaced by a marker;
-            unchanged when no key is loaded.
+            ``captured`` with every exact occurrence of the key replaced by
+            ``REDACTION_MARKER`` (:meth:`MagiKey.redact_bytes`); unchanged when
+            no key is loaded.
 
         Complexity:
             O(n) in the captured size, once per stream per launch.
         """
         if self._key is None:
             return captured
-        key = self._key.reveal().encode("utf-8")
-        return captured.replace(key, _REDACTION_MARKER.encode("utf-8"))
+        return self._key.redact_bytes(captured)
 
     @staticmethod
     def _allowlist_hint() -> str:
