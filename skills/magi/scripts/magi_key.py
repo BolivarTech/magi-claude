@@ -163,9 +163,11 @@ class MagiKey:
     def redact(self, text: str) -> str:
         """Replace every occurrence of the key in ``text`` with ``REDACTION_MARKER``.
 
-        Scope: only the key's exact text is replaced. A transformed copy (split
-        across lines, re-encoded, with whitespace collapsed inside it) is not
-        recognised, so redact BEFORE any such transformation.
+        Scope: the key's exact text and its JSON-escaped forms (``/`` and ``+``
+        escaped) are replaced. Any other transformed copy (split across lines,
+        percent- or otherwise re-encoded, with whitespace collapsed inside it) is
+        not recognised, so redact BEFORE any such transformation. The plugin never
+        forwards the key to such a sink, and magi-rs never prints it.
 
         Args:
             text: Text that may echo the key, e.g. a child's output.
@@ -183,12 +185,32 @@ class MagiKey:
         """
         if not self._value:
             return text
+        for form in self._escaped_forms():
+            text = text.replace(form, REDACTION_MARKER)
         return text.replace(self._value, REDACTION_MARKER)
+
+    def _escaped_forms(self) -> tuple[str, ...]:
+        """Return the forms of the key a JSON encoder may emit for its ``/`` and ``+``.
+
+        Base64 keys contain ``/`` and ``+``, which some encoders escape (a backslash before the
+        slash, or the ``u002f`` / ``u002b`` unicode escapes in either hex case). Forms identical
+        to the key (it contains neither character) are left out.
+
+        Returns:
+            The distinct escaped renderings, never the plain key.
+        """
+        value = self._value
+        forms = (
+            value.replace("/", "\\/"),
+            value.replace("/", "\\u002f").replace("+", "\\u002b"),
+            value.replace("/", "\\u002F").replace("+", "\\u002B"),
+        )
+        return tuple(dict.fromkeys(form for form in forms if form != value))
 
     def redact_bytes(self, data: bytes) -> bytes:
         """Replace every occurrence of the key's ASCII bytes in ``data`` with ``REDACTION_MARKER``.
 
-        Same exact-bytes scope as :meth:`redact`.
+        Same scope as :meth:`redact` (exact bytes and the JSON-escaped forms).
 
         Args:
             data: Bytes that may echo the key, e.g. a child's captured stream.
@@ -206,7 +228,10 @@ class MagiKey:
             needle = self._value.encode(KEY_ENCODING)
         except UnicodeEncodeError:
             return data  # a key that cannot be encoded cannot appear in the bytes either
-        return data.replace(needle, REDACTION_MARKER.encode(KEY_ENCODING))
+        marker = REDACTION_MARKER.encode(KEY_ENCODING)
+        for form in self._escaped_forms():
+            data = data.replace(form.encode(KEY_ENCODING), marker)
+        return data.replace(needle, marker)
 
     def __eq__(self, other: object) -> bool:
         """Compare two keys by value, in constant time.
