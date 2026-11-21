@@ -786,8 +786,8 @@ class WindowsPermissionGuard(PermissionGuard):
             KeyUnverifiableError: ``path`` is a link or reparse point; the DACL, the
                 current SID or an alias could not be read or parsed; or every foreign entry is a deny entry
                 (it takes access away, so it is not an exposure; remove it).
-            KeyExposedError: The DACL inherits, or holds a non-deny entry for
-                another SID. The message is one line naming the foreign SIDs
+            KeyExposedError: The DACL inherits (checked before any deny entry), or holds a
+                non-deny entry for another SID. The message is one line naming the foreign SIDs
                 (never the current user's) and whether the DACL is protected.
 
         Any foreign ACE fails verification whatever its type: the type only
@@ -812,13 +812,13 @@ class WindowsPermissionGuard(PermissionGuard):
             raise KeyExposedError(
                 f"{path} has an access entry for {', '.join(with_access)} {protection}"
             )
+        if not protected:
+            raise KeyExposedError(f"{path} still inherits permissions from its parent {protection}")
         if foreign:
             raise KeyUnverifiableError(
                 f"{path} has a deny entry for {', '.join(foreign)}: remove it before considering "
                 f"{_ROTATE_COMMAND} {protection}"
             )
-        if not protected:
-            raise KeyExposedError(f"{path} still inherits permissions from its parent {protection}")
 
 
 def default_key_store() -> KeyStore:
