@@ -93,6 +93,9 @@ _SID_PATTERN = re.compile(r"S-1-\d+(?:-\d+)+")
 _DACL_PATTERN = re.compile(r"D:(?P<flags>[A-Z_]*)(?P<aces>(?:\([^()]*\))*)")
 """The DACL section: its flags, then a run of parenthesised ACEs."""
 
+_ACE_PATTERN = re.compile(r"\(([^()]*)\)")
+"""One parenthesised ACE; the group is its semicolon-separated body."""
+
 _DACL_FLAGS_PATTERN = re.compile(r"(?:P|AI|AR)*")
 """The DACL control flags SDDL allows (protected, auto-inherited, auto-inherit required)."""
 
@@ -170,17 +173,18 @@ def parse_sddl_dacl(sddl: str) -> tuple[bool, list[str]]:
         >>> parse_sddl_dacl("D:PAI(A;;FA;;;S-1-5-18)")
         (True, ['S-1-5-18'])
     """
-    match = _DACL_PATTERN.search(sddl.strip())
+    descriptor = sddl.strip()
+    match = _DACL_PATTERN.search(descriptor)
     if match is None:
         raise ValueError("the security descriptor has no DACL")
-    rest = sddl.strip()[match.end() :]
+    rest = descriptor[match.end() :]
     if rest and not rest.startswith(_SACL_PREFIX):
         raise ValueError("the DACL holds a malformed ACE")
     flags = match.group("flags")
     if not _DACL_FLAGS_PATTERN.fullmatch(flags):
         raise ValueError(f"the DACL has unknown flags {flags!r}")
     sids = []
-    for ace in re.findall(r"\(([^()]*)\)", match.group("aces")):
+    for ace in _ACE_PATTERN.findall(match.group("aces")):
         fields = ace.split(";")
         if len(fields) != _ACE_FIELD_COUNT or not fields[_ACE_SID_INDEX]:
             raise ValueError("the DACL holds a malformed ACE")
