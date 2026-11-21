@@ -503,9 +503,10 @@ class PosixPermissionGuard(PermissionGuard):
             directory: True when ``path`` is a directory (same rule for both).
 
         Raises:
-            KeyUnverifiableError: ``path`` cannot be inspected, or this is Windows.
-            KeyExposedError: Another user owns ``path``, or a group or other bit
-                is set.
+            KeyUnverifiableError: ``path`` cannot be inspected, this is Windows,
+                or another user owns it (a UID mismatch, e.g. a container mount
+                or a file created under sudo, is not proof of exposure).
+            KeyExposedError: A group or other bit is set.
         """
         if sys.platform == "win32":
             raise KeyUnverifiableError("POSIX permissions cannot be verified on Windows")
@@ -513,8 +514,12 @@ class PosixPermissionGuard(PermissionGuard):
             status = os.stat(path)
         except OSError as error:
             raise KeyUnverifiableError(f"cannot read the permissions of {path}: {error}") from error
-        if status.st_uid != os.geteuid():
-            raise KeyExposedError(f"{path} is owned by another user")
+        current_uid = os.geteuid()
+        if status.st_uid != current_uid:
+            raise KeyUnverifiableError(
+                f"{path} is owned by uid {status.st_uid}, not by the current user {current_uid}: "
+                "fix the ownership"
+            )
         if status.st_mode & _GROUP_AND_OTHER_BITS:
             raise KeyExposedError(f"{path} is accessible to its group or to others")
 
