@@ -19,7 +19,7 @@ import pytest
 import run_magi
 from magi_key import KeyExposedError, KeyHardeningError, KeyStore, KeyUnverifiableError, MagiKey
 from magi_key_rotation import RotationFailedError, RotationNotAuthorisedError, RotationReport
-from magi_rs_bootstrap import DigestMismatchError
+from magi_rs_bootstrap import DigestMismatchError, VersionMismatchError
 from models import ModelSpec
 from ollama_init import OllamaInitError
 from rotation_harness import (
@@ -5614,3 +5614,33 @@ def test_the_ollama_preflight_fatal_line_carries_the_guards_diagnostic(
     assert exc.value.code == 1 and err.startswith("[FATAL]") and err.count("\n") == 1
     assert all(part in err for part in expected) and forbidden not in err
     assert "k" * 44 not in err
+
+
+def _ensure_ok_verify_fails(monkeypatch):
+    """A bootstrap whose ensure() succeeds (steady state) but whose verify() fails."""
+    monkeypatch.setattr(
+        "run_magi.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(
+            ensure=lambda: "/bin/magi-rs", verify=_raise(VersionMismatchError("reports 0.24.1"))
+        ),
+    )
+
+
+def test_vault_set_runs_the_full_binary_verification(monkeypatch, capsys):
+    # [Loop1 M-4] ensure() alone skips the --version check; the vault child gets the key and a secret.
+    _stub_vault_preflight(monkeypatch)
+    _ensure_ok_verify_fails(monkeypatch)
+    called = []
+    monkeypatch.setattr("run_magi.VaultClient.set", lambda *a: called.append(a))
+    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("v"), is_tty=False) == 1
+    err = capsys.readouterr().err
+    assert called == [] and err.startswith("[FATAL]") and "0.24.1" in err
+
+
+def test_rotate_main_runs_the_full_binary_verification(monkeypatch, capsys):
+    _ensure_ok_verify_fails(monkeypatch)
+    rotated = []
+    monkeypatch.setattr("run_magi.KeyRotation.rotate", lambda self, *a, **k: rotated.append(a))
+    assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
+    err = capsys.readouterr().err
+    assert rotated == [] and err.startswith("[FATAL]") and "0.24.1" in err

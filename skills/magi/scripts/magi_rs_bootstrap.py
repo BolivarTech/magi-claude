@@ -670,6 +670,11 @@ class VersionMismatchError(Exception):
     """
 
 
+def verified_executable(bootstrap: BinaryBootstrap) -> str:
+    """Install the pinned binary if needed, then verify it; return its path."""
+    raise NotImplementedError
+
+
 class BinaryBootstrap:
     """Obtain, verify and install the pinned ``magi-rs`` executable.
 
