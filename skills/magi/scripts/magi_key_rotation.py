@@ -425,10 +425,13 @@ class KeyRotation:
             ) from error
 
     def _reharden(self, backup_dir: str, workdir: str) -> None:
-        """Restrict the moved key directory and key to the owner again, then verify.
+        """Restrict the backup tree, its key directory and its key to the owner again, then verify.
 
         A move across volumes does not carry the ACL, and a same-volume rename
-        keeps the old, possibly loosened one: both are re-restricted here.
+        keeps the old, possibly loosened one without re-propagating inheritance:
+        hardening ``<id>`` again (idempotent) pushes its owner-only inheritable
+        grant onto everything moved under it, and the key directory and key are
+        re-restricted explicitly.
 
         Args:
             backup_dir: ``<backup root>/<id>``.
@@ -442,6 +445,7 @@ class KeyRotation:
         key_file = os.path.join(secret_dir, KEY_FILENAME)
         guard = self._store.guard
         try:
+            guard.harden(backup_dir, True)
             guard.harden(secret_dir, True)
             guard.harden(key_file, False)
             guard.verify(secret_dir, True)
