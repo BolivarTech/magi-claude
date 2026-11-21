@@ -5342,7 +5342,7 @@ def test_vault_set_strips_the_trailing_newline_of_a_piped_value(monkeypatch, tmp
         lambda self, name, value: captured.update(name=name, value=value),
     )
     _stub_vault_preflight(monkeypatch)  # helper: bootstrap + config + key load stubbed
-    code = run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("sk-value\r\n"), is_tty=False)
+    code = run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("sk-value\r\n"), is_tty=False)
     assert code == 0 and captured == {"name": "OPENAI_API_KEY", "value": "sk-value"}
 
 
@@ -5354,20 +5354,24 @@ def test_vault_set_on_a_tty_reads_the_value_hidden(monkeypatch, tmp_path):
         "run_magi.VaultClient.set", lambda self, name, value: captured.update(value=value)
     )
     _stub_vault_preflight(monkeypatch)
-    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO(""), is_tty=True) == 0
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(""), is_tty=True) == 0
     assert captured == {"value": "sk-hidden"}
 
 
 def test_vault_set_refuses_a_name_outside_the_list_before_any_preflight(monkeypatch, capsys):
     # [CP2-C43] stubbed bootstrap (no test reaches the real binary), and neither it nor the preflight ran.
+    # [R6] the closed list is argparse's ``choices`` now: an unknown NAME is an argument error (exit 2).
     seen = _stub_vault_preflight(monkeypatch)
-    assert run_magi.vault_set_main(["AWS_SECRET"], io.StringIO("v"), is_tty=False) != 0
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-vault-set", "AWS_SECRET"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code == 2 and "invalid choice" in capsys.readouterr().err
     assert "workdir" not in seen and seen["bootstrapped"] == 0
 
 
 def test_vault_set_refuses_an_empty_value(monkeypatch, tmp_path, capsys):
     _stub_vault_preflight(monkeypatch)
-    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("\n"), is_tty=False) != 0
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("\n"), is_tty=False) != 0
     assert "empty" in capsys.readouterr().err
 
 
@@ -5382,7 +5386,7 @@ def test_vault_set_preflights_the_production_store_in_the_working_directory(monk
             built.update(exe=exe, workdir=workdir) or SimpleNamespace(set=lambda name, value: None)
         ),
     )
-    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("v"), is_tty=False) == 0
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("v"), is_tty=False) == 0
     assert seen["store"] is seen["sentinel"] and seen["workdir"] == os.getcwd()
     assert built == {"exe": "/bin/magi-rs", "workdir": os.getcwd()}
 
@@ -5394,7 +5398,7 @@ def test_vault_set_with_an_unverified_binary_is_fatal_and_prompts_nothing(monkey
         "run_magi.getpass.getpass", lambda prompt="": prompted.append(prompt) or "sk"
     )
     _stub_vault_preflight(monkeypatch, bootstrap_fails=True)
-    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO(""), is_tty=True) == 1
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(""), is_tty=True) == 1
     assert prompted == [] and "[FATAL]" in capsys.readouterr().err
 
 
@@ -5405,15 +5409,16 @@ def test_vault_set_with_an_exposed_key_on_a_tty_prompts_nothing(monkeypatch, cap
         "run_magi.getpass.getpass", lambda prompt="": prompted.append(prompt) or "sk"
     )
     _stub_vault_preflight(monkeypatch, key_error=KeyExposedError("exposed"))
-    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO(""), is_tty=True) == 1
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(""), is_tty=True) == 1
     assert prompted == []
 
 
 @pytest.mark.parametrize(
     "argv, handler, expected",
     [
-        (["--ollama-vault-set", "OPENAI_API_KEY"], "vault_set_main", ["OPENAI_API_KEY"]),
-        (["--ollama-rotate-key", "--yes"], "rotate_main", ["--yes"]),
+        (["--ollama-vault-set", "OPENAI_API_KEY"], "vault_set_main", "OPENAI_API_KEY"),
+        (["--ollama-rotate-key", "--yes"], "rotate_main", True),
+        (["--ollama-rotate-key"], "rotate_main", False),
     ],
 )
 def test_main_dispatches_the_key_subcommands_without_mode_or_input(
@@ -5432,7 +5437,7 @@ def test_vault_set_with_an_exposed_key_is_fatal_and_calls_nothing(monkeypatch, c
     _stub_vault_preflight(monkeypatch, key_error=KeyExposedError("exposed"))
     called = []
     monkeypatch.setattr("run_magi.VaultClient.set", lambda *a: called.append(a))
-    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("v"), is_tty=False) == 1
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("v"), is_tty=False) == 1
     assert called == [] and "[FATAL]" in capsys.readouterr().err
 
 
@@ -5464,7 +5469,7 @@ def test_rotate_main_verifies_the_binary_before_rotating(monkeypatch, capsys):
     rotated = []
     _stub_rotation_bootstrap(monkeypatch, fails=True)
     monkeypatch.setattr("run_magi.KeyRotation.rotate", lambda self, *a, **k: rotated.append(a))
-    assert run_magi.rotate_main(["--yes"], is_tty=False) != 0
+    assert run_magi.rotate_main(True, is_tty=False) != 0
     assert rotated == [] and capsys.readouterr().err.startswith("[FATAL]")
 
 
@@ -5476,7 +5481,7 @@ def test_rotate_main_renders_any_bootstrap_error_as_one_fatal_line(monkeypatch, 
         "run_magi.BinaryBootstrap", lambda *a, **k: SimpleNamespace(ensure=failing, verify=failing)
     )
     monkeypatch.setattr("run_magi.KeyRotation.rotate", lambda self, *a, **k: rotated.append(a))
-    assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
+    assert run_magi.rotate_main(True, is_tty=False) == 1
     err = capsys.readouterr().err
     assert rotated == [] and err.startswith("[FATAL]") and len(err.strip().splitlines()) == 1
 
@@ -5492,7 +5497,7 @@ def test_rotate_main_renders_a_failed_rotation_as_one_line_naming_the_backup(mon
             )
         ),
     )
-    assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
+    assert run_magi.rotate_main(True, is_tty=False) == 1
     err = capsys.readouterr().err
     assert "/backups/x" in err and len(err.strip().splitlines()) == 1 and "Traceback" not in err
 
@@ -5502,7 +5507,7 @@ def test_rotate_main_without_yes_and_without_tty_exits_nonzero_and_says_so(monke
     monkeypatch.setattr(
         "run_magi.KeyRotation.rotate", _raise(RotationNotAuthorisedError("needs --yes"))
     )
-    assert run_magi.rotate_main([], is_tty=False) != 0
+    assert run_magi.rotate_main(False, is_tty=False) != 0
     assert "--yes" in capsys.readouterr().err
 
 
@@ -5513,7 +5518,7 @@ def test_rotate_main_says_when_the_names_are_the_whole_closed_list(monkeypatch, 
         "run_magi.KeyRotation.rotate",
         lambda self, *a, **k: RotationReport("/backups/x", ["OPENAI_API_KEY"], False),
     )
-    assert run_magi.rotate_main(["--yes"], is_tty=False) == 0
+    assert run_magi.rotate_main(True, is_tty=False) == 0
     assert "could not be read" in capsys.readouterr().out
 
 
@@ -5523,7 +5528,7 @@ def test_rotate_main_prints_backup_names_and_next_steps_never_values(monkeypatch
         "run_magi.KeyRotation.rotate",
         lambda self, *a, **k: RotationReport("/backups/x", ["OPENAI_API_KEY"], True),
     )
-    assert run_magi.rotate_main(["--yes"], is_tty=False) == 0
+    assert run_magi.rotate_main(True, is_tty=False) == 0
     out = capsys.readouterr().out
     assert "/backups/x" in out and "OPENAI_API_KEY" in out
     assert "--ollama-vault-set" in out and "revoke" in out
@@ -5554,7 +5559,7 @@ def test_rotate_main_builds_the_rotation_with_the_production_parts(monkeypatch):
             built.update(exe=exe, workdir=workdir) or SimpleNamespace(ls=lambda: [])
         ),
     )
-    assert run_magi.rotate_main(["--yes"], is_tty=False) == 0
+    assert run_magi.rotate_main(True, is_tty=False) == 0
     assert seen["init"] is run_magi.run_ollama_init and seen["key_store"] is sentinel
     assert seen["backup_root"] is None  # the default: rotation_backup_root()
     assert seen["workdir"] == os.getcwd()
@@ -5632,7 +5637,7 @@ def test_vault_set_runs_the_full_binary_verification(monkeypatch, capsys):
     _ensure_ok_verify_fails(monkeypatch)
     called = []
     monkeypatch.setattr("run_magi.VaultClient.set", lambda *a: called.append(a))
-    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("v"), is_tty=False) == 1
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("v"), is_tty=False) == 1
     err = capsys.readouterr().err
     assert called == [] and err.startswith("[FATAL]") and "0.24.1" in err
 
@@ -5641,7 +5646,7 @@ def test_rotate_main_runs_the_full_binary_verification(monkeypatch, capsys):
     _ensure_ok_verify_fails(monkeypatch)
     rotated = []
     monkeypatch.setattr("run_magi.KeyRotation.rotate", lambda self, *a, **k: rotated.append(a))
-    assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
+    assert run_magi.rotate_main(True, is_tty=False) == 1
     err = capsys.readouterr().err
     assert rotated == [] and err.startswith("[FATAL]") and "0.24.1" in err
 
@@ -5673,7 +5678,7 @@ def test_the_ollama_preflight_fatal_is_one_line_with_its_notes(monkeypatch, tmp_
 
 def test_the_vault_set_fatal_is_one_line_with_its_notes(monkeypatch, capsys):
     _stub_vault_preflight(monkeypatch, key_error=_noted(KeyExposedError("first line\nsecond line")))
-    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("v"), is_tty=False) == 1
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("v"), is_tty=False) == 1
     _assert_one_fatal_line_with_the_note(capsys.readouterr().err)
 
 
@@ -5682,7 +5687,7 @@ def test_the_rotate_fatal_is_one_line_with_its_notes(monkeypatch, capsys):
     monkeypatch.setattr(
         "run_magi.BinaryBootstrap", lambda *a, **k: SimpleNamespace(ensure=failing, verify=failing)
     )
-    assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
+    assert run_magi.rotate_main(True, is_tty=False) == 1
     _assert_one_fatal_line_with_the_note(capsys.readouterr().err)
 
 
@@ -5706,7 +5711,7 @@ def test_rotate_main_turns_an_interrupted_init_into_one_line_and_exit_1(
     _stub_rotation_bootstrap(monkeypatch)
     monkeypatch.setattr("run_magi.default_key_store", lambda: KeyStore(_OpenGuard()))
     monkeypatch.setattr("run_magi.run_ollama_init", _raise(KeyboardInterrupt()))
-    assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
+    assert run_magi.rotate_main(True, is_tty=False) == 1
     err = capsys.readouterr().err
     (backup,) = os.listdir(state / "magi" / "rotated")
     assert err.startswith("ERROR:") and err.count("\n") == 1 and "Traceback" not in err
@@ -5735,6 +5740,10 @@ def test_the_key_subcommands_appear_in_help(capsys):
         ["--yes"],
         ["analysis", "bundle.md", "--yes"],
         ["--ollama-vault-set", "OPENAI_API_KEY", "--yes"],
+        ["code-review", "x.md", "--ollama-init"],  # [R6] --ollama-init joins the standalone set
+        ["--ollama-init", "--ollama"],
+        ["--ollama-rotate-key", "--yes", "--ollama"],
+        ["--ollama-vault-set", "OPENAI_API_KEY", "--ollama"],
     ],
 )
 def test_a_key_subcommand_mixed_with_anything_else_is_an_argument_error_and_runs_nothing(
@@ -5759,4 +5768,4 @@ def test_an_abbreviated_rotate_flag_is_expanded_by_argparse(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-rotate", "--yes"])
     with pytest.raises(SystemExit) as exc:
         run_magi.main()
-    assert exc.value.code in (0, None) and seen["args"] == ["--yes"]
+    assert exc.value.code in (0, None) and seen["args"] is True
