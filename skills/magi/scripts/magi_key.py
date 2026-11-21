@@ -47,6 +47,12 @@ _EXCLUSIVE_CREATE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_
 _REGENERATE_COMMAND = "--ollama-init"
 _ROTATE_COMMAND = "--ollama-rotate-key"
 
+_REGENERATION_GUIDANCE = (
+    f"move the existing .magi/ aside to a backup, then run {_REGENERATE_COMMAND} to create a new one "
+    f"({_REGENERATE_COMMAND} leaves an existing .magi/ untouched)"
+)
+"""How to recover from a missing or empty key: the one way forward, stated once."""
+
 
 class KeyStoreError(Exception):
     """Base class of every key-custody failure (a sibling of ``ValidationError``)."""
@@ -224,14 +230,31 @@ class KeyStore:
             self.guard.verify(secret_dir, True)
             self.guard.verify(key_file, False)
         except KeyStoreError as error:
-            os.remove(key_file)
+            cleanup_note = self._discard(key_file)
             raise KeyHardeningError(
-                f"could not restrict the key at {key_file} to its owner"
+                f"could not restrict the key at {key_file} to its owner{cleanup_note}"
             ) from error
         except BaseException:
-            os.remove(key_file)
+            self._discard(key_file)
             raise
         return key_file
+
+    @staticmethod
+    def _discard(key_file: str) -> str:
+        """Remove a key file this store just created, never masking the failure being handled.
+
+        Args:
+            key_file: The key file to remove.
+
+        Returns:
+            An empty string when the file was removed; otherwise a message
+            suffix naming the file that could not be removed.
+        """
+        try:
+            os.remove(key_file)
+        except OSError:
+            return f" (and the key file {key_file} could not be removed: delete it by hand)"
+        return ""
 
     def load(self, workdir: str) -> MagiKey:
         """Verify the key's permissions, then read it.
@@ -249,10 +272,7 @@ class KeyStore:
         """
         key_file = self.key_path(workdir)
         if not os.path.exists(key_file):
-            raise KeyMissingError(
-                f"no magi-rs memory key at {key_file}: run {_REGENERATE_COMMAND} to create a new .magi/ "
-                f"(a 7.x .magi/ without a key must first be moved aside to a backup)"
-            )
+            raise KeyMissingError(f"no magi-rs memory key at {key_file}: {_REGENERATION_GUIDANCE}")
         try:
             self.guard.verify(os.path.dirname(key_file), True)
             self.guard.verify(key_file, False)
@@ -286,6 +306,6 @@ class KeyStore:
             raise KeyMissingError(f"cannot read the magi-rs memory key at {key_file}") from error
         if not value:
             raise KeyMissingError(
-                f"the magi-rs memory key at {key_file} is empty: run {_REGENERATE_COMMAND}"
+                f"the magi-rs memory key at {key_file} is empty: {_REGENERATION_GUIDANCE}"
             )
         return MagiKey(value)
