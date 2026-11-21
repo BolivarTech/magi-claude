@@ -77,6 +77,7 @@ from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E40
 from magi_key_permissions import default_key_store  # noqa: E402
 from magi_rs_bootstrap import BinaryBootstrap  # noqa: E402
 from magi_rs_preflight import ProjectPreflight  # noqa: E402
+from magi_key_rotation import KeyRotation  # noqa: E402, F401
 from magi_rs_vault import VAULT_KEY_NAMES, VaultClient  # noqa: E402
 from ollama_init import run_ollama_init  # noqa: E402
 from run_lock import (  # noqa: E402

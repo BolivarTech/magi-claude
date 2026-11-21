@@ -18,6 +18,7 @@ import pytest
 
 import run_magi
 from magi_key import KeyExposedError, KeyHardeningError, MagiKey
+from magi_key_rotation import RotationFailedError, RotationNotAuthorisedError, RotationReport
 from magi_rs_bootstrap import DigestMismatchError
 from models import ModelSpec
 from ollama_init import OllamaInitError
@@ -5444,3 +5445,105 @@ def test_a_failed_cleanup_note_reaches_the_one_fatal_line(monkeypatch, capsys):
         run_magi.main()
     err = capsys.readouterr().err
     assert err.startswith("[FATAL]") and "delete it by hand" in err and err.count(chr(10)) == 1
+
+
+def _stub_rotation_bootstrap(monkeypatch, fails=False):
+    """[CP2-M4] Fake the binary verification rotate_main runs before anything moves."""
+
+    def _verify():
+        if fails:
+            raise DigestMismatchError("checksum mismatch")
+        return "/bin/magi-rs"
+
+    monkeypatch.setattr(
+        "run_magi.BinaryBootstrap", lambda *a, **k: SimpleNamespace(ensure=_verify, verify=_verify)
+    )
+
+
+def test_rotate_main_verifies_the_binary_before_rotating(monkeypatch, capsys):
+    rotated = []
+    _stub_rotation_bootstrap(monkeypatch, fails=True)
+    monkeypatch.setattr("run_magi.KeyRotation.rotate", lambda self, *a, **k: rotated.append(a))
+    assert run_magi.rotate_main(["--yes"], is_tty=False) != 0
+    assert rotated == [] and capsys.readouterr().err.startswith("[FATAL]")
+
+
+def test_rotate_main_renders_a_failed_rotation_as_one_line_naming_the_backup(monkeypatch, capsys):
+    # [CP2-C35] REQ-13h's most dangerous state (no .magi/ at the root) reaches the operator, never as a traceback.
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.KeyRotation.rotate",
+        _raise(
+            RotationFailedError(
+                "rotation failed: the old .magi/ is at /backups/x/.magi; move it back to .magi/ to retry"
+            )
+        ),
+    )
+    assert run_magi.rotate_main(["--yes"], is_tty=False) == 1
+    err = capsys.readouterr().err
+    assert "/backups/x" in err and len(err.strip().splitlines()) == 1 and "Traceback" not in err
+
+
+def test_rotate_main_without_yes_and_without_tty_exits_nonzero_and_says_so(monkeypatch, capsys):
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.KeyRotation.rotate", _raise(RotationNotAuthorisedError("needs --yes"))
+    )
+    assert run_magi.rotate_main([], is_tty=False) != 0
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_rotate_main_says_when_the_names_are_the_whole_closed_list(monkeypatch, capsys):
+    # [CP2-B17] names_from_vault=False gets its consumer: "revoke these" and "we could not read it" are different.
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.KeyRotation.rotate",
+        lambda self, *a, **k: RotationReport("/backups/x", ["OPENAI_API_KEY"], False),
+    )
+    assert run_magi.rotate_main(["--yes"], is_tty=False) == 0
+    assert "could not be read" in capsys.readouterr().out
+
+
+def test_rotate_main_prints_backup_names_and_next_steps_never_values(monkeypatch, capsys):
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.KeyRotation.rotate",
+        lambda self, *a, **k: RotationReport("/backups/x", ["OPENAI_API_KEY"], True),
+    )
+    assert run_magi.rotate_main(["--yes"], is_tty=False) == 0
+    out = capsys.readouterr().out
+    assert "/backups/x" in out and "OPENAI_API_KEY" in out
+    assert "--ollama-vault-set" in out and "revoke" in out
+    assert "destroy" in out  # [CP2-C14] REQ-13g.1
+
+
+def test_rotate_main_builds_the_rotation_with_the_production_parts(monkeypatch):
+    # [CP2-C14] [CP2-C27] [CP2-B13] [CP2-B14] REQ-13g.2, BDD-18: real init, the production store (whose guard
+    # T2 pins), the default backup root, the cwd, and a vault_ls bound to the VERIFIED binary.
+    # The spy has KeyRotation's exact signature, so a wrong call shape is a TypeError.
+    seen, built = {}, {}
+    sentinel = object()
+
+    class _Spy:
+        def __init__(self, key_store, init, vault_ls, backup_root=None, *, clock=None):
+            seen.update(key_store=key_store, init=init, vault_ls=vault_ls, backup_root=backup_root)
+
+        def rotate(self, workdir, *args, **kwargs):
+            seen["workdir"] = workdir
+            return RotationReport("/backups/x", [], False)
+
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr("run_magi.default_key_store", lambda: sentinel)
+    monkeypatch.setattr("run_magi.KeyRotation", _Spy)
+    monkeypatch.setattr(
+        "run_magi.VaultClient",
+        lambda exe, workdir, key, **k: (
+            built.update(exe=exe, workdir=workdir) or SimpleNamespace(ls=lambda: [])
+        ),
+    )
+    assert run_magi.rotate_main(["--yes"], is_tty=False) == 0
+    assert seen["init"] is run_magi.run_ollama_init and seen["key_store"] is sentinel
+    assert seen["backup_root"] is None  # the default: rotation_backup_root()
+    assert seen["workdir"] == os.getcwd()
+    seen["vault_ls"]("/backups/x/.magi-parent", MagiKey("k" * 44))
+    assert built == {"exe": "/bin/magi-rs", "workdir": "/backups/x/.magi-parent"}
