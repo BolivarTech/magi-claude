@@ -194,15 +194,19 @@ class MagiKey:
             data: Bytes that may echo the key, e.g. a child's captured stream.
 
         Returns:
-            ``data`` with the key replaced; unchanged when it does not occur
-            or the key is empty.
+            ``data`` with the key replaced; unchanged when it does not occur,
+            the key is empty or its text cannot be encoded with ``KEY_ENCODING``.
 
         Complexity:
             O(n) in the length of ``data``.
         """
         if not self._value:
             return data
-        return data.replace(self._value.encode(KEY_ENCODING), REDACTION_MARKER.encode(KEY_ENCODING))
+        try:
+            needle = self._value.encode(KEY_ENCODING)
+        except UnicodeEncodeError:
+            return data  # a key that cannot be encoded cannot appear in the bytes either
+        return data.replace(needle, REDACTION_MARKER.encode(KEY_ENCODING))
 
     def __eq__(self, other: object) -> bool:
         """Compare two keys by value, in constant time.
