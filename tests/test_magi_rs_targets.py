@@ -232,3 +232,29 @@ def test_a_symlink_into_magi_is_refused(tmp_path):
 )
 def test_each_target_maps_one_to_one(tmp_path, kw, argv):
     assert _resolve(tmp_path, **kw).argv == argv
+
+
+@pytest.mark.parametrize(
+    "kw, flag",
+    [
+        (dict(commit="-x"), "--commit"),
+        (dict(from_="-a", to="b"), "--from"),
+        (dict(from_="a", to="--b"), "--to"),
+        (dict(base="--foo", head="HEAD"), "--base"),
+        (dict(base="main", head="-h"), "--head"),
+    ],
+)
+def test_a_flag_value_starting_with_a_dash_is_refused_before_git(tmp_path, kw, flag):
+    def git(argv):
+        raise AssertionError("git must not be asked")
+
+    with pytest.raises(InvalidTargetError) as exc:
+        _resolve(tmp_path, git=git, **kw)
+    message = str(exc.value)
+    assert flag in message and "-x" not in message and "--foo" not in message
+
+
+def test_a_relative_path_starting_with_a_dash_is_passed_as_an_absolute_path(tmp_path):
+    (tmp_path / "-p").write_text("", encoding="utf-8")
+    target = _resolve(tmp_path, path="-p")
+    assert os.path.isabs(target.argv[0]) and not target.argv[0].startswith("-")
