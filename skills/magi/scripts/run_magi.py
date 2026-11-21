@@ -244,8 +244,8 @@ def _resolve_timeout(flag: int | None) -> float:
 def _check_subcommands(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Reject a standalone subcommand mixed with a mode, an input, ``--ollama`` or another one, and a stray ``--yes``.
 
-    The standalone subcommands are ``--ollama-init``, ``--ollama-vault-set`` and
-    ``--ollama-rotate-key``. A destructive rotation (or an initialisation) must
+    The standalone subcommands are ``--check-prompts``, ``--ollama-init``,
+    ``--ollama-vault-set`` and ``--ollama-rotate-key``. A destructive rotation (or an initialisation) must
     never be honoured from any position of a normal run, so the mix is an
     argument error before anything runs.
 
@@ -259,6 +259,7 @@ def _check_subcommands(parser: argparse.ArgumentParser, args: argparse.Namespace
     chosen = [
         flag
         for flag, given in (
+            ("--check-prompts", args.check_prompts),
             ("--ollama-init", args.ollama_init),
             (_VAULT_SET_FLAG, args.ollama_vault_set is not None),
             (_ROTATE_KEY_FLAG, args.ollama_rotate_key),
