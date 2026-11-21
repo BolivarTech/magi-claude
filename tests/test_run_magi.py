@@ -6,15 +6,19 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import sys
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 import run_magi
+from magi_key import KeyExposedError, MagiKey
+from magi_rs_bootstrap import DigestMismatchError
 from models import ModelSpec
 from ollama_init import OllamaInitError
 from rotation_harness import (
@@ -5301,3 +5305,131 @@ def test_a_failed_init_is_one_fatal_line_at_the_cli(monkeypatch, capsys):
         and "Traceback" not in err
         and err.count("\n") == 1
     )
+
+
+def _stub_vault_preflight(monkeypatch, key_error=None, bootstrap_fails=False):
+    """Stub bootstrap and the ordered key preflight (`require_ready`) for `vault_set_main` [CP2-B11].
+
+    [CP2-M46] Records what the handler preflights with, so a test can pin the store and the workdir.
+    """
+    seen = {"sentinel": object(), "bootstrapped": 0}
+
+    def _verify():
+        seen["bootstrapped"] += 1  # [CP2-C43]
+        if bootstrap_fails:
+            raise DigestMismatchError("checksum mismatch")
+        return "/bin/magi-rs"
+
+    def _ready(workdir, key_store):
+        seen.update(workdir=workdir, store=key_store)
+        if key_error is not None:
+            raise key_error
+        return MagiKey("k" * 44)
+
+    monkeypatch.setattr(
+        "run_magi.BinaryBootstrap", lambda *a, **k: SimpleNamespace(ensure=_verify, verify=_verify)
+    )
+    monkeypatch.setattr("run_magi.default_key_store", lambda: seen["sentinel"])
+    monkeypatch.setattr("run_magi.ProjectPreflight.require_ready", staticmethod(_ready))
+    return seen
+
+
+def test_vault_set_strips_the_trailing_newline_of_a_piped_value(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(
+        "run_magi.VaultClient.set",
+        lambda self, name, value: captured.update(name=name, value=value),
+    )
+    _stub_vault_preflight(monkeypatch)  # helper: bootstrap + config + key load stubbed
+    code = run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("sk-value\r\n"), is_tty=False)
+    assert code == 0 and captured == {"name": "OPENAI_API_KEY", "value": "sk-value"}
+
+
+def test_vault_set_on_a_tty_reads_the_value_hidden(monkeypatch, tmp_path):
+    # [PM-MS1-C8] the hidden prompt is the TTY path; the value never comes from argv.
+    captured = {}
+    monkeypatch.setattr("run_magi.getpass.getpass", lambda prompt="": "sk-hidden")
+    monkeypatch.setattr(
+        "run_magi.VaultClient.set", lambda self, name, value: captured.update(value=value)
+    )
+    _stub_vault_preflight(monkeypatch)
+    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO(""), is_tty=True) == 0
+    assert captured == {"value": "sk-hidden"}
+
+
+def test_vault_set_refuses_a_name_outside_the_list_before_any_preflight(monkeypatch, capsys):
+    # [CP2-C43] stubbed bootstrap (no test reaches the real binary), and neither it nor the preflight ran.
+    seen = _stub_vault_preflight(monkeypatch)
+    assert run_magi.vault_set_main(["AWS_SECRET"], io.StringIO("v"), is_tty=False) != 0
+    assert "workdir" not in seen and seen["bootstrapped"] == 0
+
+
+def test_vault_set_refuses_an_empty_value(monkeypatch, tmp_path, capsys):
+    _stub_vault_preflight(monkeypatch)
+    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("\n"), is_tty=False) != 0
+    assert "empty" in capsys.readouterr().err
+
+
+def test_vault_set_preflights_the_production_store_in_the_working_directory(monkeypatch, tmp_path):
+    # [CP2-M46] [CP2-B13] the production store, the cwd, and the verified binary is the one handed the key.
+    built = {}
+    monkeypatch.chdir(tmp_path)
+    seen = _stub_vault_preflight(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.VaultClient",
+        lambda exe, workdir, key, **k: (
+            built.update(exe=exe, workdir=workdir) or SimpleNamespace(set=lambda name, value: None)
+        ),
+    )
+    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("v"), is_tty=False) == 0
+    assert seen["store"] is seen["sentinel"] and seen["workdir"] == os.getcwd()
+    assert built == {"exe": "/bin/magi-rs", "workdir": os.getcwd()}
+
+
+def test_vault_set_with_an_unverified_binary_is_fatal_and_prompts_nothing(monkeypatch, capsys):
+    # [CP2-M42] mirrors CP2-M4: the value travels with the key, so an unverified binary is worse here.
+    prompted = []
+    monkeypatch.setattr(
+        "run_magi.getpass.getpass", lambda prompt="": prompted.append(prompt) or "sk"
+    )
+    _stub_vault_preflight(monkeypatch, bootstrap_fails=True)
+    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO(""), is_tty=True) == 1
+    assert prompted == [] and "[FATAL]" in capsys.readouterr().err
+
+
+def test_vault_set_with_an_exposed_key_on_a_tty_prompts_nothing(monkeypatch, capsys):
+    # [CP2-M42] no secret is typed into a session the preflight already refused.
+    prompted = []
+    monkeypatch.setattr(
+        "run_magi.getpass.getpass", lambda prompt="": prompted.append(prompt) or "sk"
+    )
+    _stub_vault_preflight(monkeypatch, key_error=KeyExposedError("exposed"))
+    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO(""), is_tty=True) == 1
+    assert prompted == []
+
+
+@pytest.mark.parametrize(
+    "argv, handler, expected",
+    [
+        (["--ollama-vault-set", "OPENAI_API_KEY"], "vault_set_main", ["OPENAI_API_KEY"]),
+        (["--ollama-rotate-key", "--yes"], "rotate_main", ["--yes"]),
+    ],
+)
+def test_main_dispatches_the_key_subcommands_without_mode_or_input(
+    monkeypatch, argv, handler, expected
+):
+    # [CP2-M31] the CLI short-circuit itself, not only the handlers.
+    seen = {}
+    monkeypatch.setattr(f"run_magi.{handler}", lambda args, *rest: seen.update(args=args) or 0)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", *argv])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code in (0, None) and seen["args"] == expected
+
+
+def test_vault_set_with_an_exposed_key_is_fatal_and_calls_nothing(monkeypatch, capsys):
+    _stub_vault_preflight(monkeypatch, key_error=KeyExposedError("exposed"))
+    called = []
+    monkeypatch.setattr("run_magi.VaultClient.set", lambda *a: called.append(a))
+    assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("v"), is_tty=False) == 1
+    assert called == [] and "[FATAL]" in capsys.readouterr().err

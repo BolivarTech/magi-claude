@@ -2083,6 +2083,14 @@ def _write_report_file(report_text: str, out_path: str) -> None:
         raise
 
 
+def vault_set_main(argv: list[str], stdin: IO[str], is_tty: bool) -> int:
+    raise NotImplementedError
+
+
+def rotate_main(argv: list[str], is_tty: bool) -> int:
+    raise NotImplementedError
+
+
 def main() -> None:
     """CLI entry point for MAGI orchestrator."""
     # Must run BEFORE any ``print`` or ``sys.exit`` — every output

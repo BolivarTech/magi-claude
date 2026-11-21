@@ -10,6 +10,7 @@ import pytest
 
 from magi_key import MagiKey
 from magi_rs_env import PASSPHRASE_VARIABLE, EnvironmentPolicy
+from magi_rs_vault import VAULT_KEY_NAMES
 
 _API_KEY_NAMES = (
     "OPENAI_API_KEY",
@@ -167,3 +168,7 @@ def test_windows_path_reaches_the_child_whatever_its_case_in_the_registry():
     # is spelled in the registry. Pinned against the REAL os.environ.
     child = EnvironmentPolicy.build(os.environ)
     assert "PATH" in child and child["PATH"] == os.environ["PATH"]
+
+
+def test_the_env_test_list_equals_the_vault_closed_list():
+    assert _API_KEY_NAMES == VAULT_KEY_NAMES
