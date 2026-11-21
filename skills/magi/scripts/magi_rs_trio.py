@@ -292,6 +292,22 @@ def _stderr_tail(stderr: bytes) -> str:
     return _STDERR_ELISION_MARKER + text[-_STDERR_EXCERPT_CHARS:]
 
 
+def redact_captured(key: MagiKey | None, captured: bytes) -> bytes:
+    """Remove the key from bytes captured from a magi-rs child.
+
+    Args:
+        key: The loaded key, or None when no preflight has run.
+        captured: The child's stdout or stderr.
+
+    Returns:
+        ``captured`` with every exact occurrence of the key replaced by
+        ``REDACTION_MARKER``; unchanged when ``key`` is None. O(n).
+    """
+    if key is None:
+        return captured
+    return key.redact_bytes(captured)
+
+
 class MagiRsTrio(TrioExecutor):
     """Run the three mages by delegating to one ``magi-rs consult``.
 
@@ -546,9 +562,7 @@ class MagiRsTrio(TrioExecutor):
         Complexity:
             O(n) in the captured size, once per stream per launch.
         """
-        if self._key is None:
-            return captured
-        return self._key.redact_bytes(captured)
+        return redact_captured(self._key, captured)
 
     @staticmethod
     def _allowlist_hint() -> str:
