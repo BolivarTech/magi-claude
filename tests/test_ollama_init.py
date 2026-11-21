@@ -587,3 +587,33 @@ def test_an_existing_magi_dir_message_leads_with_nothing_was_initialised(tmp_pat
     assert message.startswith("nothing was initialised")
     assert message.index("nothing was initialised") < message.index("to start over:")
     assert "\n" not in message.strip()
+
+
+def _broken_link_or_skip(link, target):
+    """Make ``link`` point at a ``target`` that does not exist (a junction on Windows)."""
+    try:
+        if sys.platform == "win32":
+            import _winapi
+
+            target.mkdir()
+            _winapi.CreateJunction(str(target), str(link))
+            target.rmdir()
+        else:
+            os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"cannot create a link here: {error}")
+
+
+def test_a_magi_entry_that_is_a_broken_link_is_refused_and_nothing_is_created(tmp_path):
+    # [X2] `exists` follows links: a broken one read as absent and persist created the key through it.
+    outside = tmp_path / "outside"
+    work = tmp_path / "work"
+    work.mkdir()
+    _broken_link_or_skip(work / ".magi", outside)
+    store = _Store()
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(work), key_store=store)
+    message = str(exc.value)
+    assert "is a link" in message and "\n" not in message.strip()
+    assert not isinstance(exc.value, MagiDirExistsError)
+    assert not outside.exists() and store.persisted == []
