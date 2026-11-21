@@ -422,7 +422,7 @@ class KeyRotation:
             return self._store.read_unverified(key_file)
         except (KeyStoreError, OSError) as error:
             raise RotationFailedError(
-                f"cannot read the current key at {key_file} ({one_line(str(error))}): nothing was moved"
+                f"cannot read the current key at {key_file} ({_reason(error)}): nothing was moved"
             ) from error
 
     def _create_backup_dir(self, workdir: str) -> str:
@@ -451,7 +451,7 @@ class KeyRotation:
             os.makedirs(candidate, mode=DIR_MODE)
         except OSError as error:
             raise RotationFailedError(
-                f"cannot create the rotation backup {candidate} ({one_line(str(error))}): nothing was moved"
+                f"cannot create the rotation backup {candidate} ({_reason(error)}): nothing was moved"
             ) from error
         return candidate
 
