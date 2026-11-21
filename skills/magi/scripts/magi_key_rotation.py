@@ -549,14 +549,32 @@ class KeyRotation:
             return ""
         return f" (these empty directories could not be removed, delete them: {', '.join(stuck)})"
 
+    def _feature_root(self) -> str:
+        """Return the topmost directory this feature owns on the way to the backup root.
+
+        With the default root that is ``<state base>/magi`` (the ``_BACKUP_PARTS``
+        components); a custom root is owned only from itself down. What lies above it
+        (the platform's state directory) is created when missing but never hardened,
+        recorded or cleaned up.
+
+        Returns:
+            The path of the topmost feature-owned directory.
+        """
+        root = self._backup_root
+        if os.path.normcase(root).endswith(os.path.normcase(os.path.join(*_BACKUP_PARTS))):
+            for _ in range(len(_BACKUP_PARTS) - 1):
+                root = os.path.dirname(root)
+        return root
+
     def _create_backup_dir(self, workdir: str) -> tuple[str, list[str]]:
         """Create ``<backup root>/<id>`` with owner-only mode, never reusing an existing one.
 
         ``<id>`` is ``<16 hex of the project path's sha256>-<UTC timestamp>``;
         a collision within the same second gets ``-2``, ``-3``, ... appended.
-        ``os.makedirs`` applies the mode to the leaf only, so the parents this
-        call creates are returned for the caller to restrict; parents that
-        already existed are never touched.
+        ``os.makedirs`` applies the mode to the leaf only, so the feature-owned
+        parents this call creates (:meth:`_feature_root` and below) are returned for the
+        caller to restrict; parents that already existed, and any missing directory
+        above the feature-owned root, are never restricted or recorded.
 
         Args:
             workdir: The project root, fingerprinted into the id.
@@ -591,7 +609,12 @@ class KeyRotation:
             )
         created_parents: list[str] = []
         parent = os.path.dirname(candidate)
-        while not os.path.lexists(parent) and os.path.dirname(parent) != parent:
+        platform_base = os.path.dirname(self._feature_root())
+        while (
+            parent != platform_base
+            and not os.path.lexists(parent)
+            and os.path.dirname(parent) != parent
+        ):
             created_parents.insert(0, parent)
             parent = os.path.dirname(parent)
         try:
