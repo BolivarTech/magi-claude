@@ -44,8 +44,8 @@ far beyond any healthy run and only bounds a hung child."""
 
 _MAGI_DIR = KEY_DIR_PARTS[0]
 _ALREADY_INITIALISED = (
-    f"{_MAGI_DIR}/ already exists in {{workdir}}: left untouched (nothing was initialised, "
-    f"no key was created). To start over: {REGENERATION_GUIDANCE}."
+    f"nothing was initialised: {_MAGI_DIR}/ already exists in {{workdir}} and was left untouched "
+    f"(no key was created); to start over: {REGENERATION_GUIDANCE}."
 )
 
 
