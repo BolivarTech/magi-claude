@@ -58,6 +58,7 @@ class _StreamingProcess:
         self._rc, self._exits_after = returncode, exits_after
         self._exited = asyncio.Event()
         self.killed, self.returncode = False, None
+        self.pid = -1  # never a real process: a tree kill on it is a harmless no-op
 
     def _streams(self):
         if self._readers is None:

@@ -7,6 +7,7 @@ Every child process is faked: nothing here launches a binary or reaches the netw
 """
 
 import asyncio
+import sys
 
 import pytest
 
@@ -155,3 +156,46 @@ async def test_magi_rs_own_history_warning_means_history_was_not_recorded(monkey
 
 def test_the_history_window_covers_magi_rs_thirty_seconds():
     assert HISTORY_WINDOW_SECONDS >= 30
+
+
+@pytest.mark.asyncio
+async def test_the_key_in_stdout_is_redacted_in_the_raw_artifact_and_the_result(
+    monkeypatch, tmp_path
+):
+    process = _StreamingProcess(_cr_payload(note=_KEY.reveal()))
+    executor, _ = _review(monkeypatch, tmp_path, process)
+    await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    raw = (tmp_path / "magi-rs-raw.json").read_text(encoding="utf-8")
+    assert _KEY.reveal() not in raw
+    assert _KEY.reveal() not in str(executor.last_result.code_review)
+
+
+class _UnreapableProcess(_StreamingProcess):
+    """A wedged child that survives kill(): wait() never returns."""
+
+    async def wait(self):
+        await asyncio.sleep(3600)
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_survives_the_kill_still_yields_its_complete_envelope(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("magi_rs_code_review.HISTORY_WINDOW_SECONDS", 0.1)
+    monkeypatch.setattr("subprocess_utils.PROC_WAIT_REAP_TIMEOUT", 0.1)
+    process = _UnreapableProcess(_cr_payload(), exits_after=None)
+    executor, _ = _review(monkeypatch, tmp_path, process, timeout=0)
+    verdicts = await asyncio.wait_for(executor.run_trio("", "agents", str(tmp_path), 0, {}, 1), 5)
+    assert executor.history_recorded is False and len(verdicts) == 3
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the tree kill is Windows-only")
+@pytest.mark.asyncio
+async def test_the_overrun_kill_takes_down_the_process_tree(monkeypatch, tmp_path):
+    killed_trees = []
+    monkeypatch.setattr("subprocess_utils.windows_kill_tree", killed_trees.append)
+    monkeypatch.setattr("magi_rs_code_review.HISTORY_WINDOW_SECONDS", 0.1)
+    process = _StreamingProcess(_cr_payload(), exits_after=None, hold_eof=True)
+    executor, _ = _review(monkeypatch, tmp_path, process, timeout=0)
+    await asyncio.wait_for(executor.run_trio("", "agents", str(tmp_path), 0, {}, 1), 5)
+    assert killed_trees == [process.pid]
