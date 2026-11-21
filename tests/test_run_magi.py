@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 
 import run_magi
-from magi_key import KeyExposedError, MagiKey
+from magi_key import KeyExposedError, KeyHardeningError, MagiKey
 from magi_rs_bootstrap import DigestMismatchError
 from models import ModelSpec
 from ollama_init import OllamaInitError
@@ -5433,3 +5433,14 @@ def test_vault_set_with_an_exposed_key_is_fatal_and_calls_nothing(monkeypatch, c
     monkeypatch.setattr("run_magi.VaultClient.set", lambda *a: called.append(a))
     assert run_magi.vault_set_main(["OPENAI_API_KEY"], io.StringIO("v"), is_tty=False) == 1
     assert called == [] and "[FATAL]" in capsys.readouterr().err
+
+
+def test_a_failed_cleanup_note_reaches_the_one_fatal_line(monkeypatch, capsys):
+    error = KeyHardeningError("cannot harden")
+    error.add_note("/w/.magi could not be removed; delete it by hand")
+    monkeypatch.setattr("run_magi.run_ollama_init", _raise(error))
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    with pytest.raises(SystemExit):
+        run_magi.main()
+    err = capsys.readouterr().err
+    assert err.startswith("[FATAL]") and "delete it by hand" in err and err.count(chr(10)) == 1
