@@ -1634,3 +1634,23 @@ def test_an_unmapped_leftover_falls_back_to_the_generic_wording_instead_of_a_key
     message = str(exc.value)
     assert "creating the new .magi/ failed (init died)" in message
     assert "\n" not in message.strip() and os.listdir(tmp_path / "rotated")[0] in message
+
+
+@pytest.mark.parametrize(
+    ("root", "owned"),
+    [
+        ("/state/magi/rotated", "/state/magi"),
+        ("/state/magi/rotated/", "/state/magi"),
+        (
+            "/state/MAGI/Rotated",
+            "/state/MAGI" if sys.platform == "win32" else "/state/MAGI/Rotated",
+        ),
+        ("/state/notmagi/rotated", "/state/notmagi/rotated"),
+        ("/state/magi/notrotated", "/state/magi/notrotated"),
+        ("/state/rotated", "/state/rotated"),
+    ],
+)
+def test_the_feature_owned_root_is_decided_by_exact_trailing_components(tmp_path, root, owned):
+    # [m-2] `notmagi/rotated` merely ends with the same characters: it is not the feature's directory.
+    rotation = KeyRotation(_Store(), None, None, backup_root=os.path.abspath(root))
+    assert os.path.normcase(rotation._feature_root()) == os.path.normcase(os.path.abspath(owned))

@@ -5857,3 +5857,16 @@ def test_rotate_main_refuses_a_magi_entry_that_is_a_link_before_any_prompt(
     monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
     assert run_magi.rotate_main(False, is_tty=True) == 1
     assert "is a link" in capsys.readouterr().err
+
+
+def test_rotate_main_with_a_regular_file_named_magi_says_nothing_to_rotate_before_any_prompt(
+    monkeypatch, tmp_path, capsys
+):
+    # [m-3] a file is not a project directory: no prompt, no binary check.
+    (tmp_path / ".magi").write_text("not a directory", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    _stub_rotation_bootstrap(monkeypatch, fails=True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
+    assert run_magi.rotate_main(False, is_tty=True) == 1
+    err = capsys.readouterr().err
+    assert "nothing to rotate" in err and "\n" not in err.strip()
