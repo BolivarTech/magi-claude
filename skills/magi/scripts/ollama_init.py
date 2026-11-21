@@ -42,6 +42,10 @@ class OllamaInitError(Exception):
     """``magi-rs init`` failed; the message carries what it printed (a sibling of ``ValidationError``)."""
 
 
+class MagiDirExistsError(OllamaInitError):
+    """``.magi/`` already exists: nothing was initialised and no key was created."""
+
+
 def _remove_created_magi_dir(magi_dir: str) -> str:
     """Remove a ``.magi/`` this call created, so a retry is not told it is initialised.
 

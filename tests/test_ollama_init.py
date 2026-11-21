@@ -14,7 +14,7 @@ import run_magi
 from magi_key import REDACTION_MARKER, KeyHardeningError, KeyStore, MagiKey
 from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_env import EnvironmentPolicy
-from ollama_init import OllamaInitError, run_ollama_init
+from ollama_init import MagiDirExistsError, OllamaInitError, run_ollama_init
 
 
 class _Ok:
@@ -151,7 +151,11 @@ def test_an_existing_magi_dir_is_left_untouched_and_magi_rs_is_not_called(monkey
     seen = []
     monkeypatch.setattr("ollama_init.subprocess.run", _fake_run(seen))
     store = _Store()
-    message = run_ollama_init(str(tmp_path), key_store=store)
+    with pytest.raises(
+        MagiDirExistsError
+    ) as exc:  # [W4] an error: no caller can mistake it for success
+        run_ollama_init(str(tmp_path), key_store=store)
+    message = str(exc.value)
     assert seen == [] and store.persisted == []
     assert "already" in message and ".magi" in message
 
@@ -276,3 +280,29 @@ def test_the_ollama_init_cli_never_prints_the_new_key(
     assert exc.value.code == returncode
     assert store.new_key().reveal() not in captured.out + captured.err
     assert REDACTION_MARKER in captured.out + captured.err
+
+
+def _raising_with_args(exception):
+    def _raise(*args, **kwargs):
+        raise exception
+
+    return _raise
+
+
+def test_the_ollama_init_cli_on_an_existing_magi_dir_prints_the_message_and_exits_zero(
+    monkeypatch, capsys
+):
+    # [W4] REQ-12: "already exists, left untouched" stays a normal outcome at the CLI, never a [FATAL].
+    message = (
+        ".magi/ already exists in /w: left untouched (nothing was initialised, no key was created)."
+    )
+    monkeypatch.setattr(
+        run_magi, "run_ollama_init", _raising_with_args(MagiDirExistsError(message))
+    )
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    captured = capsys.readouterr()
+    assert exc.value.code == 0
+    assert "already exists" in captured.out and "untouched" in captured.out
+    assert "[FATAL]" not in captured.err

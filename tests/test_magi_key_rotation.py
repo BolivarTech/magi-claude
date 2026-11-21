@@ -642,3 +642,51 @@ def test_a_link_inside_the_backup_stops_the_rotation_and_its_target_is_never_tou
     message = str(exc.value)
     assert backups[0] in message and planted in message and "may be exposed" in message
     assert "\n" not in message.strip() and OLD.reveal() not in message
+
+
+FOREIGN = MagiKey("foreign-key-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=")
+
+
+def _recreate_magi(workdir, key):
+    """Put a complete ``.magi/`` holding ``key`` at ``workdir``, as another process would."""
+    secret = os.path.join(workdir, ".magi", ".secret")
+    os.makedirs(secret)
+    open(os.path.join(workdir, ".magi", "magi.toml"), "w").write("someone else's")
+    open(os.path.join(secret, "magi.key"), "w", encoding="ascii").write(key.reveal())
+
+
+@pytest.mark.parametrize("key", [OLD, FOREIGN], ids=["restored-old-tree", "concurrent-init"])
+def test_a_magi_dir_that_appears_before_init_is_never_reported_as_rotated(tmp_path, key):
+    # [W4] the real init refuses an existing .magi/ with an error; the rotation stops and deletes nothing.
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        _recreate_magi(workdir, key)
+        return run_ollama_init(workdir, store)
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    backups = os.listdir(tmp_path / "rotated")
+    assert len(backups) == 1
+    assert (work / ".magi" / ".secret" / "magi.key").read_text(encoding="ascii") == key.reveal()
+    message = str(exc.value)
+    assert backups[0] in message and "\n" not in message.strip()
+    assert OLD.reveal() not in message and FOREIGN.reveal() not in message
+
+
+def test_a_new_magi_dir_holding_the_old_key_is_never_reported_as_rotated(tmp_path):
+    # [W4] REQ-13g.2: a "new" .magi/ that holds the exposed key puts that key back in service.
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        _recreate_magi(workdir, OLD)
+        return "initialised"
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert os.listdir(tmp_path / "rotated")[0] in message and "old key" in message
+    assert (work / ".magi" / ".secret" / "magi.key").exists()  # left as it is, never deleted
+    assert OLD.reveal() not in message and "\n" not in message.strip()
