@@ -5418,6 +5418,28 @@ def test_vault_set_refuses_a_whitespace_only_value(monkeypatch, capsys, value):
     assert "\n" not in captured.err.strip()
 
 
+def test_vault_set_exits_2_for_an_empty_value_too(monkeypatch, capsys):
+    # [N3] every unusable value is a usage error (exit 2), the empty one included.
+    _stub_vault_preflight(monkeypatch)
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("\n"), is_tty=False) == 2
+    assert "OPENAI_API_KEY" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["sk-secret ", " sk-secret", "sk-secret\t", "\tsk-secret"])
+def test_vault_set_refuses_a_value_with_leading_or_trailing_blanks_never_stripping_it(
+    monkeypatch, capsys, value
+):
+    # [N3] an API key never carries them: refuse it (exit 2), never silently strip, never echo it.
+    stored = []
+    monkeypatch.setattr("run_magi.VaultClient.set", lambda self, name, value: stored.append(value))
+    _stub_vault_preflight(monkeypatch)
+    code = run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(value + "\n"), is_tty=False)
+    captured = capsys.readouterr()
+    assert code == 2 and stored == []
+    assert "OPENAI_API_KEY" in captured.err and "sk-secret" not in captured.out + captured.err
+    assert "\n" not in captured.err.strip()
+
+
 def test_vault_set_preflights_the_production_store_in_the_working_directory(monkeypatch, tmp_path):
     # [CP2-M46] [CP2-B13] the production store, the cwd, and the verified binary is the one handed the key.
     built = {}
