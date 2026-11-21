@@ -25,7 +25,7 @@ release.
 - `--ollama-init` exits 1 with a `[FATAL]` line when it fails. In 7.x it relayed the refusal
   and exited 0.
 - `code-review --ollama` needs the `[embedding]` endpoint to answer. 7.x ran without an
-  embedder; now the run stops with `[FATAL]` before any model is called.
+  embedder; now the run stops with `[FATAL]` before the trio or the gate is called.
 
 ### Added
 
