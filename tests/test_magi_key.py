@@ -179,6 +179,7 @@ def test_a_failed_cleanup_never_masks_the_hardening_failure(tmp_path, monkeypatc
     with pytest.raises(KeyHardeningError) as exc:
         store.persist(str(tmp_path), store.new_key())
     assert key_file in str(exc.value)
+    assert "could not be removed" in str(exc.value)
 
 
 def test_load_never_reads_an_exposed_key(tmp_path, monkeypatch):
