@@ -209,6 +209,8 @@ class MemoryContractError(MagiRsContractError):
     """
 
 
+#: ``code_review`` flags that must be JSON booleans when present.
+_REVIEW_FLAGS = ("without_memory", "without_embedder")
 #: ``code_review`` keys copied into :meth:`CodeReviewResult.effort`.
 _EFFORT_FROM_REVIEW = ("batches_planned", "batches_completed", "gate_questions", "judged_fraction")
 #: Per-batch keys copied into ``tokens_by_batch``.
@@ -221,8 +223,10 @@ class CodeReviewResult:
 
     The envelope is the ``consult`` envelope plus a ``code_review`` object, so
     the verdict parsing is delegated to :class:`ConsultResult`. Telemetry that a
-    code-review envelope does not carry (``degraded``, ``extraction_failures``,
-    ``completions``...) reads as ``None``/empty there, never as an invention.
+    code-review envelope does not carry reads as absent there, never as an
+    invention: an absent ``consult.degraded`` reads as ``False``, the absent
+    consult telemetry fields (``extraction_failures``...) as ``None``, and an
+    absent ``completions`` yields an empty ``capped_agents``.
 
     Attributes:
         consult: The parsed verdicts and consult-level telemetry (``run_id``
@@ -293,6 +297,11 @@ class CodeReviewResult:
         review = envelope.get("code_review")
         if not isinstance(review, dict):
             raise MagiRsContractError("magi-rs output carries no 'code_review' object")
+        for flag in _REVIEW_FLAGS:
+            if flag in review and not isinstance(review[flag], bool):
+                raise MagiRsContractError(
+                    f"magi-rs 'code_review.{flag}' is not a JSON boolean: an off-contract envelope"
+                )
         if review.get("without_memory") is True:
             raise MemoryContractError(
                 "magi-rs reports without_memory although --no-memory was never passed; "
