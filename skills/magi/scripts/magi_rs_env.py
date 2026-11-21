@@ -76,6 +76,9 @@ they are left OUT deliberately: none of them changes how ``magi-rs`` formats
 anything this plugin reads, and an allowlist grows by evidence of a run that
 failed, never by completeness for its own sake."""
 
+PASSPHRASE_VARIABLE = "MAGI_PASSPHRASE"
+"""The one variable ``magi-rs`` reads its passphrase from; injected, never inherited."""
+
 ALLOWED_VARIABLES = frozenset(
     _PLATFORM_VARIABLES + _PROXY_VARIABLES + _CA_VARIABLES + _OLLAMA_VARIABLES + _LOCALE_VARIABLES
 )
