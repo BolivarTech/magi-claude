@@ -14,7 +14,7 @@ import os
 
 import pytest
 
-from magi_rs_result import ConsultResult, describe_reasoning
+from magi_rs_result import CodeReviewResult, ConsultResult, MemoryContractError, describe_reasoning
 from magi_rs_trio import MagiRsContractError
 
 _FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "magi-rs-consult")
@@ -932,3 +932,77 @@ def test_a_flagged_default_timeout_points_at_max_rotations_not_at_itself(capsys)
     assert len(lines) == 1
     assert "WARNING" in lines[0] and str(default) in lines[0]
     assert "recommended --timeout is" not in lines[0]
+
+
+_CR_FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "magi-rs-code-review", "one-commit.json")
+
+
+def _cr_envelope():
+    with open(_CR_FIXTURE, encoding="utf-8") as handle:
+        return json.loads(handle.read())
+
+
+def _raw(**overrides):
+    envelope = _cr_envelope()
+    envelope["code_review"].update(overrides)
+    return json.dumps(envelope)
+
+
+def test_the_real_envelope_parses_into_three_verdicts_and_a_review_block():
+    result = CodeReviewResult.from_json(_raw())
+    assert len(result.consult.agents) == 3
+    assert "batches_planned" in result.code_review
+
+
+def test_the_review_block_is_carried_verbatim():
+    envelope = _cr_envelope()
+    assert CodeReviewResult.from_json(json.dumps(envelope)).code_review == envelope["code_review"]
+
+
+def test_an_envelope_without_code_review_is_a_contract_error():
+    envelope = _cr_envelope()
+    del envelope["code_review"]
+    with pytest.raises(MagiRsContractError):
+        CodeReviewResult.from_json(json.dumps(envelope))
+
+
+def test_without_memory_is_a_memory_contract_error():
+    with pytest.raises(MemoryContractError):
+        CodeReviewResult.from_json(_raw(without_memory=True))
+
+
+def test_without_embedder_is_read_as_a_flag():
+    assert CodeReviewResult.from_json(_raw(without_embedder=True)).without_embedder is True
+
+
+def test_effort_has_exactly_the_declared_keys():
+    effort = CodeReviewResult.from_json(_raw()).effort()
+    assert set(effort) == {
+        "batches_planned",
+        "batches_completed",
+        "duration_ms",
+        "gate_questions",
+        "judged_fraction",
+        "tokens_by_batch",
+    }
+
+
+def test_an_absent_effort_field_is_null_not_omitted():
+    envelope = _cr_envelope()
+    envelope["code_review"].pop("gate_questions", None)
+    assert CodeReviewResult.from_json(json.dumps(envelope)).effort()["gate_questions"] is None
+
+
+def test_tokens_are_copied_from_batches_never_estimated():
+    envelope = _cr_envelope()
+    effort = CodeReviewResult.from_json(json.dumps(envelope)).effort()
+    assert effort["tokens_by_batch"] == [
+        {k: b.get(k) for k in ("input_tokens", "output_tokens", "ms")} for b in envelope["code_review"]["batches"]
+    ]
+
+
+def test_the_duration_is_the_envelope_total():
+    # [RD-D22] the capture has no code_review.duration_ms; the run's total is timings.total_ms.
+    envelope = _cr_envelope()
+    effort = CodeReviewResult.from_json(json.dumps(envelope)).effort()
+    assert effort["duration_ms"] == envelope["timings"]["total_ms"]
