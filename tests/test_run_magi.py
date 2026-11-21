@@ -5744,6 +5744,10 @@ def test_the_key_subcommands_appear_in_help(capsys):
         ["--ollama-init", "--ollama"],
         ["--ollama-rotate-key", "--yes", "--ollama"],
         ["--ollama-vault-set", "OPENAI_API_KEY", "--ollama"],
+        ["--check-prompts", "--ollama-init"],  # [T6] the dry run joins the standalone set
+        ["--check-prompts", "--ollama-rotate-key", "--yes"],
+        ["--check-prompts", "analysis", "x.md"],
+        ["--check-prompts", "--ollama"],
     ],
 )
 def test_a_key_subcommand_mixed_with_anything_else_is_an_argument_error_and_runs_nothing(
