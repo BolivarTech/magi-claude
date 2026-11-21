@@ -11,6 +11,7 @@ from magi_key import (
     KeyMissingError,
     KeyStore,
     KeyStoreError,
+    KeyUnverifiableError,
     MagiKey,
 )
 from synthesize import ValidationError
@@ -229,3 +230,51 @@ def test_key_errors_are_siblings_of_validation_error():
     for error in (KeyMissingError, KeyExposedError, KeyHardeningError):
         assert not issubclass(error, ValidationError)
         assert issubclass(error, KeyStoreError)
+
+
+class _RaisingGuard(_Guard):
+    """Verification of the key file raises `error` (the guard's own one-line message)."""
+
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def verify(self, path, directory):
+        if not directory:
+            raise self.error
+
+
+def _load_with(tmp_path, error):
+    store = _store()
+    store.persist(str(tmp_path), store.new_key())
+    with pytest.raises(KeyExposedError) as exc:
+        KeyStore(_RaisingGuard(error)).load(str(tmp_path))
+    return store.key_path(str(tmp_path)), exc.value
+
+
+def test_an_exposed_key_message_carries_the_guards_detail(tmp_path):
+    # [Loop1 I-1] the foreign SID and the protection reach the operator, not only __cause__.
+    path, error = _load_with(
+        tmp_path, KeyExposedError("/w/magi.key grants access to S-1-5-11 (DACL protected: no)")
+    )
+    message = str(error)
+    assert not isinstance(error, KeyUnverifiableError)
+    assert "S-1-5-11" in message and "DACL protected: no" in message
+    assert "compromised" in message and "--ollama-rotate-key" in message and path in message
+    assert "\n" not in message
+
+
+def test_an_unverifiable_key_is_never_called_compromised(tmp_path):
+    # [Loop1 I-1] a tooling failure is not an exposure: rotating would destroy the memory for nothing.
+    cause = "cannot read the permissions of /w/magi.key: powershell.exe failed with exit code 1: Get-Acl"
+    path, error = _load_with(tmp_path, KeyUnverifiableError(cause))
+    message = str(error)
+    assert isinstance(error, KeyUnverifiableError)
+    assert "could not be verified" in message and "powershell.exe failed" in message
+    assert path in message and "fix the cause" in message and "--ollama-rotate-key" in message
+    assert "compromised" not in message and "\n" not in message
+
+
+def test_an_unverifiable_key_is_a_fail_closed_sibling_of_validation_error():
+    assert issubclass(KeyUnverifiableError, KeyExposedError)
+    assert not issubclass(KeyUnverifiableError, ValidationError)

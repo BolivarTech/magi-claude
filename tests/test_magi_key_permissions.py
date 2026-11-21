@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from magi_key import KeyExposedError, KeyHardeningError
+from magi_key import KeyExposedError, KeyHardeningError, KeyUnverifiableError
 from magi_key_permissions import (
     DIR_MODE,
     FILE_MODE,
@@ -432,3 +432,61 @@ def test_windows_resolve_alias_rejects_output_that_is_not_a_sid(monkeypatch):
     )
     with pytest.raises(OSError):
         WindowsPermissionGuard().resolve_alias("ZZ")
+
+
+def test_windows_verify_that_cannot_read_the_acl_is_unverifiable_not_exposed():
+    # [Loop1 I-1] a read failure says "could not be verified", never "compromised".
+    guard = _windows_guard("")
+
+    def _fail(path):
+        raise OSError("powershell.exe failed with exit code 1: Get-Acl : access denied")
+
+    guard.read_sddl = _fail
+    with pytest.raises(KeyUnverifiableError):
+        guard.verify("k", directory=False)
+
+
+def test_windows_verify_that_cannot_resolve_an_alias_is_unverifiable():
+    guard = _windows_guard("D:PAI(A;;FA;;;LA)")
+    guard.resolve_alias = _raise_os_error
+    with pytest.raises(KeyUnverifiableError):
+        guard.verify("k", directory=False)
+
+
+def test_windows_verify_with_a_foreign_ace_is_exposed_not_unverifiable():
+    with pytest.raises(KeyExposedError) as raised:
+        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;0x1200a9;;;{OTHER})").verify("k", directory=False)
+    assert not isinstance(raised.value, KeyUnverifiableError)
+
+
+def test_windows_verify_of_an_inheriting_dacl_is_exposed_not_unverifiable():
+    with pytest.raises(KeyExposedError) as raised:
+        _windows_guard(f"D:AI(A;;FA;;;{ME})").verify("k", directory=False)
+    assert not isinstance(raised.value, KeyUnverifiableError)
+
+
+def test_posix_verify_on_windows_is_unverifiable(monkeypatch):
+    monkeypatch.setattr("magi_key_permissions.sys.platform", "win32")
+    with pytest.raises(KeyUnverifiableError):
+        PosixPermissionGuard().verify("k", directory=False)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX stat")
+def test_posix_verify_that_cannot_stat_is_unverifiable(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "stat", _raise_os_error)
+    with pytest.raises(KeyUnverifiableError):
+        PosixPermissionGuard().verify(str(tmp_path / "k"), directory=False)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+def test_posix_verify_of_a_group_readable_key_is_exposed_not_unverifiable(tmp_path):
+    path = tmp_path / "k"
+    path.write_text("x")
+    os.chmod(path, 0o640)
+    with pytest.raises(KeyExposedError) as raised:
+        PosixPermissionGuard().verify(str(path), directory=False)
+    assert not isinstance(raised.value, KeyUnverifiableError)
+
+
+def _raise_os_error(*args, **kwargs):
+    raise OSError("tool failed")

@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 
 import run_magi
-from magi_key import KeyExposedError, KeyHardeningError, MagiKey
+from magi_key import KeyExposedError, KeyHardeningError, KeyStore, KeyUnverifiableError, MagiKey
 from magi_key_rotation import RotationFailedError, RotationNotAuthorisedError, RotationReport
 from magi_rs_bootstrap import DigestMismatchError
 from models import ModelSpec
@@ -5560,3 +5560,57 @@ def test_rotate_main_builds_the_rotation_with_the_production_parts(monkeypatch):
     assert seen["workdir"] == os.getcwd()
     seen["vault_ls"]("/backups/x/.magi-parent", MagiKey("k" * 44))
     assert built == {"exe": "/bin/magi-rs", "workdir": "/backups/x/.magi-parent"}
+
+
+class _GuardRaising:
+    """A permission guard whose verification of the key file raises `error`."""
+
+    def __init__(self, error):
+        self.error = error
+
+    def harden(self, path, directory):
+        pass
+
+    def verify(self, path, directory):
+        if not directory:
+            raise self.error
+
+
+@pytest.mark.parametrize(
+    "error, expected, forbidden",
+    [
+        (
+            KeyExposedError("magi.key grants access to S-1-5-11 (DACL protected: no)"),
+            ["S-1-5-11", "DACL protected: no", "compromised"],
+            "could not be verified",
+        ),
+        (
+            KeyUnverifiableError("cannot read the permissions of magi.key: powershell.exe failed"),
+            ["powershell.exe failed", "could not be verified"],
+            "compromised",
+        ),
+    ],
+)
+def test_the_ollama_preflight_fatal_line_carries_the_guards_diagnostic(
+    monkeypatch, tmp_path, capsys, error, expected, forbidden
+):
+    # [Loop1 I-1] through main(): the cause is on the [FATAL] line, not only in __cause__.
+    secret = tmp_path / ".magi" / ".secret"
+    secret.mkdir(parents=True)
+    (tmp_path / ".magi" / "magi.toml").write_text("", encoding="utf-8")
+    (secret / "magi.key").write_text("k" * 44, encoding="ascii")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
+    monkeypatch.setattr(
+        "magi_rs_trio.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(
+            ensure=lambda: "/bin/magi-rs", verify=lambda: "/bin/magi-rs"
+        ),
+    )
+    monkeypatch.setattr("magi_rs_trio.default_key_store", lambda: KeyStore(_GuardRaising(error)))
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    err = capsys.readouterr().err
+    assert exc.value.code == 1 and err.startswith("[FATAL]") and err.count("\n") == 1
+    assert all(part in err for part in expected) and forbidden not in err
+    assert "k" * 44 not in err

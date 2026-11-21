@@ -66,6 +66,10 @@ class KeyExposedError(KeyStoreError):
     """The key or its directory is readable by someone other than its owner."""
 
 
+class KeyUnverifiableError(KeyExposedError):
+    """The key's permissions could not be read, so they cannot be shown to be owner-only."""
+
+
 class KeyHardeningError(KeyStoreError):
     """The key's permissions could not be restricted, or the restriction could not be verified."""
 
