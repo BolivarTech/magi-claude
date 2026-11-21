@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -622,17 +623,42 @@ def _link_victim_into_magi(tmp_path, work, kind):
     return victim
 
 
+def _require_links(tmp_path, kind):
+    """Skip where a link of ``kind`` cannot be made (an unprivileged Windows account cannot symlink)."""
+    if kind == "junction":
+        if sys.platform != "win32":
+            pytest.skip("junctions are Windows-only")
+        return
+    probe = tmp_path / "probe-link"
+    try:
+        os.symlink(tmp_path, probe)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"symlinks are not permitted here: {error}")
+    probe.unlink()
+
+
 @pytest.mark.parametrize("kind", ["file-symlink", "junction"])
 def test_a_link_inside_the_backup_stops_the_rotation_and_its_target_is_never_touched(
-    tmp_path, kind
+    tmp_path, kind, monkeypatch
 ):
     # [W3 addition] hardening a link would chmod/icacls its TARGET, outside the backup: refuse, never follow.
+    # [R3] a link in the SOURCE is now refused before the move, so the link appears during the move here,
+    # which keeps the post-move walk under test.
     work = _project(tmp_path)
-    victim = _link_victim_into_magi(tmp_path, work, kind)
+    _require_links(tmp_path, kind)
+    real_move = shutil.move
+    planted_victims = []
+
+    def _move_then_plant(src, dst):
+        real_move(src, dst)
+        planted_victims.append(_link_victim_into_magi(tmp_path, Path(dst).parent, kind))
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move_then_plant)
     guard = _RecordingGuard()
     rotation, _ = _rotation(tmp_path, guard=guard)
     with pytest.raises(RotationFailedError) as exc:
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    (victim,) = planted_victims
     backups = os.listdir(tmp_path / "rotated")
     assert len(backups) == 1 and not (work / ".magi").exists()
     planted = "planted" if kind == "file-symlink" else "index"
@@ -975,3 +1001,66 @@ def test_a_backup_dir_creation_failure_without_a_message_still_names_its_cause(
     with pytest.raises(RotationFailedError) as exc:
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert "(OSError)" in str(exc.value) and "nothing was moved" in str(exc.value)
+
+
+@pytest.mark.parametrize("kind", ["file-symlink", "junction"])
+def test_a_link_inside_the_source_magi_dir_stops_the_rotation_before_anything_moves(
+    tmp_path, kind, monkeypatch
+):
+    # [R3] across volumes shutil.move copies with symlinks=False and would FOLLOW the link before any guard ran.
+    work = _project(tmp_path)
+    _require_links(tmp_path, kind)
+    victim = _link_victim_into_magi(tmp_path, work, kind)
+    moved = []
+    monkeypatch.setattr("magi_key_rotation.shutil.move", lambda *a: moved.append(a))
+    guard = _RecordingGuard()
+    rotation, _ = _rotation(tmp_path, guard=guard)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert moved == [] and (work / ".magi" / "magi.toml").read_text() == "old"
+    assert not (tmp_path / "rotated").exists() or os.listdir(tmp_path / "rotated") == []
+    assert not any(
+        os.path.normcase(os.path.realpath(p)) == os.path.normcase(os.path.realpath(victim))
+        for _, p, _ in guard.calls
+    )
+    message = str(exc.value)
+    planted = "planted" if kind == "file-symlink" else "index"
+    assert planted in message and "nothing was moved" in message and "\n" not in message.strip()
+
+
+def test_every_backup_directory_the_rotation_creates_is_restricted_and_pre_existing_ones_are_not(
+    tmp_path,
+):
+    # [R3] os.makedirs(mode=...) restricts only the leaf: every parent the rotation creates is hardened and
+    # verified too, and a parent that already existed is never touched.
+    work = _project(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    root = state / "magi" / "rotated"
+    guard = _RecordingGuard()
+    rotation = KeyRotation(_Store(guard), lambda *a: "", lambda *a: [], str(root))
+    with pytest.raises(
+        RotationFailedError
+    ):  # the no-op init leaves no new key; the backup is what is asserted
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    for created in (state / "magi", root):
+        assert ("harden", str(created), True) in guard.calls, created
+        assert ("verify", str(created), True) in guard.calls, created
+    assert not any(
+        os.path.normcase(path) == os.path.normcase(str(state)) for _, path, _ in guard.calls
+    )
+
+
+def test_a_relative_backup_root_is_refused_before_anything_happens(tmp_path):
+    # [R3] a relative root would resolve against whatever the cwd is: refused before the prompt or any move.
+    work = _project(tmp_path)
+    asked = []
+    rotation = KeyRotation(
+        _Store(), lambda *a: "", lambda *a: [], os.path.join("relative", "rotated")
+    )
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(
+            str(work), assume_yes=False, is_tty=True, confirm=lambda p: asked.append(p) or "y"
+        )
+    assert asked == [] and (work / ".magi" / "magi.toml").read_text() == "old"
+    assert "absolute" in str(exc.value)
