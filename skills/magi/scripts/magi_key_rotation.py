@@ -15,7 +15,9 @@ replaces everything:
    restricted to its owner; the old ``.magi/`` is moved into it and its key
    directory and key are restricted again (a move across volumes does not
    carry the ACL);
-4. a new ``.magi/`` is created by the injected ``init`` (new key, new database);
+4. a new ``.magi/`` is created by the injected ``init`` (new key, new database),
+   and its key is loaded back through the store (present and owner-only), so a
+   ``.magi/`` that some other run recreated is never reported as rotated;
 5. the old key is used once more, only for ``vault ls`` on the backup, so the
    operator learns which API keys to revoke (names only, never values).
 
@@ -172,6 +174,20 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
+def _reason(error: BaseException) -> str:
+    """Return the one-line, key-free reason of a guard or filesystem failure.
+
+    Guard and ``OSError`` messages carry paths and SIDs, never a key.
+
+    Args:
+        error: The failure.
+
+    Returns:
+        Its message on one line, or its class name when the message is empty.
+    """
+    return _one_line(str(error)) or type(error).__name__
+
+
 class KeyRotation:
     """Moves an exposed ``.magi/`` to a backup and creates a new one.
 
@@ -251,6 +267,7 @@ class KeyRotation:
         self._move(magi_dir, backup_dir)
         self._reharden(backup_dir, workdir)
         self._create_new(workdir, backup_dir, old_key)
+        self._verify_new(workdir, backup_dir)
         names, from_vault = self._names_to_revoke(backup_dir, old_key)
         return RotationReport(backup_dir, names, from_vault)
 
@@ -358,7 +375,7 @@ class KeyRotation:
                 leftover = f" (the empty {backup_dir} could not be removed: delete it)"
             raise RotationFailedError(
                 f"cannot restrict the rotation backup {backup_dir} to its owner "
-                f"({_one_line(type(error).__name__)}){leftover}: nothing was moved"
+                f"({_reason(error)}){leftover}: nothing was moved"
             ) from error
 
     @staticmethod
@@ -452,7 +469,7 @@ class KeyRotation:
         except (KeyStoreError, OSError) as error:
             raise RotationFailedError(
                 f"the old {MAGI_DIR}/ was moved to {os.path.join(backup_dir, MAGI_DIR)} but could not be "
-                f"restricted to its owner ({_one_line(type(error).__name__)}), so it may be exposed; no new "
+                f"restricted to its owner ({_reason(error)}), so it may be exposed; no new "
                 f"{MAGI_DIR}/ was created: move it back to {os.path.join(workdir, MAGI_DIR)} to retry"
             ) from error
 
@@ -484,6 +501,32 @@ class KeyRotation:
             raise RotationFailedError(
                 f"creating the new {MAGI_DIR}/ failed ({detail}){leftover}: the old one is intact at "
                 f"{os.path.join(backup_dir, MAGI_DIR)}; move it back to {magi_dir} to retry"
+            ) from error
+
+    def _verify_new(self, workdir: str, backup_dir: str) -> None:
+        """Require the new ``.magi/`` to hold a present, owner-only key (REQ-13g.2).
+
+        ``init`` returns normally, without creating anything, when a ``.magi/``
+        already exists, e.g. one a concurrent run recreated after the move.
+
+        Args:
+            workdir: The project root.
+            backup_dir: ``<backup root>/<id>``, named in the recovery instruction.
+
+        Raises:
+            RotationFailedError: The key is absent, unreadable or not owner-only.
+                The ``.magi/`` at the root is left as it is (this rotation may
+                not have created it); the message names it and the backup.
+        """
+        magi_dir = os.path.join(workdir, MAGI_DIR)
+        try:
+            self._store.load(workdir)
+        except (KeyStoreError, OSError) as error:
+            raise RotationFailedError(
+                f"the {MAGI_DIR}/ now at {magi_dir} does not hold a verified key of this rotation "
+                f"({_reason(error)}); it was left as it is because this rotation may not have created it, "
+                f"and the old one is intact at {os.path.join(backup_dir, MAGI_DIR)}; inspect {magi_dir} and "
+                f"move that aside, then move it back to {magi_dir} to retry"
             ) from error
 
     def _names_to_revoke(self, backup_dir: str, old_key: MagiKey) -> tuple[list[str], bool]:
