@@ -2206,7 +2206,8 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
 
     Returns:
         0 on success; 1 for a fail-closed error or an empty value; 2 (a usage
-        error) for a value that contains a line break or cannot be encoded as UTF-8.
+        error) for a blank value, one that contains a line break, or one that cannot
+        be encoded as UTF-8.
     """
     workdir = os.getcwd()
     try:
@@ -2217,6 +2218,12 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
         if not value:
             print(f"ERROR: the value for {name} is empty; nothing was stored.", file=sys.stderr)
             return 1
+        if not value.strip():
+            print(
+                f"ERROR: the value for {name} is blank; nothing was stored.",
+                file=sys.stderr,
+            )
+            return _USAGE_EXIT_CODE
         if any(ending in value for ending in _LINE_ENDINGS):
             print(
                 f"ERROR: the value for {name} contains a line break; nothing was stored "
