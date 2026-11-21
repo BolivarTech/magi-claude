@@ -551,3 +551,53 @@ def test_a_new_key_that_does_not_verify_stops_the_rotation(tmp_path):
     message = str(exc.value)
     assert os.listdir(tmp_path / "rotated")[0] in message and "S-1-5-11" in message
     assert OLD.reveal() not in message and NEW.reveal() not in message
+
+
+def _project_with_db(tmp_path):
+    """The rotation's project plus the memory database and a nested directory."""
+    work = _project(tmp_path)
+    (work / ".magi" / ".magi-rs-memory.db").write_bytes(b"db")
+    (work / ".magi" / ".magi-rs-memory.db-wal").write_bytes(b"wal")
+    (work / ".magi" / "index").mkdir()
+    (work / ".magi" / "index" / "chunks.bin").write_bytes(b"chunks")
+    return work
+
+
+def test_every_path_of_the_moved_backup_is_hardened_and_verified(tmp_path):
+    # [W3] REQ-13g.1: a same-volume rename keeps each child's own DACL, so no path relies on inheritance.
+    work = _project_with_db(tmp_path)
+    expected = []
+    for current, dirs, files in os.walk(work / ".magi"):
+        relative = os.path.relpath(current, work)
+        expected.append((relative, True))
+        expected.extend((os.path.join(relative, name), False) for name in files)
+    guard = _RecordingGuard()
+    rotation, _ = _rotation(tmp_path, guard=guard)
+    report = rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    for relative, directory in expected:
+        path = os.path.normpath(os.path.join(report.backup_dir, relative))
+        assert ("harden", path, directory) in guard.calls, path
+        assert ("verify", path, directory) in guard.calls, path
+
+
+def test_a_backup_database_that_does_not_verify_stops_the_rotation_and_names_the_backup(tmp_path):
+    # [W3] a guard that cannot restrict the moved DB: "may be exposed", no new .magi/, the backup kept.
+    work = _project_with_db(tmp_path)
+
+    class _DbExposedGuard(_NoopGuard):
+        def verify(self, path, directory):
+            if os.path.basename(path) == ".magi-rs-memory.db" and "rotated" in path:
+                raise KeyExposedError(f"{path} grants access to S-1-5-11 (DACL protected: no)")
+
+    rotation, _ = _rotation(tmp_path, guard=_DbExposedGuard())
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    backups = os.listdir(tmp_path / "rotated")
+    assert len(backups) == 1
+    assert (
+        tmp_path / "rotated" / backups[0] / ".magi" / ".magi-rs-memory.db"
+    ).read_bytes() == b"db"
+    assert not (work / ".magi").exists()
+    message = str(exc.value)
+    assert backups[0] in message and "may be exposed" in message and "S-1-5-11" in message
+    assert "\n" not in message.strip() and OLD.reveal() not in message
