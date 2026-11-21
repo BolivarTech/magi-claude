@@ -48,6 +48,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from cli_commands import YES_FLAG
 from magi_key import (
     DIR_MODE,
     KEY_DIR_PARTS,
@@ -427,7 +428,7 @@ class KeyRotation:
             return
         if not is_tty:
             raise RotationNotAuthorisedError(
-                "the key rotation needs authorisation: without a terminal, rerun with --yes "
+                f"the key rotation needs authorisation: without a terminal, rerun with {YES_FLAG} "
                 "(nothing was changed)"
             )
         try:

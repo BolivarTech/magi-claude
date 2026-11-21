@@ -17,6 +17,7 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from cli_commands import VAULT_SET_FLAG, command
 from magi_key import KeyExposedError, KeyMissingError, KeyStore, MagiKey
 from magi_key_permissions import default_key_store
 from magi_rs_bootstrap import (
@@ -95,7 +96,7 @@ _RECOMMENDED_MIN_TIMEOUT_SECONDS = DEFAULT_OLLAMA_TIMEOUT_SECONDS
 with the 65 536-token output cap, so a lower value warns (D2)."""
 _VAULT_HINT = (
     "If this is an authentication failure, load the API keys the config needs with "
-    "`--ollama-vault-set <NAME>`."
+    f"`{command(VAULT_SET_FLAG, '<NAME>')}`."
 )
 """Every non-zero exit carries it: magi-rs offers no free check for a missing key (REQ-13d)."""
 _STDERR_EXCERPT_CHARS = 2000

@@ -23,6 +23,7 @@ import os
 import secrets
 from typing import Protocol
 
+from cli_commands import INIT_FLAG, ROTATE_KEY_FLAG, VAULT_SET_FLAG, command
 from one_line import one_line
 
 KEY_DIR_PARTS = (".magi", ".secret")
@@ -49,13 +50,11 @@ REDACTION_MARKER = "<redacted>"
 _EXCLUSIVE_CREATE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
 """Create-or-fail, write-only; binary on Windows so no newline translation happens."""
 
-_REGENERATE_COMMAND = "--ollama-init"
-_ROTATE_COMMAND = "--ollama-rotate-key"
-_VAULT_SET_COMMAND = "--ollama-vault-set"
+_ROTATE_COMMAND = command(ROTATE_KEY_FLAG)
 
 REGENERATION_GUIDANCE = (
-    f"move the existing .magi/ aside to a backup, run {_REGENERATE_COMMAND} (it leaves an existing .magi/ "
-    f"untouched), then reload each API key with {_VAULT_SET_COMMAND} <NAME>"
+    f"move the existing .magi/ aside to a backup, run {command(INIT_FLAG)} (it leaves an existing .magi/ "
+    f"untouched), then reload each API key with {command(VAULT_SET_FLAG, '<NAME>')}"
 )
 """How to regenerate a ``.magi/`` that cannot be used (REQ-12): the one procedure, stated once.
 

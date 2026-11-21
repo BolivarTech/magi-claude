@@ -85,6 +85,13 @@ from magi_key_rotation import (  # noqa: E402
     RotationNotAuthorisedError,
 )
 from magi_rs_vault import VAULT_KEY_NAMES, VaultClient  # noqa: E402
+from cli_commands import (  # noqa: E402
+    INIT_FLAG,
+    ROTATE_KEY_FLAG,
+    VAULT_SET_FLAG,
+    YES_FLAG,
+    command,
+)
 from ollama_init import MagiDirExistsError, run_ollama_init  # noqa: E402
 from one_line import one_line  # noqa: E402
 from run_lock import (  # noqa: E402
@@ -164,10 +171,6 @@ DEFAULT_MAX_ATTEMPTS = 2
 #: TOML "already validates this way". It did not: it accepted 1000 (MAGI gate, Balthasar).
 
 
-_VAULT_SET_FLAG = "--ollama-vault-set"
-_ROTATE_KEY_FLAG = "--ollama-rotate-key"
-_YES_FLAG = "--yes"
-"""The key subcommands and the flag that authorises a rotation: parse_args, main and the handlers use them."""
 _VAULT_VALUE_PROMPT = "API key value (input hidden): "
 _USAGE_EXIT_CODE = 2
 """The exit status of an unusable invocation, as argparse uses."""
@@ -269,16 +272,16 @@ def _check_subcommands(parser: argparse.ArgumentParser, args: argparse.Namespace
         flag
         for flag, given in (
             ("--check-prompts", args.check_prompts),
-            ("--ollama-init", args.ollama_init),
-            (_VAULT_SET_FLAG, args.ollama_vault_set is not None),
-            (_ROTATE_KEY_FLAG, args.ollama_rotate_key),
+            (INIT_FLAG, args.ollama_init),
+            (VAULT_SET_FLAG, args.ollama_vault_set is not None),
+            (ROTATE_KEY_FLAG, args.ollama_rotate_key),
         )
         if given
     ]
     if len(chosen) > 1:
         parser.error(f"{' and '.join(chosen)} cannot be combined; run one at a time")
     if args.yes and not args.ollama_rotate_key:
-        parser.error(f"{_YES_FLAG} applies only to {_ROTATE_KEY_FLAG}")
+        parser.error(f"{YES_FLAG} applies only to {ROTATE_KEY_FLAG}")
     if chosen and (args.mode is not None or args.input is not None or args.ollama):
         parser.error(f"{chosen[0]} takes no mode, input or --ollama")
 
@@ -420,12 +423,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--ollama-init",
+        INIT_FLAG,
         action="store_true",
         help="Initialise this project for magi-rs (`magi-rs init -w <cwd>`, creates .magi/) and exit.",
     )
     parser.add_argument(
-        _VAULT_SET_FLAG,
+        VAULT_SET_FLAG,
         metavar="NAME",
         choices=VAULT_KEY_NAMES,
         default=None,
@@ -436,18 +439,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        _ROTATE_KEY_FLAG,
+        ROTATE_KEY_FLAG,
         action="store_true",
         help=(
             "Replace an exposed magi-rs key: move .magi/ to a backup outside the project, create a new "
             "one and list the API keys to revoke, then exit. Asks for confirmation at a terminal; "
-            f"elsewhere it needs {_YES_FLAG}. Takes no mode, input or --ollama."
+            f"elsewhere it needs {YES_FLAG}. Takes no mode, input or --ollama."
         ),
     )
     parser.add_argument(
-        _YES_FLAG,
+        YES_FLAG,
         action="store_true",
-        help=f"With {_ROTATE_KEY_FLAG} only: authorise the rotation without asking.",
+        help=f"With {ROTATE_KEY_FLAG} only: authorise the rotation without asking.",
     )
     # ``model_source`` is declared here with its siblings, not only assigned in
     # the body below: a hand-built Namespace (tests, embedders) would otherwise
@@ -475,7 +478,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.ollama and args.model is not None:
         parser.error(
             "--model does not apply with --ollama; the trio is declared in .magi/magi.toml "
-            "(run --ollama-init once per project)."
+            f"({command(INIT_FLAG)} once per project)."
         )
     if args.ollama and args.max_attempts is not None:
         # R13/R18: with --ollama, magi-rs owns the retries and the rotation; the flag
@@ -2269,12 +2272,12 @@ def rotate_main(assume_yes: bool, is_tty: bool) -> int:
         print(
             "Treat these API keys as compromised: revoke each one at its provider, then store the new value"
         )
-        print(f"with run_magi.py {_VAULT_SET_FLAG} <NAME>:")
+        print(f"with {command(VAULT_SET_FLAG, '<NAME>')}:")
         for name in report.names_to_revoke:
             print(f"  {name}")
     else:
         print(
-            f"The old vault held no API keys; store new ones with run_magi.py {_VAULT_SET_FLAG} <NAME>."
+            f"The old vault held no API keys; store new ones with {command(VAULT_SET_FLAG, '<NAME>')}."
         )
     return 0
 

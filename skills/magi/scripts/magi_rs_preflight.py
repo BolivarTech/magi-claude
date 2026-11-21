@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import os
 
+from cli_commands import INIT_FLAG, command
 from magi_key import KEY_DIR_PARTS, REGENERATION_GUIDANCE, KeyStore, MagiKey
 
 _CONFIG_RELATIVE_PATH = os.path.join(KEY_DIR_PARTS[0], "magi.toml")
-_INIT_COMMAND = "/magi --ollama-init"
+_INIT_COMMAND = command(INIT_FLAG)
 
 
 class ProjectNotInitialisedError(Exception):

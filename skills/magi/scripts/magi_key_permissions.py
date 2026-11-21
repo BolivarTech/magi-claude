@@ -43,6 +43,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
+from cli_commands import ROTATE_KEY_FLAG, command
 from magi_key import (
     DIR_MODE,
     FILE_MODE,
@@ -113,7 +114,7 @@ _DENY_ACE_TYPES = frozenset({"D", "OD"})
 """``ACCESS_DENIED_ACE_TYPE`` and ``ACCESS_DENIED_OBJECT_ACE_TYPE`` in SDDL. Used only to word a verify
 failure, never to pass one."""
 _ACE_TYPE_INDEX = 0
-_ROTATE_COMMAND = "--ollama-rotate-key"
+_ROTATE_COMMAND = command(ROTATE_KEY_FLAG)
 
 _MKDIR_EXPLICIT_SIDS = ("S-1-3-4", "S-1-5-18", "S-1-5-32-544")
 """OWNER RIGHTS, SYSTEM and Administrators: the explicit ACEs ``os.mkdir(mode=0o700)`` writes on Windows.

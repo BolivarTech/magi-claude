@@ -884,7 +884,7 @@ def test_an_uninitialised_project_is_FATAL_before_the_payload_is_built(
     monkeypatch.setattr(run_magi, "_load_input_content", _payload_built)
     assert _main_with_ollama(monkeypatch, tmp_path) == 1
     err = capsys.readouterr().err
-    assert "[FATAL]" in err and "/magi --ollama-init" in err and "Traceback" not in err
+    assert "[FATAL]" in err and "run_magi.py --ollama-init" in err and "Traceback" not in err
     assert not (tmp_path / ".magi").exists()
 
 
