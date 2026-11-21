@@ -84,6 +84,9 @@ _TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 _FIRST_COLLISION_SUFFIX = 2
 """The suffix of the second backup created within the same second (``-2``)."""
 
+_MAX_BACKUP_CANDIDATES = 100
+"""How many backup names (the plain one, then ``-2``, ``-3``, ...) are tried before giving up."""
+
 _AUTHORISING_ANSWERS = frozenset({"y", "Y"})
 """The only answers to the confirmation prompt that authorise a rotation."""
 
@@ -524,7 +527,8 @@ class KeyRotation:
             ``(the created directory, the parents this call created, outermost first)``.
 
         Raises:
-            RotationFailedError: The directory could not be created, or creation was
+            RotationFailedError: No free backup name was found within
+                ``_MAX_BACKUP_CANDIDATES`` tries, or the directory could not be created, or creation was
                 interrupted; the empty directories this call made are removed (any
                 that cannot be are named) and nothing was moved.
         """
@@ -533,8 +537,20 @@ class KeyRotation:
         base = os.path.join(self._backup_root, f"{fingerprint[:_FINGERPRINT_HEX_CHARS]}-{stamp}")
         suffixed = (f"{base}-{n}" for n in itertools.count(_FIRST_COLLISION_SUFFIX))
         candidate = next(
-            path for path in itertools.chain([base], suffixed) if not os.path.lexists(path)
+            (
+                path
+                for path in itertools.islice(
+                    itertools.chain([base], suffixed), _MAX_BACKUP_CANDIDATES
+                )
+                if not os.path.lexists(path)
+            ),
+            None,
         )
+        if candidate is None:
+            raise RotationFailedError(
+                f"cannot find a free backup name in {self._backup_root} after "
+                f"{_MAX_BACKUP_CANDIDATES} tries: nothing was moved; clear old backups there"
+            )
         created_parents: list[str] = []
         parent = os.path.dirname(candidate)
         while not os.path.lexists(parent) and os.path.dirname(parent) != parent:
