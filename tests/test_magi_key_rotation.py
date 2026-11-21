@@ -1294,3 +1294,49 @@ def test_a_rotation_whose_vault_ls_prints_nothing_lists_the_whole_closed_list(tm
     rotation, _ = _rotation(tmp_path, vault_ls=_vault_ls)
     report = rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert report.names_to_revoke == list(VAULT_KEY_NAMES) and report.names_from_vault is False
+
+
+class _KeyEchoingBackupGuard(_NoopGuard):
+    """[V8] Fails to harden the moved backup with a message that echoes the old key."""
+
+    def harden(self, path, directory):
+        parts = os.path.normpath(path).split(os.sep)
+        if "rotated" in parts and ".magi" in parts[parts.index("rotated") :]:
+            raise KeyHardeningError(f"cannot harden {path} (key {OLD.reveal()})")
+
+
+class _ArmedKeyEchoingGuard(_NoopGuard):
+    """[V8] Once armed, every verify fails with a message that echoes the new key."""
+
+    armed = False
+
+    def verify(self, path, directory):
+        if self.armed:
+            raise KeyHardeningError(f"cannot verify {path} (key {NEW.reveal()})")
+
+
+def test_a_guard_reason_that_echoes_the_old_key_is_redacted_in_the_message(tmp_path):
+    # [V8] the redaction is structural: every step's reason goes through it, not only init's.
+    work = _project(tmp_path)
+    rotation, _ = _rotation(tmp_path, guard=_KeyEchoingBackupGuard())
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert OLD.reveal() not in message and "<redacted>" in message
+
+
+def test_a_guard_reason_that_echoes_the_new_key_is_redacted_in_the_message(tmp_path):
+    # [V8] a key this rotation persisted is redacted from the reasons of the later steps too.
+    work = _project(tmp_path)
+    guard = _ArmedKeyEchoingGuard()
+
+    def _init(workdir, store):
+        store.persist(workdir, NEW)
+        guard.armed = True
+        return "initialised"
+
+    rotation, _ = _rotation(tmp_path, init=_init, guard=guard)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert NEW.reveal() not in message and "<redacted>" in message
