@@ -462,9 +462,14 @@ class KeyRotation:
         try:
             self._backup_entries(magi_dir)
         except (_LinkInBackupError, OSError) as error:
+            advice = (
+                "remove the link and retry"
+                if isinstance(error, _LinkInBackupError)
+                else f"fix the cause ({self._reason(error)}) and retry"
+            )
             raise RotationFailedError(
                 f"the {MAGI_DIR}/ at {magi_dir} cannot be rotated safely ({self._reason(error)}): nothing was "
-                "moved; remove the link and retry"
+                f"moved; {advice}"
             ) from error
 
     def _read_old_key(self, workdir: str) -> MagiKey:
