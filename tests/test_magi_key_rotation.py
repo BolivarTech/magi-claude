@@ -690,3 +690,20 @@ def test_a_new_magi_dir_holding_the_old_key_is_never_reported_as_rotated(tmp_pat
     assert os.listdir(tmp_path / "rotated")[0] in message and "old key" in message
     assert (work / ".magi" / ".secret" / "magi.key").exists()  # left as it is, never deleted
     assert OLD.reveal() not in message and "\n" not in message.strip()
+
+
+def test_a_failed_init_never_removes_a_magi_dir_holding_another_process_key(tmp_path):
+    # [W5] the rotation's own cleanup honours the same rule as run_ollama_init's.
+    work = _project(tmp_path)
+
+    def _init(workdir, store):
+        _recreate_magi(workdir, FOREIGN)
+        raise OllamaInitError("init died")
+
+    rotation, _ = _rotation(tmp_path, init=_init)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert (work / ".magi" / ".secret" / "magi.key").read_text(encoding="ascii") == FOREIGN.reveal()
+    message = str(exc.value)
+    assert os.listdir(tmp_path / "rotated")[0] in message and "another process" in message
+    assert "\n" not in message.strip() and FOREIGN.reveal() not in message

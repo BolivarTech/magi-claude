@@ -306,3 +306,72 @@ def test_the_ollama_init_cli_on_an_existing_magi_dir_prints_the_message_and_exit
     assert exc.value.code == 0
     assert "already exists" in captured.out and "untouched" in captured.out
     assert "[FATAL]" not in captured.err
+
+
+OTHER_PROCESS_KEY = "other-process-key-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC="
+
+
+def _write_other_process_key(workdir):
+    """Write ``.magi/.secret/magi.key`` as a concurrent ``--ollama-init`` would."""
+    secret = os.path.join(workdir, ".magi", ".secret")
+    os.makedirs(secret, exist_ok=True)
+    with open(os.path.join(secret, "magi.key"), "w", encoding="ascii") as handle:
+        handle.write(OTHER_PROCESS_KEY)
+
+
+class _NoopGuard:
+    def harden(self, path, directory):
+        pass
+
+    def verify(self, path, directory):
+        pass
+
+
+def test_a_failed_init_never_removes_a_magi_dir_another_process_initialised(monkeypatch, tmp_path):
+    # [W5] a key this call did not write means the .magi/ is someone else's: kept, and the error says so.
+    def run(argv, **kwargs):
+        _write_other_process_key(argv[argv.index("-w") + 1])
+        return _Completed(returncode=1, stdout="", stderr="error: init died")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", run)
+    with pytest.raises(OllamaInitError) as exc:
+        run_ollama_init(str(tmp_path), key_store=_Store())
+    key_file = tmp_path / ".magi" / ".secret" / "magi.key"
+    assert key_file.read_text(encoding="ascii") == OTHER_PROCESS_KEY
+    message = " ".join(str(exc.value).split())
+    assert "another process" in message and str(tmp_path / ".magi") in message
+
+
+def test_a_key_that_already_exists_at_persist_keeps_the_other_process_magi_dir(
+    monkeypatch, tmp_path
+):
+    # [W5] persist's exclusive create fails (FileExistsError): the existing key and its .magi/ survive.
+    def run(argv, **kwargs):
+        _write_other_process_key(argv[argv.index("-w") + 1])
+        return _Completed()
+
+    monkeypatch.setattr("ollama_init.subprocess.run", run)
+    with pytest.raises(FileExistsError) as exc:
+        run_ollama_init(str(tmp_path), key_store=KeyStore(_NoopGuard()))
+    key_file = tmp_path / ".magi" / ".secret" / "magi.key"
+    assert key_file.read_text(encoding="ascii") == OTHER_PROCESS_KEY
+    notes = " ".join(getattr(exc.value, "__notes__", []))
+    assert "another process" in notes and str(tmp_path / ".magi") in notes
+
+
+def test_a_key_this_call_wrote_and_could_not_remove_does_not_keep_the_magi_dir(
+    monkeypatch, tmp_path
+):
+    # [W5] passes in Red by design: the guard must not over-protect this call's own leftover key.
+    class _WritesThenFails(_Store):
+        def persist(self, workdir, key):
+            secret = os.path.join(workdir, ".magi", ".secret")
+            os.makedirs(secret, exist_ok=True)
+            with open(os.path.join(secret, "magi.key"), "w", encoding="ascii") as handle:
+                handle.write(key.reveal())
+            raise KeyHardeningError("cannot harden (and the key file could not be removed)")
+
+    monkeypatch.setattr("ollama_init.subprocess.run", _fake_run([]))
+    with pytest.raises(KeyHardeningError):
+        run_ollama_init(str(tmp_path), key_store=_WritesThenFails())
+    assert not (tmp_path / ".magi").exists()
