@@ -2275,7 +2275,11 @@ def rotate_main(assume_yes: bool, is_tty: bool) -> int:
         f"Key rotated. The old .magi/ is in {report.backup_dir}: destroy it once you no longer need it."
     )
     if not report.names_from_vault:
-        print("The old vault could not be read, so every name it may have held is listed.")
+        why = f" ({report.listing_detail})" if report.listing_detail else ""
+        print(
+            f"The old vault could not be listed exactly{why}, "
+            "so every name it may have held is listed."
+        )
     if report.names_to_revoke:
         print(
             "Treat these API keys as compromised: revoke each one at its provider, then store the new value"

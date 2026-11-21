@@ -171,13 +171,16 @@ class RotationReport:
         backup_dir: ``<backup root>/<id>``, the parent of the old ``.magi/``.
         names_to_revoke: The API key names to revoke at their providers.
         names_from_vault: True when the names were read from the old vault;
-            False when it could not be read and the names are the whole closed
-            list (``VAULT_KEY_NAMES``).
+            False when it could not be listed exactly and the names are the whole
+            closed list (``VAULT_KEY_NAMES``).
+        listing_detail: Why the listing fell back, on one line, key-redacted (it names
+            an unrecognised entry, never a value); empty when the names came from the vault.
     """
 
     backup_dir: str
     names_to_revoke: list[str]
     names_from_vault: bool
+    listing_detail: str = ""
 
 
 def rotation_backup_root() -> str:
@@ -438,8 +441,8 @@ class KeyRotation:
         self._redactors.append(new_store.redact)
         self._create_new(workdir, backup_dir, new_store)
         self._verify_new(workdir, backup_dir, old_key, new_store)
-        names, from_vault = self._names_to_revoke(workdir, backup_dir, old_key)
-        return RotationReport(backup_dir, names, from_vault)
+        names, from_vault, detail = self._names_to_revoke(workdir, backup_dir, old_key)
+        return RotationReport(backup_dir, names, from_vault, detail)
 
     @staticmethod
     def _authorise(
@@ -943,7 +946,7 @@ class KeyRotation:
 
     def _names_to_revoke(
         self, workdir: str, backup_dir: str, old_key: MagiKey
-    ) -> tuple[list[str], bool]:
+    ) -> tuple[list[str], bool, str]:
         """List the old vault's names with the old key: the key's only use after the move.
 
         Args:
@@ -952,8 +955,8 @@ class KeyRotation:
             old_key: The exposed key.
 
         Returns:
-            ``(names, True)`` from the vault, or ``(list(VAULT_KEY_NAMES), False)``
-            when the vault cannot be read for any reason.
+            ``(names, True, "")`` from the vault, or ``(list(VAULT_KEY_NAMES), False,
+            <one-line reason>)`` when the vault cannot be listed exactly for any reason.
 
         Raises:
             RotationFailedError: The listing was interrupted (``KeyboardInterrupt``,
@@ -961,9 +964,9 @@ class KeyRotation:
                 message names it and the backup and lists every name to revoke.
         """
         try:
-            return list(self._vault_ls(backup_dir, old_key)), True
-        except Exception:  # noqa: BLE001 - an unreadable old vault falls back to the closed list, reported
-            return list(VAULT_KEY_NAMES), False
+            return list(self._vault_ls(backup_dir, old_key)), True, ""
+        except Exception as error:  # noqa: BLE001 - an unlistable old vault falls back to the closed list, reported
+            return list(VAULT_KEY_NAMES), False, self._reason(error)
         except BaseException as error:
             raise RotationFailedError(
                 f"the new {MAGI_DIR}/ is in place at {os.path.join(workdir, MAGI_DIR)} and the old one is at "
