@@ -47,7 +47,9 @@ def test_the_value_travels_on_stdin_and_the_key_by_environment():
 def test_ls_runs_vault_ls_with_the_key_by_environment_never_argv():
     # [CP2-M29] REQ-10 at its most sensitive point: the exposed key during a rotation.
     seen = []
-    _client(seen, _Completed(stdout="")).ls()
+    _client(
+        seen, _Completed(stdout="(vault empty)\n")
+    ).ls()  # [U2] the measured answer, not silence
     argv, kwargs = seen[0]
     assert argv == ["/bin/magi-rs", "vault", "ls", "-w", "/repo"]
     assert kwargs["env"]["MAGI_PASSPHRASE"] == _KEY.reveal() and _KEY.reveal() not in " ".join(argv)
