@@ -530,6 +530,7 @@ class KeyRotation:
                 nothing was moved.
         """
         guard = self._store.guard
+        directory = backup_dir
         try:
             for directory in (*created_parents, backup_dir):
                 guard.harden(directory, True)
@@ -541,7 +542,7 @@ class KeyRotation:
             except OSError:
                 leftover = f" (the empty {backup_dir} could not be removed: delete it)"
             raise RotationFailedError(
-                f"cannot restrict the rotation backup {backup_dir} to its owner "
+                f"cannot restrict the rotation backup directory {directory} to its owner "
                 f"({_reason(error)}){leftover}: nothing was moved"
             ) from error
 
