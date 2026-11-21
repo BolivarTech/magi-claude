@@ -5376,6 +5376,22 @@ def test_vault_set_refuses_an_empty_value(monkeypatch, tmp_path, capsys):
     assert "empty" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
+def test_vault_set_refuses_a_value_with_an_interior_line_break(monkeypatch, capsys, separator):
+    # [V5] a pasted two-line value would be stored truncated or corrupted; refuse it, never echo it.
+    stored = []
+    monkeypatch.setattr("run_magi.VaultClient.set", lambda self, name, value: stored.append(value))
+    _stub_vault_preflight(monkeypatch)
+    value = f"sk-first{separator}sk-second"
+    code = run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(value + "\n"), is_tty=False)
+    captured = capsys.readouterr()
+    assert code == 2 and stored == []
+    assert "OPENAI_API_KEY" in captured.err and "line break" in captured.err
+    assert "sk-first" not in captured.out + captured.err
+    assert "sk-second" not in captured.out + captured.err
+    assert "\n" not in captured.err.strip()
+
+
 def test_vault_set_preflights_the_production_store_in_the_working_directory(monkeypatch, tmp_path):
     # [CP2-M46] [CP2-B13] the production store, the cwd, and the verified binary is the one handed the key.
     built = {}
