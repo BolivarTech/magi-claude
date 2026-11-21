@@ -22,10 +22,7 @@ are never treated as safe.
 
 Declared limits: the permissions of ``.magi/`` itself are not verified, POSIX
 extended ACLs are not read, and on Windows the file owner (the ``O:`` field of
-the SDDL) is not checked, only the DACL. Running the plugin as SYSTEM or as the
-built-in Administrator account fails closed with a false "exposed": Windows
-renders those SIDs as SDDL aliases (``SY``, ``LA``), which never equal the SID
-string ``whoami`` reports.
+the SDDL) is not checked, only the DACL.
 """
 
 from __future__ import annotations
@@ -84,7 +81,15 @@ _YES = "yes"
 _NO = "no"
 
 _SDDL_COMMAND = f"(Get-Acl -LiteralPath $env:{_ACL_PATH_VARIABLE}).Sddl"
-_POWERSHELL_ARGS = ("-NoProfile", "-NonInteractive", "-Command", _SDDL_COMMAND)
+
+_SID_ALIAS_VARIABLE = "MAGI_SID_ALIAS"
+"""Environment variable that carries an SDDL alias to PowerShell; never interpolated into the command."""
+
+_RESOLVE_ALIAS_COMMAND = (
+    f"([System.Security.Principal.SecurityIdentifier]$env:{_SID_ALIAS_VARIABLE}).Value"
+)
+
+_POWERSHELL_OPTIONS = ("-NoProfile", "-NonInteractive", "-Command")
 
 _REMOVE_INHERITANCE = "/inheritance:r"
 _REPLACE_GRANT = "/grant:r"
@@ -103,6 +108,10 @@ any other explicit ACE survives hardening and is caught by ``verify``.
 
 _SID_PATTERN = re.compile(r"S-1-\d+(?:-\d+)+")
 """A literal SID string; whoami must return one."""
+
+_SID_ALIAS_PATTERN = re.compile(r"[A-Z]{2}")
+"""An SDDL SID alias (``LA``, ``SY``, ``BA``, ...). Windows writes the current user's own SID
+this way when it is a well-known account: the built-in Administrator reads back as ``LA``."""
 
 _DACL_PATTERN = re.compile(r"D:(?P<flags>[A-Z_]*)(?P<aces>(?:\([^()]*\))*)")
 """The DACL section: its flags, then a run of parenthesised ACEs."""
@@ -175,6 +184,31 @@ def _run(argv: list[str], env: Mapping[str, str] | None = None) -> str:
     except subprocess.SubprocessError as error:
         raise OSError(f"{tool} failed: {_stderr_excerpt(error)}") from error
     return completed.stdout
+
+
+def _run_powershell(command: str, variable: str, value: str) -> str:
+    """Run one Windows PowerShell command that reads its input from one variable.
+
+    The value travels only in the child environment, never in the command
+    text. The child does not inherit ``PSModulePath`` (see
+    ``_PS_MODULE_PATH_VARIABLE``).
+
+    Args:
+        command: The PowerShell command text.
+        variable: The environment variable that carries ``value``.
+        value: The input, e.g. a path or an SDDL alias.
+
+    Returns:
+        The output, stripped.
+
+    Raises:
+        OSError: PowerShell could not run or exited non-zero.
+    """
+    env = {
+        name: text for name, text in os.environ.items() if name.upper() != _PS_MODULE_PATH_VARIABLE
+    }
+    env[variable] = value
+    return _run([_system_tool(_POWERSHELL_PARTS), *_POWERSHELL_OPTIONS, command], env).strip()
 
 
 def _system_tool(parts: tuple[str, ...]) -> str:
@@ -372,14 +406,54 @@ class WindowsPermissionGuard(PermissionGuard):
         Raises:
             OSError: PowerShell could not run.
         """
-        argv = [_system_tool(_POWERSHELL_PARTS), *_POWERSHELL_ARGS]
-        env = {
-            name: value
-            for name, value in os.environ.items()
-            if name.upper() != _PS_MODULE_PATH_VARIABLE
-        }
-        env[_ACL_PATH_VARIABLE] = path
-        return _run(argv, env).strip()
+        return _run_powershell(_SDDL_COMMAND, _ACL_PATH_VARIABLE, path)
+
+    def resolve_alias(self, alias: str) -> str:
+        """Return the numeric SID behind an SDDL alias.
+
+        The alias reaches PowerShell only through ``MAGI_SID_ALIAS``, with the
+        same clean environment as ``read_sddl``.
+
+        Args:
+            alias: An SDDL SID alias such as ``LA`` or ``SY``.
+
+        Returns:
+            The SID string, e.g. ``S-1-5-18``.
+
+        Raises:
+            OSError: PowerShell failed (an invalid alias exits 1) or answered
+                with something that is not a SID.
+        """
+        sid = _run_powershell(_RESOLVE_ALIAS_COMMAND, _SID_ALIAS_VARIABLE, alias)
+        if not _SID_PATTERN.fullmatch(sid):
+            raise OSError(f"the SDDL alias {alias} did not resolve to a SID")
+        return sid
+
+    def _is_foreign(self, ace_sid: str, sid: str, resolved: dict[str, str]) -> bool:
+        """Tell whether an ACE's SID is someone other than the current user.
+
+        A two-letter alias is resolved to its numeric SID first, once per alias
+        (memoised in ``resolved``); a numeric SID is compared as is, so the
+        normal path starts no extra process.
+
+        Args:
+            ace_sid: The SID field of the ACE, numeric or an alias.
+            sid: The current user's SID.
+            resolved: The aliases resolved so far during this check.
+
+        Returns:
+            True when the ACE belongs to someone else.
+
+        Raises:
+            OSError: An alias could not be resolved.
+        """
+        if ace_sid == sid:
+            return False
+        if not _SID_ALIAS_PATTERN.fullmatch(ace_sid):
+            return True
+        if ace_sid not in resolved:
+            resolved[ace_sid] = self.resolve_alias(ace_sid)
+        return resolved[ace_sid] != sid
 
     def harden(self, path: str, directory: bool) -> None:
         """Cut inheritance and grant full control to the current user's SID only.
@@ -430,9 +504,14 @@ class WindowsPermissionGuard(PermissionGuard):
         try:
             sid = self.current_sid()
             protected, sids = parse_sddl_dacl(self.read_sddl(path))
+            resolved: dict[str, str] = {}
+            foreign = [
+                ace_sid
+                for ace_sid in dict.fromkeys(sids)
+                if self._is_foreign(ace_sid, sid, resolved)
+            ]
         except (OSError, ValueError) as error:
             raise KeyExposedError(f"cannot read the permissions of {path}: {error}") from error
-        foreign = list(dict.fromkeys(ace_sid for ace_sid in sids if ace_sid != sid))
         protection = f"(DACL protected: {_YES if protected else _NO})"
         if foreign:
             raise KeyExposedError(f"{path} grants access to {', '.join(foreign)} {protection}")
