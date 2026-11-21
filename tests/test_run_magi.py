@@ -6171,6 +6171,11 @@ def _exec_recording(process):
 _CR_KEY = MagiKey("main-review-key-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=")
 
 
+from magi_rs_code_review import MagiRsCodeReview as _ReviewExecutor  # noqa: E402
+
+_ORIGINAL_REVIEW_PREFLIGHT = _ReviewExecutor.preflight
+
+
 def _run_main_with_fake_review(
     monkeypatch, tmp_path, argv, overrides=None, history_recorded=True, payload=None
 ):
@@ -6184,7 +6189,8 @@ def _run_main_with_fake_review(
         return "magi-rs"
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(MagiRsCodeReview, "preflight", _preflight)
+    if MagiRsCodeReview.preflight is _ORIGINAL_REVIEW_PREFLIGHT:  # a test's own recorder wins
+        monkeypatch.setattr(MagiRsCodeReview, "preflight", _preflight)
     if not history_recorded:
         monkeypatch.setattr("magi_rs_code_review.HISTORY_WINDOW_SECONDS", 0.1)
     stdout = (
@@ -6255,8 +6261,37 @@ def test_code_review_ollama_without_timeout_passes_the_default_to_magi_rs(monkey
     monkeypatch.setattr(MagiRsCodeReview, "preflight", lambda self: "magi-rs")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        sys, "argv", ["run_magi.py", "code-review", "--ollama", "--commit", "abc", "--no-status"]
+        sys,
+        "argv",
+        [
+            "run_magi.py",
+            "code-review",
+            "--ollama",
+            "--commit",
+            "abc",
+            "--no-status",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
     )
     with pytest.raises(SystemExit):
         run_magi.main()
     assert seen["timeout"] == DEFAULT_OLLAMA_TIMEOUT_SECONDS
+
+
+def test_the_review_banner_counts_the_unlisted_skipped_and_masked():
+    # [m1] the lists are capped by magi-rs; the *_unlisted counters hold the rest.
+    result = CodeReviewResult.from_json(
+        _cr_payload(skipped=["a"], skipped_unlisted=4, masked=[], masked_unlisted=2).decode("utf-8")
+    )
+    lines = format_review_banner(result)
+    assert "|  skipped: 1 (+4 unlisted)" in lines
+    assert "|  masked: 0 (+2 unlisted)" in lines
+
+
+def test_the_native_review_report_carries_a_null_guard(monkeypatch, tmp_path):
+    # [I] absent = null, never omitted.
+    report = _run_main_with_fake_review(
+        monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
+    )
+    assert "guard" in report and report["guard"] is None
