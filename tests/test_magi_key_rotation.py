@@ -1771,3 +1771,24 @@ def test_a_partial_copy_that_cannot_be_removed_also_names_the_parents_left_in_pl
     assert "a partial copy was left in" in message
     assert "left in place" in message and str(tmp_path / "rotated") in message
     assert "\n" not in message.strip()
+
+
+def test_an_empty_key_file_left_by_a_failed_init_counts_as_no_key_and_is_removed(tmp_path):
+    # [O2] the rotation's cleanup and the init's cleanup agree: an empty key file (EmptyKeyError) holds no key.
+    work = _project(tmp_path)
+
+    class _ReadingStore(_Store):
+        read_unverified = KeyStore.read_unverified
+
+    def _init(workdir, store):
+        os.makedirs(os.path.join(workdir, ".magi", ".secret"))
+        (Path(workdir) / ".magi" / ".secret" / "magi.key").write_text("", encoding="ascii")
+        raise RuntimeError("init died")
+
+    rotation = KeyRotation(
+        _ReadingStore(), _init, lambda *a: [], backup_root=str(tmp_path / "rotated")
+    )
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert not (work / ".magi").exists()
+    assert "holding a key" not in str(exc.value)
