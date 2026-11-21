@@ -1691,3 +1691,29 @@ def test_a_file_exists_error_names_a_created_parent_that_holds_the_other_leaf(
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert str(tmp_path / "rotated") in str(exc.value) and "delete them" in str(exc.value)
     assert len(os.listdir(tmp_path / "rotated")) == 1  # the other process's leaf survives
+
+
+@pytest.mark.parametrize("kind", ["absent", "file"])
+def test_both_entry_points_give_the_same_line_when_there_is_no_magi_dir(
+    tmp_path, monkeypatch, capsys, kind
+):
+    # [M4] one precondition, one message: rotate_main (before any prompt) and KeyRotation.rotate agree.
+    import run_magi
+
+    work = tmp_path / "work"
+    work.mkdir()
+    if kind == "file":
+        (work / ".magi").write_text("x", encoding="utf-8")
+    monkeypatch.chdir(work)
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(
+            ensure=lambda: "/bin/magi-rs", verify=lambda: "/bin/magi-rs"
+        ),
+    )
+    assert run_magi.rotate_main(True, is_tty=False) == 1
+    printed = capsys.readouterr().err.strip()
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert printed == f"ERROR: {exc.value}"
