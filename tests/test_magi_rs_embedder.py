@@ -3,6 +3,7 @@
 # Date: 2026-11-21
 """Tests for the embedder reachability probe of the code-review preflight (REQ-11a)."""
 
+import http.client
 import urllib.error
 
 import pytest
@@ -79,3 +80,65 @@ def test_the_probe_sends_one_minimal_request_with_the_named_timeout(tmp_path):
 
 def test_the_unreachable_error_is_not_a_validation_error():
     assert not issubclass(EmbedderUnreachableError, ValidationError)
+
+
+def _never_called(request, timeout):
+    raise AssertionError("no request may be sent for an unresolvable config")
+
+
+def test_an_unreadable_config_is_one_error_naming_the_path_and_sends_nothing(tmp_path):
+    path = str(tmp_path / "absent.toml")
+    with pytest.raises(EmbedderUnreachableError) as exc:
+        EmbedderProbe(opener=_never_called).check(path)
+    assert path in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "this is not [valid toml",
+        'base_url = "http://localhost:11434/v1"\n[embedding]\nbackend = "x"\n',
+        'base_url = "http://localhost:11434/v1"\nembedding = "nomic"\n',
+        '[embedding]\nbase_url = "localhost:11434/v1"\nmodel = "m"\n',
+        '[embedding]\nbase_url = "http://"\nmodel = "m"\n',
+    ],
+)
+def test_a_malformed_config_is_one_error_naming_the_path_and_sends_nothing(tmp_path, text):
+    path = _config(tmp_path, text)
+    with pytest.raises(EmbedderUnreachableError) as exc:
+        EmbedderProbe(opener=_never_called).check(path)
+    assert path in str(exc.value)
+
+
+def test_userinfo_never_appears_in_a_message(tmp_path):
+    def opener(request, timeout):
+        raise urllib.error.URLError(ConnectionRefusedError("refused"))
+
+    text = _TOML.replace("http://localhost", "http://user:pass@localhost")
+    with pytest.raises(EmbedderUnreachableError) as exc:
+        EmbedderProbe(opener=opener).check(_config(tmp_path, text))
+    assert "user:pass" not in str(exc.value) and "localhost:11434" in str(exc.value)
+
+
+def test_a_reply_that_is_not_http_counts_as_reachable(tmp_path):
+    def opener(request, timeout):
+        raise http.client.BadStatusLine("garbage")
+
+    EmbedderProbe(opener=opener).check(_config(tmp_path))
+
+
+def test_the_http_error_response_is_closed(tmp_path):
+    closed = []
+
+    class _Body:
+        def read(self):
+            return b""
+
+        def close(self):
+            closed.append(True)
+
+    def opener(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 500, "boom", {}, _Body())
+
+    EmbedderProbe(opener=opener).check(_config(tmp_path))
+    assert closed
