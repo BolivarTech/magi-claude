@@ -171,3 +171,15 @@ def test_an_unlisted_name_that_echoes_the_key_is_redacted_in_the_error():
     with pytest.raises(VaultCommandError) as exc:
         client.ls()
     assert key.reveal() not in str(exc.value) and REDACTION_MARKER in str(exc.value)
+
+
+def test_set_refuses_a_value_that_is_not_valid_utf8_before_launching_anything():
+    # [M3] strict encode at the one place that owns the stdin contract; never errors="replace" on a secret.
+    from magi_rs_vault import VaultValueEncodingError
+
+    seen = []
+    with pytest.raises(VaultValueEncodingError) as exc:
+        _client(seen).set("OPENAI_API_KEY", "sk-" + chr(0xD800) + "-tail")
+    assert isinstance(exc.value, VaultCommandError) and seen == []
+    message = str(exc.value)
+    assert "OPENAI_API_KEY" in message and "sk-" not in message and "tail" not in message
