@@ -780,7 +780,8 @@ def test_a_deny_entry_still_fails_verification_whatever_its_flags():
 
 
 def test_windows_harden_removes_the_deny_entries_it_finds():
-    # [S2] /remove:g alone leaves an explicit deny ACE behind; harden removes it with /remove:d.
+    # [S2] /remove:g alone leaves an explicit deny ACE behind; harden removes the SID entirely.
+    # [S2 correction] adapted: removing only a deny could widen access, so the SID goes with a plain /remove.
     seen = []
 
     def runner(argv):
@@ -792,8 +793,8 @@ def test_windows_harden_removes_the_deny_entries_it_finds():
     guard.resolve_alias = _ALIASES.__getitem__
     guard.harden("k", directory=False)
     icacls = next(argv for argv in seen if "icacls" in argv[0].lower())
-    assert "/remove:d" in icacls
-    assert f"*{EVERYONE}" in icacls[icacls.index("/remove:d") + 1 :]
+    assert "/remove:d" not in icacls
+    assert f"*{EVERYONE}" in icacls[icacls.index("/remove") + 1 :]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="real ACLs")
@@ -809,3 +810,55 @@ def test_windows_real_directory_with_a_deny_entry_hardens_and_verifies(tmp_path)
     guard = WindowsPermissionGuard()
     guard.harden(str(secret), directory=True)
     guard.verify(str(secret), directory=True)
+
+
+def test_windows_harden_removes_a_foreign_sid_with_an_allow_and_a_deny_entirely_in_one_call():
+    # [S2 correction] removing only the deny would leave the allow it blocked: harden must never widen access.
+    seen = []
+
+    def runner(argv):
+        seen.append(argv)
+        return _fixture("whoami-nh.txt") if argv[0].lower().endswith("whoami.exe") else ""
+
+    guard = WindowsPermissionGuard(runner=runner)
+    guard.read_sddl = lambda path: f"D:PAI(A;;FA;;;{ME})(D;;FW;;;{OTHER})(A;;FR;;;{OTHER})"
+    guard.resolve_alias = _ALIASES.__getitem__
+    guard.harden("k", directory=False)
+    icacls_calls = [argv for argv in seen if "icacls" in argv[0].lower()]
+    assert len(icacls_calls) == 1
+    (icacls,) = icacls_calls
+    assert "/remove:d" not in icacls and "/remove:g" not in icacls
+    assert f"*{OTHER}" in icacls[icacls.index("/remove") + 1 :]
+    assert "/inheritance:r" in icacls and any(part.startswith(f"*{ME}:") for part in icacls)
+
+
+def test_windows_harden_removes_a_foreign_allow_only_sid_too():
+    # [S2 correction] every foreign SID in the DACL goes, allow-only ones included.
+    seen = []
+
+    def runner(argv):
+        seen.append(argv)
+        return _fixture("whoami-nh.txt") if argv[0].lower().endswith("whoami.exe") else ""
+
+    guard = WindowsPermissionGuard(runner=runner)
+    guard.read_sddl = lambda path: f"D:PAI(A;;FA;;;{ME})(A;;FR;;;{OTHER})"
+    guard.harden("k", directory=False)
+    (icacls,) = [argv for argv in seen if "icacls" in argv[0].lower()]
+    assert f"*{OTHER}" in icacls[icacls.index("/remove") + 1 :]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real ACLs")
+def test_windows_real_file_with_an_allow_and_a_deny_for_users_hardens_to_owner_only(tmp_path):
+    # [S2 correction] grant Users:R and deny Users:W, harden, verify: the DACL is the owner's alone.
+    path = tmp_path / "k"
+    path.write_text("x")
+    users = "S-1-5-32-545"
+    subprocess.run(
+        ["icacls", str(path), "/grant", f"*{users}:(R)"], check=True, capture_output=True
+    )
+    subprocess.run(["icacls", str(path), "/deny", f"*{users}:(W)"], check=True, capture_output=True)
+    guard = WindowsPermissionGuard()
+    guard.harden(str(path), directory=False)
+    guard.verify(str(path), directory=False)
+    _, sids = parse_sddl_dacl(guard.read_sddl(str(path)))
+    assert sids and all(sid in (guard.current_sid(), "LA") for sid in sids)
