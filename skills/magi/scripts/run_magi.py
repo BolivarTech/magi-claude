@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 from collections import Counter, defaultdict
 import os
@@ -73,6 +74,10 @@ from magi_rs_trio import (  # noqa: E402
     MagiRsTrio,
 )
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
+from magi_key_permissions import default_key_store  # noqa: E402
+from magi_rs_bootstrap import BinaryBootstrap  # noqa: E402
+from magi_rs_preflight import ProjectPreflight  # noqa: E402
+from magi_rs_vault import VAULT_KEY_NAMES, VaultClient  # noqa: E402
 from ollama_init import run_ollama_init  # noqa: E402
 from run_lock import (  # noqa: E402
     refresh_lock,
@@ -2083,8 +2088,54 @@ def _write_report_file(report_text: str, out_path: str) -> None:
         raise
 
 
+_VAULT_SET_FLAG = "--ollama-vault-set"
+_ROTATE_KEY_FLAG = "--ollama-rotate-key"
+_VAULT_VALUE_PROMPT = "API key value (input hidden): "
+_LINE_ENDINGS = "\r\n"
+
+
 def vault_set_main(argv: list[str], stdin: IO[str], is_tty: bool) -> int:
-    raise NotImplementedError
+    """``--ollama-vault-set NAME``: store one API key in the magi-rs vault.
+
+    Order matters: the name is validated first, then the binary is verified and
+    the key preflighted, and only then is the value read -- so a secret is never
+    typed or piped into a session that was already refused. The value is never
+    placed in argv, printed or logged.
+
+    Args:
+        argv: The arguments after the flag: exactly one name from ``VAULT_KEY_NAMES``.
+        stdin: Where a non-interactive value is read from.
+        is_tty: True when stdin is a terminal; the value is then prompted hidden.
+
+    Returns:
+        0 on success; 1 for a fail-closed error or an unusable value; 2 for a
+        bad name.
+    """
+    if len(argv) != 1 or argv[0] not in VAULT_KEY_NAMES:
+        print(
+            f"ERROR: expected exactly one vault name: {', '.join(VAULT_KEY_NAMES)}", file=sys.stderr
+        )
+        return 2
+    name = argv[0]
+    workdir = os.getcwd()
+    try:
+        root = plugin_root()
+        executable = BinaryBootstrap(Pin.load(pin_path(root)), bin_dir(root)).ensure()
+        key = ProjectPreflight.require_ready(workdir, default_key_store())
+        value = getpass.getpass(_VAULT_VALUE_PROMPT) if is_tty else stdin.read()
+        value = value.rstrip(_LINE_ENDINGS)
+        if not value:
+            print(f"ERROR: the value for {name} is empty; nothing was stored.", file=sys.stderr)
+            return 1
+        VaultClient(executable, workdir, key).set(name, value)
+    except ValidationError as exc:
+        print(f"ERROR: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - every key/bootstrap error is fail-closed here
+        print(f"[FATAL] {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    print(f"{name} stored in the magi-rs vault.")
+    return 0
 
 
 def rotate_main(argv: list[str], is_tty: bool) -> int:
@@ -2115,6 +2166,16 @@ def main() -> None:
             sys.exit(1)
         print(output, end="" if output.endswith("\n") else "\n")
         sys.exit(0)
+
+    # Key subcommands short-circuit the same way: neither takes a mode or an input.
+    # The value of --ollama-vault-set never comes from argv, only its NAME does.
+    argv_tail = sys.argv[1:]
+    if _VAULT_SET_FLAG in argv_tail:
+        flag_index = argv_tail.index(_VAULT_SET_FLAG)
+        sys.exit(vault_set_main(argv_tail[flag_index + 1 :], sys.stdin, sys.stdin.isatty()))
+    if _ROTATE_KEY_FLAG in argv_tail:
+        flag_index = argv_tail.index(_ROTATE_KEY_FLAG)
+        sys.exit(rotate_main(argv_tail[flag_index + 1 :], sys.stdin.isatty()))
 
     args = parse_args()
 
