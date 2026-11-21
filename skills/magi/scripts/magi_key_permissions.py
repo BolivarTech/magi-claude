@@ -22,13 +22,17 @@ are never treated as safe.
 
 Declared limits: the permissions of ``.magi/`` itself are not verified, POSIX
 extended ACLs are not read, and on Windows the file owner (the ``O:`` field of
-the SDDL) is not checked, only the DACL.
+the SDDL) is not checked, only the DACL. Running the plugin as SYSTEM or as the
+built-in Administrator account fails closed with a false "exposed": Windows
+renders those SIDs as SDDL aliases (``SY``, ``LA``), which never equal the SID
+string ``whoami`` reports.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import ntpath
 import os
 import re
 import stat
@@ -147,7 +151,7 @@ def _system_tool(parts: tuple[str, ...]) -> str:
     Returns:
         ``%SystemRoot%\\<parts>``.
     """
-    return os.path.join(os.environ.get("SystemRoot", _DEFAULT_SYSTEM_ROOT), *parts)
+    return ntpath.join(os.environ.get("SystemRoot", _DEFAULT_SYSTEM_ROOT), *parts)
 
 
 def parse_sddl_dacl(sddl: str) -> tuple[bool, list[str]]:
@@ -174,6 +178,7 @@ def parse_sddl_dacl(sddl: str) -> tuple[bool, list[str]]:
         (True, ['S-1-5-18'])
     """
     descriptor = sddl.strip()
+    # Assumes the section order O:, G:, D:, then S: as Get-Acl emits it.
     match = _DACL_PATTERN.search(descriptor)
     if match is None:
         raise ValueError("the security descriptor has no DACL")
