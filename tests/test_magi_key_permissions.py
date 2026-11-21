@@ -329,3 +329,44 @@ def test_the_default_key_store_carries_the_platform_guard():
 def test_the_platform_factory_picks_the_matching_guard():
     expected = WindowsPermissionGuard if sys.platform == "win32" else PosixPermissionGuard
     assert isinstance(PermissionGuard.for_platform(), expected)
+
+
+def test_a_failing_permission_tool_keeps_the_headline_of_a_long_stderr(monkeypatch):
+    # PowerShell writes its headline first; a long trace must not push it out of the message.
+    headline = "Get-Acl : The term 'Get-Acl' is not recognized"
+    trace = " ".join(f"At line:{n} char:1" for n in range(200))
+
+    def _fake_run(argv, **kwargs):
+        raise subprocess.CalledProcessError(1, argv, output="", stderr=f"{headline}\r\n{trace}\r\n")
+
+    monkeypatch.setattr("magi_key_permissions.subprocess.run", _fake_run)
+    with pytest.raises(OSError) as raised:
+        WindowsPermissionGuard().read_sddl("k")
+    message = str(raised.value)
+    assert headline in message
+    assert "\n" not in message
+    assert len(message) < len(headline) + len(trace)
+
+
+def test_windows_verify_names_the_foreign_sids_and_the_protection(monkeypatch):
+    # Operator diagnostics: SIDs and DACL flags are not secrets; the current user's SID is not listed.
+    sddl = f"O:{ME}G:{ME}D:PAI(A;;FA;;;{ME})(A;OICI;FA;;;S-1-5-32-544)(A;;FA;;;BA)"
+    with pytest.raises(KeyExposedError) as raised:
+        _windows_guard(sddl).verify("k", directory=False)
+    message = str(raised.value)
+    assert "S-1-5-32-544" in message and "BA" in message
+    assert "DACL protected: yes" in message
+    assert ME not in message
+    assert "\n" not in message
+
+
+def test_windows_verify_that_cannot_read_names_the_cause_in_the_message():
+    guard = _windows_guard("")
+
+    def _fail(path):
+        raise OSError("powershell.exe failed with exit code 1: Get-Acl : access denied")
+
+    guard.read_sddl = _fail
+    with pytest.raises(KeyExposedError) as raised:
+        guard.verify("k", directory=False)
+    assert "Get-Acl : access denied" in str(raised.value)
