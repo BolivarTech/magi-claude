@@ -1290,6 +1290,23 @@ def _default_agents_dir() -> str:
     return os.path.join(os.path.dirname(script_dir), "agents")
 
 
+def _render_fatal(exc: BaseException) -> str:
+    """Render a fail-closed error as the ONE ``[FATAL]`` line every CLI site prints.
+
+    The notes a cleanup attached (``__notes__``, e.g. "delete it by hand") are
+    appended, and every run of whitespace -- newlines included -- collapses to
+    one space, so a multi-line message can never spill a second line.
+
+    Args:
+        exc: The error to render.
+
+    Returns:
+        ``"[FATAL] <message> <notes...>"`` on a single line, without a newline.
+    """
+    detail = " ".join([str(exc), *getattr(exc, "__notes__", [])])
+    return f"[FATAL] {' '.join(detail.split())}"
+
+
 def check_prompts(agents_dir: str) -> None:
     """Validate a directory of agent prompts and exit. The dry run of the startup guard.
 
@@ -1312,7 +1329,7 @@ def check_prompts(agents_dir: str) -> None:
     try:
         AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
     except PromptContractError as exc:
-        print(f"[FATAL] {exc}", file=sys.stderr)
+        print(_render_fatal(exc), file=sys.stderr)
         sys.exit(1)
     print(f"OK: the prompts in {agents_dir} honour the verdict-marker contract.")
     sys.exit(0)
@@ -2139,7 +2156,7 @@ def vault_set_main(argv: list[str], stdin: IO[str], is_tty: bool) -> int:
         print(f"ERROR: {' '.join(str(exc).split())}", file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 - every key/bootstrap error is fail-closed here
-        print(f"[FATAL] {' '.join(str(exc).split())}", file=sys.stderr)
+        print(_render_fatal(exc), file=sys.stderr)
         return 1
     print(f"{name} stored in the magi-rs vault.")
     return 0
@@ -2172,7 +2189,7 @@ def rotate_main(argv: list[str], is_tty: bool) -> int:
         root = plugin_root()
         executable = verified_executable(BinaryBootstrap(Pin.load(pin_path(root)), bin_dir(root)))
     except Exception as exc:  # noqa: BLE001 - as in vault_set_main: every bootstrap error is fail-closed
-        print(f"[FATAL] {' '.join(str(exc).split())}", file=sys.stderr)
+        print(_render_fatal(exc), file=sys.stderr)
         return 1
 
     def _vault_ls(workdir: str, key: MagiKey) -> list[str]:
@@ -2224,8 +2241,7 @@ def main() -> None:
             # The bootstrap's fail-closed errors are siblings of Exception on
             # purpose; at the CLI boundary each of them is a [FATAL] with its
             # own actionable message, never a traceback.
-            detail = " ".join([str(exc), *getattr(exc, "__notes__", [])])
-            print(f"[FATAL] {' '.join(detail.split())}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
         print(output, end="" if output.endswith("\n") else "\n")
         sys.exit(0)
@@ -2281,7 +2297,7 @@ def main() -> None:
             # the bootstrap's, ProjectNotInitialisedError): at the CLI boundary
             # each is a [FATAL] with its own message, never a traceback, exactly
             # like --ollama-init.
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
 
     try:
@@ -2347,7 +2363,7 @@ def main() -> None:
     try:
         AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
     except PromptContractError as exc:
-        print(f"[FATAL] {exc}", file=sys.stderr)
+        print(_render_fatal(exc), file=sys.stderr)
         sys.exit(1)
 
     if not args.ollama:
@@ -2408,7 +2424,7 @@ def main() -> None:
         except SegmentTooLargeError as exc:
             if is_temp_dir:
                 shutil.rmtree(output_dir, ignore_errors=True)
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
         if segment_plan.is_segmented:
             announce_segmentation(
@@ -2432,7 +2448,7 @@ def main() -> None:
                 # Only the bootstrap's fail-closed family reaches here: a segment's
                 # own failures are tabled inside run_segmented (§6.2.5).
                 if isinstance(exc, FAIL_CLOSED_ERRORS):
-                    print(f"[FATAL] {exc}", file=sys.stderr)
+                    print(_render_fatal(exc), file=sys.stderr)
                     sys.exit(1)
                 raise
             print(f"\nFull report saved to: {os.path.join(output_dir, 'magi-report.json')}")
@@ -2470,7 +2486,7 @@ def main() -> None:
         if isinstance(exc, FAIL_CLOSED_ERRORS):
             # The preflight run_trio repeats (R4) failed differently from the
             # one main() ran: same rendering as the first, never a traceback.
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
         if isinstance(exc, (MagiRsProcessError, MagiRsContractError)):
             # BDD-14a/14b/14d: the trio never formed (the child died, timed out,
