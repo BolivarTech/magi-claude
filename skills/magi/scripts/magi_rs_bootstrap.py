@@ -34,6 +34,7 @@ import urllib.request
 import zipfile
 from typing import IO
 
+from magi_rs_env import EnvironmentPolicy
 from magi_rs_paths import bin_dir, pin_path, plugin_root
 from magi_rs_pin import Pin
 
@@ -924,7 +925,7 @@ class BinaryBootstrap:
             OSError: The binary could not be launched.
 
         Side effects:
-            Executes ``path`` once, with a timeout.
+            Executes ``path`` once, with a timeout and the allowlisted environment.
         """
         try:
             # Decoded as UTF-8 with replacement on purpose: the probe must
@@ -937,6 +938,7 @@ class BinaryBootstrap:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=EnvironmentPolicy.build(os.environ),
                 timeout=_VERSION_PROBE_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:
