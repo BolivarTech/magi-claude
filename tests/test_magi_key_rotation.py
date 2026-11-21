@@ -1340,3 +1340,25 @@ def test_a_guard_reason_that_echoes_the_new_key_is_redacted_in_the_message(tmp_p
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     message = str(exc.value)
     assert NEW.reveal() not in message and "<redacted>" in message
+
+
+class _InterruptedOnBackupIdGuard(_NoopGuard):
+    """[V3] Raises KeyboardInterrupt while hardening the backup directory ``<backup>/<id>``."""
+
+    def harden(self, path, directory):
+        parts = os.path.normpath(path).split(os.sep)
+        if len(parts) >= 2 and parts[-2] == "rotated":
+            raise KeyboardInterrupt
+
+
+def test_an_interrupt_while_restricting_the_backup_dir_ends_as_the_one_line_failure(tmp_path):
+    # [V3] before the move an interrupt is handled like any failure: the empty dir goes, nothing moved.
+    work = _project(tmp_path)
+    rotation, _ = _rotation(tmp_path, guard=_InterruptedOnBackupIdGuard())
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert isinstance(exc.value.__cause__, KeyboardInterrupt)
+    assert "nothing was moved" in message and "\n" not in message.strip()
+    assert (work / ".magi" / "magi.toml").read_text() == "old"
+    assert os.listdir(tmp_path / "rotated") == []
