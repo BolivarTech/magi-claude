@@ -976,3 +976,11 @@ def test_verify_fails_closed_on_another_reparse_point_and_says_so(monkeypatch):
     assert "is a reparse point" in message and "cloud-sync placeholder" in message
     assert "is a link" not in message and "local, non-synced folder" in message
     assert "\n" not in message
+
+
+def test_windows_verify_of_an_inheriting_dacl_with_only_a_foreign_deny_is_exposed():
+    # [X1] inheritance is the exposure; a deny entry must not demote it to "unverifiable".
+    with pytest.raises(KeyExposedError) as raised:
+        _windows_guard(f"D:AI(D;;FA;;;{OTHER})(A;;FA;;;{ME})").verify("k", directory=False)
+    assert not isinstance(raised.value, KeyUnverifiableError)
+    assert "inherits" in str(raised.value)
