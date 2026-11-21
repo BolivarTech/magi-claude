@@ -716,6 +716,10 @@ class KeyRotation:
     def _own_key_leftover(magi_dir: str, error: BaseException) -> str:
         """Describe a new ``.magi/`` that holds this rotation's key after ``init`` failed, by the cause.
 
+        The error and its ``__cause__`` are both classified: ``run_ollama_init``
+        folds a cleanup sentence into an ``OllamaInitError`` chained from the
+        original failure.
+
         Args:
             magi_dir: ``<workdir>/.magi``.
             error: What stopped ``init``.
@@ -725,12 +729,13 @@ class KeyRotation:
             that could not be hardened (and may be readable by others), or any
             other failure after the key was written.
         """
-        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+        causes = (error, error.__cause__)
+        if any(isinstance(cause, (KeyboardInterrupt, SystemExit)) for cause in causes):
             return (
                 f" (the new {magi_dir} was kept: initialisation was interrupted after its key was written; "
                 "move it aside first)"
             )
-        if isinstance(error, KeyHardeningError):
+        if any(isinstance(cause, KeyHardeningError) for cause in causes):
             return (
                 f" (the new {magi_dir} was kept: its key could not be hardened and may be readable by others; "
                 "remove it first)"

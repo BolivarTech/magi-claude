@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 from magi_key import KEY_DIR_PARTS, KeyMissingError, KeyStore, KeyStoreError, MagiKey
 from magi_key_permissions import default_key_store
@@ -127,7 +128,9 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
             needs saying instead (the removal failed, so the message says to delete it by hand;
             or the ``.magi/`` now holds a key this call did not write, e.g. ``persist`` raised
             ``FileExistsError`` because another process initialised it, so it is never removed),
-            an ``OllamaInitError`` carrying that sentence is raised from the original.
+            an ``OllamaInitError`` carrying that sentence is raised from the original. An
+            interrupt (``KeyboardInterrupt``, ``SystemExit``) is re-raised as itself; its
+            sentence is written to stderr as one ``[!] WARNING:`` line first.
         OllamaInitError: ``magi-rs init`` exited non-zero; the message is its
             output with the new key redacted. No key is persisted and the
             ``.magi/`` this call saw appear is removed.
@@ -172,6 +175,10 @@ def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
         else:
             note = _remove_created_magi_dir(magi_dir)
         if not note:
+            raise
+        if not isinstance(error, Exception):
+            # An interrupt stays an interrupt; its cleanup sentence goes to stderr, one line.
+            print(f"[!] WARNING: {one_line(note)}", file=sys.stderr)
             raise
         detail = one_line(key.redact(str(error))) or type(error).__name__
         raise OllamaInitError(f"{detail}\n{note}") from error
