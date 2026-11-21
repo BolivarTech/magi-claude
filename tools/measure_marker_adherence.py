@@ -111,7 +111,17 @@ DEFAULT_TIMEOUT_SECONDS = 900
 #: both, so it is unchanged.
 PARENT_TIMEOUT_FACTOR = 6
 DEFAULT_REPORT_FILENAME = "marker-adherence-report.json"
-DEFAULT_MODE = "code-review"
+#: ``analysis`` because ``code-review --ollama`` no longer reaches ``consult`` in v8 and its
+#: envelope carries no per-attempt adherence tally (decision M8); both backends use the
+#: same lens.
+DEFAULT_MODE = "analysis"
+
+#: Artifact schema. v8 opens a new baseline: 7.x measured ``code-review`` bundles, so its
+#: series is not comparable and ``check_release_gate`` rejects it.
+MEASUREMENT_SCHEMA = "v8"
+
+#: Prefix of the per-measurement workspace directory created under the scratch root.
+WORKSPACE_PREFIX = "workspace-"
 
 #: The report a real ``run_magi.py`` invocation writes into its ``--output-dir``. It
 #: carries ``extraction_failures`` -- the run's OWN per-attempt tally (R18), which is the
@@ -414,6 +424,36 @@ def resolve_tool_timeout(explicit: int | None, *, ollama: bool) -> int:
     return DEFAULT_TIMEOUT_SECONDS
 
 
+def prepare_workspace(scratch: Path) -> Path:
+    """Create a fresh workspace with its own ``.magi/`` for ``--ollama`` runs (PM-C-5).
+
+    The project's real ``.magi/`` is never used: its accumulated state would change the
+    result between measurements.
+
+    Args:
+        scratch: Existing directory (the measurement's temporary root) to create it under.
+
+    Returns:
+        The new workspace directory, holding a key and ``.magi/`` made by
+        ``run_magi.py --ollama-init``.
+
+    Raises:
+        RuntimeError: If ``--ollama-init`` exits non-zero (the message names the code).
+    """
+    workspace = Path(tempfile.mkdtemp(prefix=WORKSPACE_PREFIX, dir=scratch))
+    result = subprocess.run(
+        [sys.executable, str(_RUN_MAGI_PATH), "--ollama-init"],
+        check=False,
+        cwd=workspace,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"--ollama-init failed with exit code {result.returncode} while preparing "
+            f"the measurement workspace {workspace}"
+        )
+    return workspace
+
+
 def run_real_magi(
     mode: str,
     bundle: Path,
@@ -421,6 +461,7 @@ def run_real_magi(
     ollama: bool,
     timeout: int,
     output_dir: Path,
+    cwd: Path = _REPO_ROOT,
 ) -> None:
     """Invoke the real ``run_magi.py`` CLI as a subprocess -- an actual MAGI run.
 
@@ -436,6 +477,8 @@ def run_real_magi(
         timeout: Per-agent timeout in seconds, forwarded as ``--timeout``.
         output_dir: Directory the run writes its per-agent artifacts into. Created if
             absent.
+        cwd: Working directory of the child. The bundle is passed as an absolute path,
+            so a relative one still resolves against the caller's directory.
 
     Note:
         The subprocess's own exit code is deliberately not checked: a degraded run (or
@@ -448,7 +491,7 @@ def run_real_magi(
         sys.executable,
         str(_RUN_MAGI_PATH),
         mode,
-        str(bundle),
+        str(bundle.absolute()),
         "--output-dir",
         str(output_dir),
         "--timeout",
@@ -466,9 +509,7 @@ def run_real_magi(
     # the child's own worst case is several times its per-mage timeout. Killing a healthy run
     # would be worse than waiting on a sick one; this is a deadlock guard, not a schedule.
     try:
-        subprocess.run(
-            command, check=False, cwd=_REPO_ROOT, timeout=timeout * PARENT_TIMEOUT_FACTOR
-        )
+        subprocess.run(command, check=False, cwd=cwd, timeout=timeout * PARENT_TIMEOUT_FACTOR)
     except subprocess.TimeoutExpired:
         print(
             f"WARNING: the run over {bundle} did not finish within "
@@ -528,6 +569,8 @@ def build_artifact(
     repo_root: Path,
     agents_dir: Path,
     runs: Mapping[str, int],
+    *,
+    mode: str = DEFAULT_MODE,
 ) -> dict[str, Any]:
     """Build the release-gate artifact from the accumulated module-level :data:`tally`.
 
@@ -537,9 +580,11 @@ def build_artifact(
             hash.
         runs: Number of real runs performed per backend, e.g.
             ``{"ollama": 5, "claude": 2}``.
+        mode: The analysis mode the runs used, recorded as ``mode``.
 
     Returns:
-        A JSON-serialisable dict matching the artifact schema: ``git_sha``,
+        A JSON-serialisable dict matching the artifact schema: ``schema``, ``mode``,
+        ``git_sha``,
         ``prompts_sha256``, ``measured_at``, ``runs``, ``per_seat`` (per agent: ``ok``
         plus each cause in :data:`CAUSES`), and ``verdict`` -- ``"green"`` only
         if every seat has zero extraction failures, ``"red"`` otherwise.
@@ -573,6 +618,8 @@ def build_artifact(
         verdict = "red"
 
     return {
+        "schema": MEASUREMENT_SCHEMA,
+        "mode": mode,
         "git_sha": _git_head_sha(repo_root),
         "prompts_sha256": _prompts_sha256(agents_dir),
         "measured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -614,6 +661,13 @@ def check_release_gate(
         report: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         return False, f"marker-adherence report at {report_path} is not valid JSON: {exc}"
+
+    if report.get("schema") != MEASUREMENT_SCHEMA:
+        return False, (
+            f"marker-adherence report at {report_path} has schema {report.get('schema')!r}, "
+            f"not {MEASUREMENT_SCHEMA!r} (the 7.x series measured a different path and does "
+            "not certify this release) -- re-run the measurement"
+        )
 
     current_sha = _git_head_sha(repo_root)
     if report.get("git_sha") != current_sha:
@@ -749,6 +803,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="magi-marker-adherence-run-") as scratch_root:
             scratch = Path(scratch_root)
+            # One fresh workspace per measurement, inside the temporary root (removed on
+            # exit even when a run fails); the project's real ``.magi/`` is never touched.
+            workspace = prepare_workspace(scratch) if args.ollama_bundle else _REPO_ROOT
             for index, bundle in enumerate(args.ollama_bundle):
                 run_dir = scratch / f"ollama-{index}"
                 run_real_magi(
@@ -757,6 +814,7 @@ def main(argv: list[str] | None = None) -> int:
                     ollama=True,
                     timeout=resolve_tool_timeout(args.timeout, ollama=True),
                     output_dir=run_dir,
+                    cwd=workspace,
                 )
                 measure_output_dir(run_dir)
             for index, bundle in enumerate(args.claude_bundle):
@@ -774,6 +832,7 @@ def main(argv: list[str] | None = None) -> int:
                 _REPO_ROOT,
                 _AGENTS_DIR,
                 {"ollama": len(args.ollama_bundle), "claude": len(args.claude_bundle)},
+                mode=args.mode,
             )
     finally:
         uninstall_spy()
