@@ -32,8 +32,10 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from typing import IO
 
+from magi_rs_paths import bin_dir, pin_path, plugin_root
 from magi_rs_pin import Pin
 
 _CHUNK_BYTES = 64 * 1024
@@ -693,6 +695,46 @@ def verified_executable(bootstrap: BinaryBootstrap) -> str:
     """
     bootstrap.ensure()
     return bootstrap.verify()
+
+
+def plugin_binary_location() -> tuple[Pin, str]:
+    """Return the pin and the ``bin/`` directory of the running plugin.
+
+    Returns:
+        ``(Pin.load(<root>/skills/magi/magi-rs.pin.json), <root>/bin)`` for the
+        plugin root :func:`magi_rs_paths.plugin_root` resolves.
+
+    Raises:
+        PluginRootError: ``CLAUDE_PLUGIN_ROOT`` is set but is not a directory.
+        PinFormatError: The shipped pin does not parse.
+    """
+    root = plugin_root()
+    return Pin.load(pin_path(root)), bin_dir(root)
+
+
+def verified_plugin_executable(bootstrap: Callable[[Pin, str], BinaryBootstrap]) -> str:
+    """Return the verified ``magi-rs`` executable of the running plugin.
+
+    The one composition every launcher uses: plugin root, pin, ``bin/``, then
+    :func:`verified_executable`.
+
+    Args:
+        bootstrap: Builds the bootstrap from the pin and ``bin/``; callers pass
+            :class:`BinaryBootstrap` (the name they import, so a test double of
+            it applies).
+
+    Returns:
+        The path of the verified executable.
+
+    Raises:
+        Anything :func:`plugin_binary_location` or :func:`verified_executable`
+        raises. The binary is not executed before its digest matched.
+
+    Example:
+        >>> path = verified_plugin_executable(BinaryBootstrap)  # doctest: +SKIP
+    """
+    pin, directory = plugin_binary_location()
+    return verified_executable(bootstrap(pin, directory))
 
 
 class BinaryBootstrap:

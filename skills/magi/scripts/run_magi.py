@@ -63,8 +63,6 @@ from bundle_segmenter import (  # noqa: E402
     SegmentTooLargeError,
     mentions,
 )
-from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
-from magi_rs_pin import Pin  # noqa: E402
 from magi_rs_result import ConsultResult, describe_reasoning  # noqa: E402
 from magi_rs_trio import (  # noqa: E402
     DEFAULT_OLLAMA_TIMEOUT_SECONDS,
@@ -75,7 +73,11 @@ from magi_rs_trio import (  # noqa: E402
 )
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
 from magi_key_permissions import default_key_store  # noqa: E402
-from magi_rs_bootstrap import BinaryBootstrap, verified_executable  # noqa: E402
+from magi_rs_bootstrap import (  # noqa: E402
+    BinaryBootstrap,
+    plugin_binary_location,
+    verified_plugin_executable,
+)
 from magi_rs_preflight import ProjectPreflight  # noqa: E402
 from magi_key import MagiKey  # noqa: E402
 from magi_key_rotation import (  # noqa: E402
@@ -808,13 +810,13 @@ def _select_executor(args: argparse.Namespace, timeout: int) -> MagiRsTrio | Non
     """
     if not args.ollama:
         return None
-    root = plugin_root()
+    pin, directory = plugin_binary_location()
     return MagiRsTrio(
         workdir=os.getcwd(),
         mode=args.mode,
         timeout=timeout,
-        bin_dir=bin_dir(root),
-        pin=Pin.load(pin_path(root)),
+        bin_dir=directory,
+        pin=pin,
     )
 
 
@@ -2194,8 +2196,7 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
     """
     workdir = os.getcwd()
     try:
-        root = plugin_root()
-        executable = verified_executable(BinaryBootstrap(Pin.load(pin_path(root)), bin_dir(root)))
+        executable = verified_plugin_executable(BinaryBootstrap)
         key = ProjectPreflight.require_ready(workdir, default_key_store())
         value = getpass.getpass(_VAULT_VALUE_PROMPT) if is_tty else stdin.read()
         value = value.rstrip(_LINE_ENDINGS)
@@ -2233,8 +2234,7 @@ def rotate_main(assume_yes: bool, is_tty: bool) -> int:
         authorised or it stopped (one line on stderr, never a traceback).
     """
     try:
-        root = plugin_root()
-        executable = verified_executable(BinaryBootstrap(Pin.load(pin_path(root)), bin_dir(root)))
+        executable = verified_plugin_executable(BinaryBootstrap)
     except Exception as exc:  # noqa: BLE001 - as in vault_set_main: every bootstrap error is fail-closed
         print(_render_fatal(exc), file=sys.stderr)
         return 1
