@@ -153,6 +153,26 @@ def _holds_other_key(store: KeyStore, workdir: str, key: MagiKey) -> bool:
         return True
 
 
+def _holds_this_key(store: KeyStore, workdir: str, key: MagiKey) -> bool:
+    """Tell whether the key file under ``workdir`` reads back as ``key``.
+
+    An absent, empty or unreadable key file holds no key of this call (the
+    ``.magi/`` it is in is half made).
+
+    Args:
+        store: The key store of this call.
+        workdir: The project root.
+        key: The key this call generated.
+
+    Returns:
+        True only when the key file holds ``key``.
+    """
+    try:
+        return store.read_unverified(store.key_path(workdir)) == key
+    except (KeyStoreError, OSError):
+        return False
+
+
 def run_ollama_init(workdir: str, key_store: KeyStore | None = None) -> str:
     """Initialise ``workdir`` for the magi-rs backend with a freshly generated key.
 
@@ -253,7 +273,7 @@ def _clean_up(
     note = _remove_created_magi_dir(magi_dir)
     if not note:
         return InitLeftover.REMOVED, ""
-    if not os.path.lexists(store.key_path(workdir)):
+    if not _holds_this_key(store, workdir, key):
         return InitLeftover.HALF_MADE_KEPT, note
     if isinstance(error, KeyHardeningError):
         return InitLeftover.HARDENING_FAILED_KEPT, note
