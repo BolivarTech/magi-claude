@@ -459,13 +459,13 @@ class KeyRotation:
         problem = magi_dir_problem(workdir)
         if problem is not None:
             raise RotationFailedError(problem)
-        self._authorise(workdir, assume_yes, is_tty, confirm)
-        magi_dir = os.path.join(workdir, MAGI_DIR)
         if _is_within(self._backup_root, workdir):
             raise RotationFailedError(
                 f"the rotation backup root {self._backup_root} is inside the working tree {workdir}: "
                 "nothing was moved; point the state directory outside the project"
             )
+        self._authorise(workdir, assume_yes, is_tty, confirm)
+        magi_dir = os.path.join(workdir, MAGI_DIR)
         self._redactors = []
         self._refuse_links_in_source(magi_dir)
         old_key = self._read_old_key(workdir)
