@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 
 from cli_commands import INIT_FLAG, command
+from link_guard import link_refusal
+from one_line import one_line
 from magi_key import KEY_DIR_PARTS, REGENERATION_GUIDANCE, KeyStore, MagiKey
 
 _CONFIG_RELATIVE_PATH = os.path.join(KEY_DIR_PARTS[0], "magi.toml")
@@ -45,7 +47,8 @@ class ProjectPreflight:
             Absolute path of ``.magi/magi.toml``.
 
         Raises:
-            ProjectNotInitialisedError: The file is absent. Without a ``.magi/``
+            ProjectNotInitialisedError: ``.magi`` is a link or reparse point (never followed,
+                like the key, init and rotation entry points), or the file is absent. Without a ``.magi/``
                 the message names the command that creates it; with a
                 ``.magi/`` that lacks its config (which ``--ollama-init``
                 refuses to touch) it gives the whole regeneration procedure.
@@ -54,6 +57,15 @@ class ProjectPreflight:
             Reads the filesystem. Writes NOTHING -- a gate run never
             initialises a project on the fly.
         """
+        magi_dir = os.path.join(workdir, KEY_DIR_PARTS[0])
+        try:
+            refusal = link_refusal(magi_dir) if os.path.lexists(magi_dir) else None
+        except OSError as error:
+            raise ProjectNotInitialisedError(
+                f"cannot inspect {magi_dir}: {one_line(str(error))}"
+            ) from error
+        if refusal is not None:
+            raise ProjectNotInitialisedError(refusal)
         config = os.path.join(workdir, _CONFIG_RELATIVE_PATH)
         if os.path.isfile(config):
             return config
