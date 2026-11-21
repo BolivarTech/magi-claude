@@ -1689,7 +1689,11 @@ def test_a_file_exists_error_names_a_created_parent_that_holds_the_other_leaf(
     rotation, _ = _rotation(tmp_path)
     with pytest.raises(RotationFailedError) as exc:
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
-    assert str(tmp_path / "rotated") in str(exc.value) and "delete them" in str(exc.value)
+    assert (
+        str(tmp_path / "rotated") in str(exc.value)
+        and "left in place" in str(exc.value)
+        and "delete" not in str(exc.value)
+    )
     assert len(os.listdir(tmp_path / "rotated")) == 1  # the other process's leaf survives
 
 
