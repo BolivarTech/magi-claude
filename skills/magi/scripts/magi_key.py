@@ -104,12 +104,11 @@ class KeyGuard(Protocol):
             KeyHardeningError: The restriction could not be applied.
         """
 
-    def verify(self, path: str, directory: bool) -> None:
+    def verify(self, path: str) -> None:
         """Check that ``path`` is restricted to its owner.
 
         Args:
             path: The file or directory to check.
-            directory: True when ``path`` is a directory.
 
         Raises:
             KeyUnverifiableError: The permissions of ``path`` could not be read.
@@ -316,8 +315,8 @@ class KeyStore:
                 handle.write(key.reveal().encode(KEY_ENCODING))
             self.guard.harden(secret_dir, True)
             self.guard.harden(key_file, False)
-            self.guard.verify(secret_dir, True)
-            self.guard.verify(key_file, False)
+            self.guard.verify(secret_dir)
+            self.guard.verify(key_file)
         except KeyStoreError as error:
             cleanup_note = self._discard(key_file)
             raise KeyHardeningError(
@@ -369,8 +368,8 @@ class KeyStore:
         if not os.path.exists(key_file):
             raise KeyMissingError(f"no magi-rs memory key at {key_file}: {REGENERATION_GUIDANCE}")
         try:
-            self.guard.verify(os.path.dirname(key_file), True)
-            self.guard.verify(key_file, False)
+            self.guard.verify(os.path.dirname(key_file))
+            self.guard.verify(key_file)
         except KeyUnverifiableError as error:
             raise KeyUnverifiableError(
                 f"the permissions of {key_file} could not be verified ({one_line(str(error))}); "

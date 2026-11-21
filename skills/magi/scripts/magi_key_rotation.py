@@ -652,7 +652,7 @@ class KeyRotation:
         try:
             for directory in (*created_parents, backup_dir):
                 guard.harden(directory, True)
-                guard.verify(directory, True)
+                guard.verify(directory)
         except BaseException as error:  # noqa: BLE001 - before the move, even an interrupt must end described
             leftover = self._remove_created([*created_parents, backup_dir])
             raise RotationFailedError(
@@ -774,7 +774,7 @@ class KeyRotation:
             guard.harden(backup_dir, True)
             for path, directory in entries:
                 guard.harden(path, directory)
-                guard.verify(path, directory)
+                guard.verify(path)
         except BaseException as error:  # noqa: BLE001 - after the move, even an interrupt must name the backup
             raise RotationFailedError(
                 f"the old {MAGI_DIR}/ was moved to {os.path.join(backup_dir, MAGI_DIR)} but could not be "

@@ -5635,8 +5635,8 @@ class _GuardRaising:
     def harden(self, path, directory):
         pass
 
-    def verify(self, path, directory):
-        if not directory:
+    def verify(self, path):
+        if path.endswith("magi.key"):
             raise self.error
 
 
@@ -5759,7 +5759,7 @@ def test_rotate_main_turns_an_interrupted_init_into_one_line_and_exit_1(
         def harden(self, path, directory):
             pass
 
-        def verify(self, path, directory):
+        def verify(self, path):
             pass
 
     work = tmp_path / "repo"

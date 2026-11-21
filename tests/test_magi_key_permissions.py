@@ -98,17 +98,17 @@ def _windows_guard(sddl, aliases=None):
 
 
 def test_windows_verify_accepts_only_the_current_user_with_inheritance_cut():
-    _windows_guard(f"D:PAI(A;;FA;;;{ME})").verify("k", directory=False)
+    _windows_guard(f"D:PAI(A;;FA;;;{ME})").verify("k")
 
 
 def test_windows_verify_rejects_an_inherited_authenticated_users_ace():
     with pytest.raises(KeyExposedError):
-        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;0x1200a9;;;{OTHER})").verify("k", directory=False)
+        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;0x1200a9;;;{OTHER})").verify("k")
 
 
 def test_windows_verify_rejects_a_dacl_that_still_inherits():
     with pytest.raises(KeyExposedError):
-        _windows_guard(f"D:AI(A;;FA;;;{ME})").verify("k", directory=False)
+        _windows_guard(f"D:AI(A;;FA;;;{ME})").verify("k")
 
 
 def test_windows_current_sid_parses_the_captured_whoami_output():
@@ -119,29 +119,29 @@ def test_windows_current_sid_parses_the_captured_whoami_output():
 @pytest.mark.parametrize("name", ["sddl-file-hardened.txt", "sddl-dir-hardened.txt"])
 def test_windows_verify_accepts_the_captured_hardened_sddl(name):
     # [CP2-M45] the real shapes icacls leaves behind for the key file and for .secret/.
-    _windows_guard(_fixture(name).strip()).verify("k", directory=name.startswith("sddl-dir"))
+    _windows_guard(_fixture(name).strip()).verify("k")
 
 
 def test_windows_verify_rejects_the_captured_inherited_sddl():
     # [CP2-M45] SYSTEM and Administrators inherited from the volume: exposed (PM-S-1).
     with pytest.raises(KeyExposedError):
-        _windows_guard(_fixture("sddl-inherited.txt").strip()).verify("k", directory=False)
+        _windows_guard(_fixture("sddl-inherited.txt").strip()).verify("k")
 
 
 def test_windows_verify_treats_an_empty_sddl_as_exposed():
     # [CP2-M45] M9: Get-Acl on a missing path exits 0 with no output.
     with pytest.raises(KeyExposedError):
-        _windows_guard("").verify("k", directory=False)
+        _windows_guard("").verify("k")
 
 
 def test_windows_verify_rejects_an_alias_ace():
     with pytest.raises(KeyExposedError):
-        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;FR;;;WD)").verify("k", directory=False)
+        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;FR;;;WD)").verify("k")
 
 
 def test_windows_verify_treats_an_unparseable_dacl_as_exposed():
     with pytest.raises(KeyExposedError):
-        _windows_guard("D:PAI(garbage").verify("k", directory=False)
+        _windows_guard("D:PAI(garbage").verify("k")
 
 
 def test_windows_verify_that_cannot_read_the_acl_or_the_sid_is_exposed():
@@ -153,13 +153,13 @@ def test_windows_verify_that_cannot_read_the_acl_or_the_sid_is_exposed():
 
     guard.read_sddl = _fail
     with pytest.raises(KeyExposedError):
-        guard.verify("k", directory=False)
+        guard.verify("k")
 
     def runner(argv):
         raise OSError("whoami missing")
 
     with pytest.raises(KeyExposedError):
-        WindowsPermissionGuard(runner=runner).verify("k", directory=False)
+        WindowsPermissionGuard(runner=runner).verify("k")
 
 
 def test_windows_harden_uses_the_sid_never_a_localised_name():
@@ -209,7 +209,7 @@ def test_posix_harden_then_verify_round_trips(tmp_path):
     guard = PosixPermissionGuard()
     guard.harden(str(path), directory=False)
     assert (os.stat(path).st_mode & 0o777) == FILE_MODE
-    guard.verify(str(path), directory=False)
+    guard.verify(str(path))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
@@ -218,7 +218,7 @@ def test_posix_verify_rejects_a_group_readable_key(tmp_path):
     path.write_text("x")
     os.chmod(path, 0o640)
     with pytest.raises(KeyExposedError):
-        PosixPermissionGuard().verify(str(path), directory=False)
+        PosixPermissionGuard().verify(str(path))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
@@ -232,7 +232,7 @@ def test_posix_verify_rejects_other_bits_alone(tmp_path, mode, directory):
         path.write_text("x")
     os.chmod(path, mode)
     with pytest.raises(KeyExposedError):
-        PosixPermissionGuard().verify(str(path), directory=directory)
+        PosixPermissionGuard().verify(str(path))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
@@ -241,14 +241,14 @@ def test_posix_verify_accepts_a_stricter_mode(tmp_path):
     path = tmp_path / "k"
     path.write_text("x")
     os.chmod(path, 0o400)
-    PosixPermissionGuard().verify(str(path), directory=False)
+    PosixPermissionGuard().verify(str(path))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
 def test_posix_verify_rejects_a_world_listable_secret_dir(tmp_path):
     os.chmod(tmp_path, 0o755)
     with pytest.raises(KeyExposedError):
-        PosixPermissionGuard().verify(str(tmp_path), directory=True)
+        PosixPermissionGuard().verify(str(tmp_path))
     assert DIR_MODE == 0o700
 
 
@@ -260,7 +260,7 @@ def test_posix_verify_that_cannot_stat_is_exposed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "stat", _boom)
     with pytest.raises(KeyExposedError):
-        PosixPermissionGuard().verify(str(tmp_path / "k"), directory=False)
+        PosixPermissionGuard().verify(str(tmp_path / "k"))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner")
@@ -271,7 +271,7 @@ def test_posix_verify_rejects_a_key_owned_by_another_user(tmp_path, monkeypatch)
     os.chmod(path, FILE_MODE)
     monkeypatch.setattr(os, "geteuid", lambda: os.stat(path).st_uid + 1)
     with pytest.raises(KeyExposedError):
-        PosixPermissionGuard().verify(str(path), directory=False)
+        PosixPermissionGuard().verify(str(path))
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="real ACLs")
@@ -281,7 +281,7 @@ def test_windows_real_secret_directory_hardens_and_verifies(tmp_path):
     secret.mkdir()
     guard = WindowsPermissionGuard()
     guard.harden(str(secret), directory=True)
-    guard.verify(str(secret), directory=True)
+    guard.verify(str(secret))
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="real ACLs")
@@ -292,12 +292,12 @@ def test_windows_real_file_hardened_then_loosened_is_detected(tmp_path):
     path.write_text("x")
     guard = WindowsPermissionGuard()
     guard.harden(str(path), directory=False)
-    guard.verify(str(path), directory=False)
+    guard.verify(str(path))
     subprocess.run(
         ["icacls", str(path), "/grant", "*S-1-5-32-545:R"], check=True, capture_output=True
     )
     with pytest.raises(KeyExposedError):
-        guard.verify(str(path), directory=False)
+        guard.verify(str(path))
 
 
 def test_the_default_key_store_refuses_a_loosened_key_on_the_real_filesystem(tmp_path):
@@ -357,7 +357,7 @@ def test_windows_verify_names_the_foreign_sids_and_the_protection(monkeypatch):
     # Operator diagnostics: SIDs and DACL flags are not secrets; the current user's SID is not listed.
     sddl = f"O:{ME}G:{ME}D:PAI(A;;FA;;;{ME})(A;OICI;FA;;;S-1-5-32-544)(A;;FA;;;BA)"
     with pytest.raises(KeyExposedError) as raised:
-        _windows_guard(sddl).verify("k", directory=False)
+        _windows_guard(sddl).verify("k")
     message = str(raised.value)
     assert "S-1-5-32-544" in message and "BA" in message
     assert "DACL protected: yes" in message
@@ -373,20 +373,18 @@ def test_windows_verify_that_cannot_read_names_the_cause_in_the_message():
 
     guard.read_sddl = _fail
     with pytest.raises(KeyExposedError) as raised:
-        guard.verify("k", directory=False)
+        guard.verify("k")
     assert "Get-Acl : access denied" in str(raised.value)
 
 
 def test_windows_verify_accepts_the_current_user_rendered_as_an_alias():
     # M10: on windows-latest runneradmin is the built-in Administrator and its own SID reads back as LA.
-    _windows_guard("D:PAI(A;;FA;;;LA)", aliases={"LA": ME}).verify("k", directory=False)
+    _windows_guard("D:PAI(A;;FA;;;LA)", aliases={"LA": ME}).verify("k")
 
 
 def test_windows_verify_names_an_alias_that_resolves_to_someone_else():
     with pytest.raises(KeyExposedError) as raised:
-        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;FA;;;LA)", aliases={"LA": OTHER}).verify(
-            "k", directory=False
-        )
+        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;FA;;;LA)", aliases={"LA": OTHER}).verify("k")
     assert "LA" in str(raised.value)
 
 
@@ -398,7 +396,7 @@ def test_windows_verify_that_cannot_resolve_an_alias_is_exposed():
 
     guard.resolve_alias = _fail
     with pytest.raises(KeyExposedError):
-        guard.verify("k", directory=False)
+        guard.verify("k")
 
 
 def test_windows_verify_of_numeric_sids_never_resolves_an_alias():
@@ -408,7 +406,7 @@ def test_windows_verify_of_numeric_sids_never_resolves_an_alias():
         raise AssertionError(alias)
 
     guard.resolve_alias = _never
-    guard.verify("k", directory=False)
+    guard.verify("k")
 
 
 def test_windows_verify_that_cannot_read_the_acl_is_unverifiable_not_exposed():
@@ -420,39 +418,39 @@ def test_windows_verify_that_cannot_read_the_acl_is_unverifiable_not_exposed():
 
     guard.read_sddl = _fail
     with pytest.raises(KeyUnverifiableError):
-        guard.verify("k", directory=False)
+        guard.verify("k")
 
 
 def test_windows_verify_that_cannot_resolve_an_alias_is_unverifiable():
     guard = _windows_guard("D:PAI(A;;FA;;;LA)")
     guard.resolve_alias = _raise_os_error
     with pytest.raises(KeyUnverifiableError):
-        guard.verify("k", directory=False)
+        guard.verify("k")
 
 
 def test_windows_verify_with_a_foreign_ace_is_exposed_not_unverifiable():
     with pytest.raises(KeyExposedError) as raised:
-        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;0x1200a9;;;{OTHER})").verify("k", directory=False)
+        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;0x1200a9;;;{OTHER})").verify("k")
     assert not isinstance(raised.value, KeyUnverifiableError)
 
 
 def test_windows_verify_of_an_inheriting_dacl_is_exposed_not_unverifiable():
     with pytest.raises(KeyExposedError) as raised:
-        _windows_guard(f"D:AI(A;;FA;;;{ME})").verify("k", directory=False)
+        _windows_guard(f"D:AI(A;;FA;;;{ME})").verify("k")
     assert not isinstance(raised.value, KeyUnverifiableError)
 
 
 def test_posix_verify_on_windows_is_unverifiable(monkeypatch):
     monkeypatch.setattr("magi_key_permissions.sys.platform", "win32")
     with pytest.raises(KeyUnverifiableError):
-        PosixPermissionGuard().verify("k", directory=False)
+        PosixPermissionGuard().verify("k")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX stat")
 def test_posix_verify_that_cannot_stat_is_unverifiable(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "stat", _raise_os_error)
     with pytest.raises(KeyUnverifiableError):
-        PosixPermissionGuard().verify(str(tmp_path / "k"), directory=False)
+        PosixPermissionGuard().verify(str(tmp_path / "k"))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
@@ -461,7 +459,7 @@ def test_posix_verify_of_a_group_readable_key_is_exposed_not_unverifiable(tmp_pa
     path.write_text("x")
     os.chmod(path, 0o640)
     with pytest.raises(KeyExposedError) as raised:
-        PosixPermissionGuard().verify(str(path), directory=False)
+        PosixPermissionGuard().verify(str(path))
     assert not isinstance(raised.value, KeyUnverifiableError)
 
 
@@ -529,8 +527,8 @@ def test_a_guard_asks_whoami_once_however_many_paths_it_checks():
     guard = WindowsPermissionGuard(runner=runner)
     guard.read_sddl = lambda path: f"D:PAI(A;;FA;;;{ME})"
     guard.harden("k", directory=False)
-    guard.verify("k", directory=False)
-    guard.verify("d", directory=True)
+    guard.verify("k")
+    guard.verify("d")
     assert sum(1 for tool in calls if tool.lower().endswith("whoami.exe")) == 1
 
 
@@ -592,7 +590,7 @@ def test_reading_the_acl_of_a_missing_path_names_the_win32_error(tmp_path, monke
 @pytest.mark.skipif(sys.platform != "win32", reason="real ACLs")
 def test_verifying_a_path_whose_acl_cannot_be_read_is_unverifiable(tmp_path):
     with pytest.raises(KeyUnverifiableError) as raised:
-        WindowsPermissionGuard().verify(str(tmp_path / "absent"), directory=False)
+        WindowsPermissionGuard().verify(str(tmp_path / "absent"))
     assert "Win32 error" in str(raised.value)
 
 
@@ -690,7 +688,7 @@ def test_a_dacl_whose_alias_resolves_to_a_non_sid_is_unverifiable():
     del guard.resolve_alias  # back to the real method, over the native double
     guard._native = _NativeAnswering("not a sid")
     with pytest.raises(KeyUnverifiableError):
-        guard.verify("k", directory=False)
+        guard.verify("k")
 
 
 _REAL_STAT = os.stat
@@ -739,7 +737,7 @@ def test_group_or_other_bits_on_a_posix_key_stay_exposed(tmp_path, monkeypatch):
     monkeypatch.setattr("magi_key_permissions.os.stat", _stat)
     monkeypatch.setattr("magi_key_permissions.os.geteuid", lambda: 1000, raising=False)
     with pytest.raises(KeyExposedError) as raised:
-        PosixPermissionGuard().verify(str(path), directory=False)
+        PosixPermissionGuard().verify(str(path))
     assert not isinstance(raised.value, KeyUnverifiableError)
 
 
@@ -760,7 +758,7 @@ def test_a_foreign_deny_entry_alone_is_unverifiable_and_never_called_compromised
 
 def test_a_foreign_allow_entry_is_exposed_and_named_an_access_entry():
     with pytest.raises(KeyExposedError) as raised:
-        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;FR;;;{OTHER})").verify("k", directory=False)
+        _windows_guard(f"D:PAI(A;;FA;;;{ME})(A;;FR;;;{OTHER})").verify("k")
     assert not isinstance(raised.value, KeyUnverifiableError)
     assert f"has an access entry for {OTHER}" in str(raised.value)
 
@@ -769,14 +767,14 @@ def test_a_foreign_sid_with_both_a_deny_and_an_allow_entry_is_exposed():
     # [S2] the ACE type only classifies the message: any non-deny entry of a foreign SID is an exposure.
     sddl = f"D:PAI(A;;FA;;;{ME})(D;;FW;;;{OTHER})(A;;FR;;;{OTHER})"
     with pytest.raises(KeyExposedError) as raised:
-        _windows_guard(sddl).verify("k", directory=False)
+        _windows_guard(sddl).verify("k")
     assert not isinstance(raised.value, KeyUnverifiableError)
 
 
 def test_a_deny_only_sid_beside_another_sid_with_access_is_exposed():
     sddl = f"D:PAI(A;;FA;;;{ME})(D;;FR;;;{EVERYONE})(A;;FR;;;{OTHER})"
     with pytest.raises(KeyExposedError) as raised:
-        _windows_guard(sddl).verify("k", directory=False)
+        _windows_guard(sddl).verify("k")
     assert not isinstance(raised.value, KeyUnverifiableError) and OTHER in str(raised.value)
 
 
@@ -787,7 +785,7 @@ def test_a_deny_entry_still_fails_verification_whatever_its_flags():
         f"D:PAI(A;;FA;;;{ME})(D;OICI;FR;;;WD)",
     ):
         with pytest.raises(KeyExposedError):
-            _windows_guard(sddl).verify("k", directory=False)
+            _windows_guard(sddl).verify("k")
 
 
 def test_windows_harden_removes_the_deny_entries_it_finds():
@@ -820,7 +818,7 @@ def test_windows_real_directory_with_a_deny_entry_hardens_and_verifies(tmp_path)
     )
     guard = WindowsPermissionGuard()
     guard.harden(str(secret), directory=True)
-    guard.verify(str(secret), directory=True)
+    guard.verify(str(secret))
 
 
 def test_windows_harden_removes_a_foreign_sid_with_an_allow_and_a_deny_entirely_in_one_call():
@@ -870,7 +868,7 @@ def test_windows_real_file_with_an_allow_and_a_deny_for_users_hardens_to_owner_o
     subprocess.run(["icacls", str(path), "/deny", f"*{users}:(W)"], check=True, capture_output=True)
     guard = WindowsPermissionGuard()
     guard.harden(str(path), directory=False)
-    guard.verify(str(path), directory=False)
+    guard.verify(str(path))
     _, sids = _protection_and_sids(guard.read_sddl(str(path)))
     assert sids and all(sid in (guard.current_sid(), "LA") for sid in sids)
 
@@ -879,14 +877,14 @@ def test_a_foreign_object_deny_entry_alone_is_unverifiable():
     # [n-1] an object deny ACE (OD) takes access away like a plain deny.
     sddl = f"D:PAI(A;;FA;;;{ME})(OD;;FR;;;{EVERYONE})"
     with pytest.raises(KeyUnverifiableError) as raised:
-        _windows_guard(sddl).verify("k", directory=False)
+        _windows_guard(sddl).verify("k")
     assert "deny entry" in str(raised.value)
 
 
 def test_a_foreign_object_deny_beside_an_allow_for_the_same_sid_is_exposed():
     sddl = f"D:PAI(A;;FA;;;{ME})(OD;;FR;;;{OTHER})(A;;FR;;;{OTHER})"
     with pytest.raises(KeyExposedError) as raised:
-        _windows_guard(sddl).verify("k", directory=False)
+        _windows_guard(sddl).verify("k")
     assert not isinstance(raised.value, KeyUnverifiableError)
 
 
@@ -920,10 +918,10 @@ def test_verify_refuses_a_key_path_that_is_itself_a_link(tmp_path, directory):
     guard = _guard_for_this_platform()
     guard.harden(str(target), directory)
     with pytest.raises(KeyUnverifiableError) as exc:
-        guard.verify(str(link), directory)
+        guard.verify(str(link))
     message = str(exc.value)
     assert str(link) in message and "is a link" in message and "\n" not in message
-    guard.verify(str(target), directory)
+    guard.verify(str(target))
 
 
 @pytest.mark.parametrize(("platform", "expected_encoding"), [("win32", "oem"), ("linux", None)])
@@ -963,7 +961,7 @@ def test_verify_calls_a_symlink_or_junction_a_link(monkeypatch, tag):
     # [m-2] the message tells the operator what the entry is.
     _fake_lstat(monkeypatch, _PLAIN_FILE_MODE, _REPARSE, tag)
     with pytest.raises(KeyUnverifiableError) as exc:
-        WindowsPermissionGuard(runner=lambda argv: "").verify("k", directory=False)
+        WindowsPermissionGuard(runner=lambda argv: "").verify("k")
     assert "k is a link: replace it with a real file/directory" in str(exc.value)
 
 
@@ -971,7 +969,7 @@ def test_verify_fails_closed_on_another_reparse_point_and_says_so(monkeypatch):
     # [m-2] a cloud-sync placeholder is not a link, but it is never trusted with a key either.
     _fake_lstat(monkeypatch, _PLAIN_FILE_MODE, _REPARSE, 0x9000601A)  # a cloud-files tag
     with pytest.raises(KeyUnverifiableError) as exc:
-        WindowsPermissionGuard(runner=lambda argv: "").verify("k", directory=False)
+        WindowsPermissionGuard(runner=lambda argv: "").verify("k")
     message = str(exc.value)
     assert "is a reparse point" in message and "cloud-sync placeholder" in message
     assert "is a link" not in message and "local, non-synced folder" in message
@@ -981,7 +979,7 @@ def test_verify_fails_closed_on_another_reparse_point_and_says_so(monkeypatch):
 def test_windows_verify_of_an_inheriting_dacl_with_only_a_foreign_deny_is_exposed():
     # [X1] inheritance is the exposure; a deny entry must not demote it to "unverifiable".
     with pytest.raises(KeyExposedError) as raised:
-        _windows_guard(f"D:AI(D;;FA;;;{OTHER})(A;;FA;;;{ME})").verify("k", directory=False)
+        _windows_guard(f"D:AI(D;;FA;;;{OTHER})(A;;FA;;;{ME})").verify("k")
     assert not isinstance(raised.value, KeyUnverifiableError)
     assert "inherits" in str(raised.value)
 
@@ -990,7 +988,7 @@ def test_windows_verify_of_an_inheriting_dacl_with_only_a_foreign_deny_is_expose
 def test_windows_verify_of_a_null_or_absent_dacl_is_exposed_not_unverifiable(sddl):
     # [Z5] a NULL DACL grants everyone full access: that is an exposure, not an unreadable descriptor.
     with pytest.raises(KeyExposedError) as raised:
-        _windows_guard(sddl).verify("k", directory=False)
+        _windows_guard(sddl).verify("k")
     assert not isinstance(raised.value, KeyUnverifiableError)
     assert "full access" in str(raised.value) and "\n" not in str(raised.value)
 
@@ -1005,7 +1003,7 @@ def test_a_ctypes_failure_in_the_native_layer_is_unverifiable_on_verify():
     guard = _windows_guard(f"D:PAI(A;;FA;;;{ME})")
     guard.read_sddl = _boom
     with pytest.raises(KeyUnverifiableError) as raised:
-        guard.verify("k", directory=False)
+        guard.verify("k")
     assert "\n" not in str(raised.value)
 
 

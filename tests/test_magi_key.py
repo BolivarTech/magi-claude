@@ -32,8 +32,8 @@ class _Guard:
             raise KeyHardeningError(f"cannot harden {path}")
         self.hardened.append((path, directory))
 
-    def verify(self, path, directory):
-        self.verified.append((path, directory))
+    def verify(self, path):
+        self.verified.append(path)
         if path in self.exposed:
             raise KeyExposedError(f"{path} is readable by others")
 
@@ -90,8 +90,8 @@ def test_persist_writes_the_key_under_magi_secret_and_hardens_dir_and_file(tmp_p
     assert (os.path.dirname(path), True) in guard.hardened
     assert (path, False) in guard.hardened
     # [CP2-M22] REQ-13 "verified after creating them"
-    assert (os.path.dirname(path), True) in guard.verified
-    assert (path, False) in guard.verified
+    assert os.path.dirname(path) in guard.verified
+    assert path in guard.verified
 
 
 def test_a_verification_failure_at_persist_is_fatal_and_leaves_no_key_behind(tmp_path):
@@ -251,8 +251,8 @@ class _RaisingGuard(_Guard):
         super().__init__()
         self.error = error
 
-    def verify(self, path, directory):
-        if not directory:
+    def verify(self, path):
+        if path.endswith("magi.key"):
             raise self.error
 
 
@@ -354,7 +354,7 @@ def test_a_missing_key_names_the_whole_regeneration(tmp_path):
         def harden(self, path, directory):
             pass
 
-        def verify(self, path, directory):
+        def verify(self, path):
             pass
 
     (tmp_path / ".magi" / ".secret").mkdir(parents=True)

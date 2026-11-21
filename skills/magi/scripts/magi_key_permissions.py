@@ -521,7 +521,7 @@ class PermissionGuard(ABC):
     Example:
         >>> guard = PermissionGuard.for_platform()
         >>> guard.harden(path, directory=False)
-        >>> guard.verify(path, directory=False)
+        >>> guard.verify(path)
     """
 
     @abstractmethod
@@ -537,12 +537,11 @@ class PermissionGuard(ABC):
         """
 
     @abstractmethod
-    def verify(self, path: str, directory: bool) -> None:
+    def verify(self, path: str) -> None:
         """Check that ``path`` is restricted to its owner, without repairing it.
 
         Args:
             path: The file or directory to check.
-            directory: True when ``path`` is a directory.
 
         Raises:
             KeyUnverifiableError: The permissions could not be read.
@@ -581,12 +580,11 @@ class PosixPermissionGuard(PermissionGuard):
                 f"cannot restrict {path} to its owner ({one_line(str(error))})"
             ) from error
 
-    def verify(self, path: str, directory: bool) -> None:
+    def verify(self, path: str) -> None:
         """Require the effective user as owner and no group or other bits.
 
         Args:
             path: The file or directory to check.
-            directory: True when ``path`` is a directory (same rule for both).
 
         Raises:
             KeyUnverifiableError: ``path`` is a link, cannot be inspected, this is Windows,
@@ -617,7 +615,7 @@ class WindowsPermissionGuard(PermissionGuard):
     Example:
         >>> guard = WindowsPermissionGuard()
         >>> guard.harden(r"C:\\work\\.magi\\.secret", directory=True)
-        >>> guard.verify(r"C:\\work\\.magi\\.secret", directory=True)
+        >>> guard.verify(r"C:\\work\\.magi\\.secret")
     """
 
     def __init__(self, runner: Callable[[list[str]], str] = _run) -> None:
@@ -788,12 +786,11 @@ class WindowsPermissionGuard(PermissionGuard):
         ]
         return list(dict.fromkeys(foreign))
 
-    def verify(self, path: str, directory: bool) -> None:
+    def verify(self, path: str) -> None:
         """Require a protected DACL whose every ACE is the current user's SID.
 
         Args:
             path: The file or directory to check.
-            directory: True when ``path`` is a directory (same rule for both).
 
         Raises:
             KeyUnverifiableError: ``path`` is a link or reparse point; the DACL, the

@@ -79,7 +79,7 @@ class _NoopGuard:
     def harden(self, path, directory):
         pass
 
-    def verify(self, path, directory):
+    def verify(self, path):
         pass
 
 
@@ -92,8 +92,8 @@ class _RecordingGuard(_NoopGuard):
     def harden(self, path, directory):
         self.calls.append(("harden", path, directory))
 
-    def verify(self, path, directory):
-        self.calls.append(("verify", path, directory))
+    def verify(self, path):
+        self.calls.append(("verify", path))
 
 
 class _FailingOnBackupGuard(_NoopGuard):
@@ -308,8 +308,8 @@ def test_the_backup_key_and_its_directory_are_hardened_and_verified(tmp_path):
     for call in (
         ("harden", secret, True),
         ("harden", key, False),
-        ("verify", secret, True),
-        ("verify", key, False),
+        ("verify", secret),
+        ("verify", key),
     ):
         assert call in guard.calls
     assert (
@@ -317,10 +317,10 @@ def test_the_backup_key_and_its_directory_are_hardened_and_verified(tmp_path):
         report.backup_dir,
         True,
     ) in guard.calls  # [CP2-C44] the backup directory itself
-    assert ("verify", report.backup_dir, True) in guard.calls  # [fix 1] verified, not only hardened
+    assert ("verify", report.backup_dir) in guard.calls  # [fix 1] verified, not only hardened
     # [fix 2] a same-volume rename does not re-propagate inheritance: <id> is hardened again after the move,
     # so its owner-only inheritable grant reaches the moved DB and magi.toml.
-    pre_move_verify = guard.calls.index(("verify", report.backup_dir, True))
+    pre_move_verify = guard.calls.index(("verify", report.backup_dir))
     assert ("harden", report.backup_dir, True) in guard.calls[pre_move_verify + 1 :]
 
 
@@ -542,8 +542,8 @@ def test_a_new_key_that_does_not_verify_stops_the_rotation(tmp_path):
     work = _project(tmp_path)
 
     class _NewKeyExposedGuard(_NoopGuard):
-        def verify(self, path, directory):
-            if str(work) in path and not directory:
+        def verify(self, path):
+            if str(work) in path and path.endswith("magi.key"):
                 raise KeyExposedError(f"{path} grants access to S-1-5-11 (DACL protected: no)")
 
     rotation, _ = _rotation(tmp_path, guard=_NewKeyExposedGuard())
@@ -578,7 +578,7 @@ def test_every_path_of_the_moved_backup_is_hardened_and_verified(tmp_path):
     for relative, directory in expected:
         path = os.path.normpath(os.path.join(report.backup_dir, relative))
         assert ("harden", path, directory) in guard.calls, path
-        assert ("verify", path, directory) in guard.calls, path
+        assert ("verify", path) in guard.calls, path
 
 
 def test_a_backup_database_that_does_not_verify_stops_the_rotation_and_names_the_backup(tmp_path):
@@ -586,7 +586,7 @@ def test_a_backup_database_that_does_not_verify_stops_the_rotation_and_names_the
     work = _project_with_db(tmp_path)
 
     class _DbExposedGuard(_NoopGuard):
-        def verify(self, path, directory):
+        def verify(self, path):
             if os.path.basename(path) == ".magi-rs-memory.db" and "rotated" in path:
                 raise KeyExposedError(f"{path} grants access to S-1-5-11 (DACL protected: no)")
 
@@ -662,9 +662,9 @@ def test_a_link_inside_the_backup_stops_the_rotation_and_its_target_is_never_tou
     backups = os.listdir(tmp_path / "rotated")
     assert len(backups) == 1 and not (work / ".magi").exists()
     planted = "planted" if kind == "file-symlink" else "index"
-    touched = {os.path.normcase(os.path.realpath(path)) for _, path, _ in guard.calls}
+    touched = {os.path.normcase(os.path.realpath(path)) for _, path, *_ in guard.calls}
     assert os.path.normcase(os.path.realpath(victim)) not in touched
-    assert not any(os.path.basename(path) == planted for _, path, _ in guard.calls)
+    assert not any(os.path.basename(path) == planted for _, path, *_ in guard.calls)
     message = str(exc.value)
     assert backups[0] in message and planted in message and "may be exposed" in message
     assert "\n" not in message.strip() and OLD.reveal() not in message
@@ -752,8 +752,8 @@ class _InterruptingVerifyGuard(_NoopGuard):
     def __init__(self, work):
         self.work = str(work)
 
-    def verify(self, path, directory):
-        if path.startswith(self.work) and not directory:
+    def verify(self, path):
+        if path.startswith(self.work) and path.endswith("magi.key"):
             raise KeyboardInterrupt
 
 
@@ -933,7 +933,7 @@ class _NewKeyFileExposedGuard(_NoopGuard):
         self.key_file = os.path.normcase(os.path.join(str(work), ".magi", ".secret", "magi.key"))
         self.armed = True
 
-    def verify(self, path, directory):
+    def verify(self, path):
         if self.armed and os.path.normcase(path) == self.key_file:
             raise KeyExposedError(f"{path} grants access to S-1-5-11 (DACL protected: no)")
 
@@ -1030,7 +1030,7 @@ def test_a_link_inside_the_source_magi_dir_stops_the_rotation_before_anything_mo
     assert not (tmp_path / "rotated").exists() or os.listdir(tmp_path / "rotated") == []
     assert not any(
         os.path.normcase(os.path.realpath(p)) == os.path.normcase(os.path.realpath(victim))
-        for _, p, _ in guard.calls
+        for p in (call[1] for call in guard.calls)
     )
     message = str(exc.value)
     planted = "planted" if kind == "file-symlink" else "index"
@@ -1054,9 +1054,9 @@ def test_every_backup_directory_the_rotation_creates_is_restricted_and_pre_exist
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     for created in (state / "magi", root):
         assert ("harden", str(created), True) in guard.calls, created
-        assert ("verify", str(created), True) in guard.calls, created
+        assert ("verify", str(created)) in guard.calls, created
     assert not any(
-        os.path.normcase(path) == os.path.normcase(str(state)) for _, path, _ in guard.calls
+        os.path.normcase(path) == os.path.normcase(str(state)) for _, path, *_ in guard.calls
     )
 
 
@@ -1310,7 +1310,7 @@ class _ArmedKeyEchoingGuard(_NoopGuard):
 
     armed = False
 
-    def verify(self, path, directory):
+    def verify(self, path):
         if self.armed:
             raise KeyHardeningError(f"cannot verify {path} (key {NEW.reveal()})")
 
@@ -1587,7 +1587,7 @@ def test_only_the_feature_owned_backup_dirs_are_hardened_never_the_platform_base
         backup_root=str(base / "magi" / "rotated"),
     )
     rotation.rotate(str(work), assume_yes=True, is_tty=False)
-    hardened = {os.path.normcase(path) for call, path, _ in guard.calls if call == "harden"}
+    hardened = {os.path.normcase(path) for call, path, *_ in guard.calls if call == "harden"}
     assert os.path.normcase(str(base)) not in hardened
     assert os.path.normcase(str(base / "magi")) in hardened
     assert os.path.normcase(str(base / "magi" / "rotated")) in hardened

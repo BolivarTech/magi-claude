@@ -330,7 +330,7 @@ class _NoopGuard:
     def harden(self, path, directory):
         pass
 
-    def verify(self, path, directory):
+    def verify(self, path):
         pass
 
 
