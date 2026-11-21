@@ -23,6 +23,7 @@ import os
 import secrets
 from typing import Protocol
 
+from link_guard import link_refusal
 from cli_commands import INIT_FLAG, ROTATE_KEY_FLAG, VAULT_SET_FLAG, command
 from one_line import one_line
 
@@ -295,13 +296,15 @@ class KeyStore:
 
         Raises:
             FileExistsError: A key already exists; it is left untouched.
-            KeyHardeningError: Hardening or verification failed; the file this
+            KeyHardeningError: ``.magi``, the key directory or the key path is a link
+                or reparse point (nothing is written); hardening or verification failed; the file this
                 call created is removed (none exists when the directory could
                 not be hardened first).
             OSError: The directory or the file could not be created.
         """
         key_file = self.key_path(workdir)
         secret_dir = os.path.dirname(key_file)
+        self._refuse_links(workdir, secret_dir, key_file)
         os.makedirs(secret_dir, mode=DIR_MODE, exist_ok=True)
         try:
             self.guard.harden(secret_dir, True)
@@ -327,6 +330,35 @@ class KeyStore:
             self._discard(key_file)
             raise
         return key_file
+
+    @staticmethod
+    def _refuse_links(workdir: str, secret_dir: str, key_file: str) -> None:
+        """Refuse to write through a link: the key would land wherever it points.
+
+        Checked before anything is created or opened, on ``<workdir>/.magi``, the key
+        directory and the key path. An absent entry is fine (it is about to be made).
+
+        Args:
+            workdir: The project working directory.
+            secret_dir: ``<workdir>/.magi/.secret``.
+            key_file: The key file path.
+
+        Raises:
+            KeyHardeningError: An entry is a link or reparse point, or cannot be inspected;
+                nothing was written.
+        """
+        for entry in (os.path.join(workdir, KEY_DIR_PARTS[0]), secret_dir, key_file):
+            try:
+                refusal = link_refusal(entry)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise KeyHardeningError(
+                    f"cannot inspect {entry} before writing the key ({one_line(str(error))}): "
+                    "no key was written"
+                ) from error
+            if refusal is not None:
+                raise KeyHardeningError(f"{refusal}: no key was written")
 
     @staticmethod
     def _discard(key_file: str) -> str:
