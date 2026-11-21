@@ -399,7 +399,7 @@ class KeyRotation:
         self._redactors.append(old_key.redact)
         backup_dir, created_parents = self._create_backup_dir(workdir)
         self._secure_backup_dir(backup_dir, created_parents)
-        self._move(magi_dir, backup_dir)
+        self._move(magi_dir, backup_dir, created_parents)
         self._reharden(backup_dir, workdir)
         new_store = _RecordingKeyStore(self._store.guard)
         self._redactors.append(new_store.redact)
@@ -633,7 +633,7 @@ class KeyRotation:
             return False
         return True
 
-    def _move(self, magi_dir: str, backup_dir: str) -> None:
+    def _move(self, magi_dir: str, backup_dir: str, created_parents: list[str]) -> None:
         """Move ``.magi/`` into ``backup_dir``; on failure, keep whichever copy is complete.
 
         Across volumes ``shutil.move`` copies and then deletes the source, so a
@@ -648,6 +648,8 @@ class KeyRotation:
         Args:
             magi_dir: ``<workdir>/.magi``.
             backup_dir: ``<backup root>/<id>``.
+            created_parents: The parents of ``backup_dir`` this rotation created,
+                outermost first; removed when the source is unchanged.
 
         Raises:
             RotationFailedError: The move failed or was interrupted; the message
@@ -676,8 +678,9 @@ class KeyRotation:
                     f"moving {magi_dir} to {target} failed ({reason}): {magi_dir} is unchanged; a partial "
                     f"copy was left in {backup_dir}, delete it"
                 ) from error
+            leftover = self._remove_created(created_parents)
             raise RotationFailedError(
-                f"moving {magi_dir} to {target} failed ({reason}): {magi_dir} is unchanged"
+                f"moving {magi_dir} to {target} failed ({reason}): {magi_dir} is unchanged{leftover}"
             ) from error
 
     def _reharden(self, backup_dir: str, workdir: str) -> None:

@@ -815,7 +815,7 @@ def test_an_interrupted_move_with_the_source_complete_removes_the_partial_copy(
     with pytest.raises(RotationFailedError) as exc:
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     assert (work / ".magi" / "magi.toml").read_text() == "old"
-    assert os.listdir(tmp_path / "rotated") == []  # the partial copy is gone
+    assert not (tmp_path / "rotated").exists()  # the partial copy and the created root are gone
     message = str(exc.value)
     assert "is unchanged" in message and "KeyboardInterrupt" in message
     assert isinstance(exc.value.__cause__, KeyboardInterrupt)
@@ -1379,7 +1379,7 @@ def test_a_move_that_failed_before_creating_the_copy_reports_the_source_unchange
         rotation.rotate(str(work), assume_yes=True, is_tty=False)
     message = str(exc.value)
     assert "is unchanged" in message and "both copies" not in message
-    assert os.listdir(tmp_path / "rotated") == []
+    assert not (tmp_path / "rotated").exists()  # [X6] the created root goes with the empty backup
     assert (work / ".magi" / "magi.toml").read_text() == "old"
 
 
