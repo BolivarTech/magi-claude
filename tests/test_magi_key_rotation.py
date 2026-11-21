@@ -1224,3 +1224,21 @@ def test_a_move_that_lost_part_of_the_source_asks_to_compare_both_copies(tmp_pat
         and "compare" in message
         and "the source is gone" not in message
     )
+
+
+def test_a_backup_hardening_failure_names_the_directory_that_failed(tmp_path):
+    # [T5] with created parents in the loop, the message names the one that could not be restricted.
+    work = _project(tmp_path)
+    root = tmp_path / "state" / "rotated"
+
+    class _FailsOnRoot(_NoopGuard):
+        def harden(self, path, directory):
+            if os.path.normcase(path) == os.path.normcase(str(root)):
+                raise KeyHardeningError(f"cannot harden {path}")
+
+    rotation = KeyRotation(_Store(_FailsOnRoot()), lambda *a: "", lambda *a: [], str(root))
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    message = str(exc.value)
+    assert f"cannot restrict the rotation backup directory {root} to its owner" in message
+    assert "nothing was moved" in message and (work / ".magi" / "magi.toml").read_text() == "old"
