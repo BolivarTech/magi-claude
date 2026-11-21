@@ -1522,3 +1522,21 @@ def test_a_backup_name_search_that_finds_every_candidate_taken_gives_up(tmp_path
     assert str(tmp_path / "rotated") in message and "nothing was moved" in message
     assert "\n" not in message.strip()
     assert (work / ".magi" / "magi.toml").read_text() == "old"
+
+
+def test_a_failed_move_with_an_unchanged_source_also_removes_the_parents_it_created(
+    tmp_path, monkeypatch
+):
+    # [X6] the same cleanup as every other pre-move failure: the created backup root goes too.
+    work = _project(tmp_path)
+
+    def _move(src, dst):
+        raise OSError("rename refused")
+
+    monkeypatch.setattr("magi_key_rotation.shutil.move", _move)
+    rotation, _ = _rotation(tmp_path)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    assert "is unchanged" in str(exc.value) and "\n" not in str(exc.value).strip()
+    assert not (tmp_path / "rotated").exists()
+    assert (work / ".magi" / "magi.toml").read_text() == "old"
