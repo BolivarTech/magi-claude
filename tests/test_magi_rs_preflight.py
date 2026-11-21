@@ -6,7 +6,9 @@
 import pytest
 
 from magi_key import KeyMissingError
+from magi_rs_embedder import EmbedderUnreachableError
 from magi_rs_preflight import ProjectNotInitialisedError, ProjectPreflight
+from magi_rs_trio import FAIL_CLOSED_ERRORS
 
 
 def test_an_initialised_project_passes_and_returns_the_config_path(tmp_path):
@@ -57,6 +59,11 @@ class _Recorder:
             raise self.error
         return self.value
 
+    def check(self, config):
+        self.order.append(self.name)
+        if self.error:
+            raise self.error
+
 
 def _init(tmp_path):
     (tmp_path / ".magi").mkdir()
@@ -83,6 +90,31 @@ def test_an_uninitialised_project_stops_before_the_key_is_read(tmp_path):
     with pytest.raises(ProjectNotInitialisedError):
         ProjectPreflight.require_ready(str(tmp_path), _Recorder(order, "key"))
     assert order == []
+
+
+def test_with_a_probe_the_embedder_is_checked_after_the_key(tmp_path):
+    _init(tmp_path)
+    order = []
+    key = ProjectPreflight.require_ready(
+        str(tmp_path), _Recorder(order, "key", value="K"), probe=_Recorder(order, "embedder")
+    )
+    assert order == ["key", "embedder"] and key == "K"
+
+
+def test_a_missing_key_stops_before_the_embedder_is_probed(tmp_path):
+    _init(tmp_path)
+    order = []
+    with pytest.raises(KeyMissingError):
+        ProjectPreflight.require_ready(
+            str(tmp_path),
+            _Recorder(order, "key", error=KeyMissingError("x")),
+            probe=_Recorder(order, "embedder"),
+        )
+    assert order == ["key"]
+
+
+def test_an_unreachable_embedder_is_rendered_fatal():
+    assert EmbedderUnreachableError in FAIL_CLOSED_ERRORS
 
 
 def _names_the_whole_regeneration(message):
