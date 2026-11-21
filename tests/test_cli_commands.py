@@ -37,3 +37,13 @@ def test_every_flag_constant_is_accepted_by_the_parser():
     )
     rotate = run_magi.parse_args([ROTATE_KEY_FLAG, YES_FLAG])
     assert rotate.ollama_rotate_key is True and rotate.yes is True
+
+
+def test_the_dest_constants_are_the_attributes_the_parser_sets():
+    # [M8] the dispatcher reads args.ollama_*; the constants pin those names explicitly.
+    from cli_commands import INIT_DEST, ROTATE_KEY_DEST, VAULT_SET_DEST
+
+    parsed = run_magi.parse_args([INIT_FLAG])
+    assert getattr(parsed, INIT_DEST) is True
+    assert getattr(run_magi.parse_args([VAULT_SET_FLAG, "OPENAI_API_KEY"]), VAULT_SET_DEST)
+    assert getattr(run_magi.parse_args([ROTATE_KEY_FLAG]), ROTATE_KEY_DEST) is True

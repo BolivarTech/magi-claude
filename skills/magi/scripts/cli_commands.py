@@ -16,6 +16,12 @@ ROTATE_KEY_FLAG = "--ollama-rotate-key"
 YES_FLAG = "--yes"
 """The key subcommands and the flag that authorises a rotation."""
 
+INIT_DEST = "ollama_init"
+VAULT_SET_DEST = "ollama_vault_set"
+ROTATE_KEY_DEST = "ollama_rotate_key"
+"""The ``argparse`` attribute of each subcommand flag, stated explicitly so renaming a flag
+cannot silently rename the attribute the dispatcher reads."""
+
 _COMMAND_PREFIX = "run_magi.py"
 """How every message names the script (the ``/magi`` skill form is documented separately)."""
 

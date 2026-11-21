@@ -87,8 +87,11 @@ from magi_key_rotation import (  # noqa: E402
 )
 from magi_rs_vault import VAULT_KEY_NAMES, VaultClient, VaultValueEncodingError  # noqa: E402
 from cli_commands import (  # noqa: E402
+    INIT_DEST,
     INIT_FLAG,
+    ROTATE_KEY_DEST,
     ROTATE_KEY_FLAG,
+    VAULT_SET_DEST,
     VAULT_SET_FLAG,
     YES_FLAG,
     command,
@@ -425,11 +428,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         INIT_FLAG,
+        dest=INIT_DEST,
         action="store_true",
         help="Initialise this project for magi-rs (`magi-rs init -w <cwd>`, creates .magi/) and exit.",
     )
     parser.add_argument(
         VAULT_SET_FLAG,
+        dest=VAULT_SET_DEST,
         metavar="NAME",
         choices=VAULT_KEY_NAMES,
         default=None,
@@ -441,6 +446,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         ROTATE_KEY_FLAG,
+        dest=ROTATE_KEY_DEST,
         action="store_true",
         help=(
             "Replace an exposed magi-rs key: move .magi/ to a backup outside the project, create a new "
