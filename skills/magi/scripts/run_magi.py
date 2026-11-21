@@ -2099,8 +2099,6 @@ _ROTATE_KEY_FLAG = "--ollama-rotate-key"
 _VAULT_VALUE_PROMPT = "API key value (input hidden): "
 _LINE_ENDINGS = "\r\n"
 _YES_FLAG = "--yes"
-_BOOTSTRAP_ERRORS: tuple[type[Exception], ...] = (*FAIL_CLOSED_ERRORS, OSError)
-"""What verifying the binary may raise: a fail-closed error, or a launch failure of the digest check."""
 
 
 def vault_set_main(argv: list[str], stdin: IO[str], is_tty: bool) -> int:
@@ -2173,7 +2171,7 @@ def rotate_main(argv: list[str], is_tty: bool) -> int:
     try:
         root = plugin_root()
         executable = BinaryBootstrap(Pin.load(pin_path(root)), bin_dir(root)).ensure()
-    except _BOOTSTRAP_ERRORS as exc:
+    except Exception as exc:  # noqa: BLE001 - as in vault_set_main: every bootstrap error is fail-closed
         print(f"[FATAL] {' '.join(str(exc).split())}", file=sys.stderr)
         return 1
 

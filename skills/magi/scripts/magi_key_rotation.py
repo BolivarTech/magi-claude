@@ -11,9 +11,10 @@ replaces everything:
 1. it is authorised explicitly (``--yes``, or ``y`` at a terminal prompt);
 2. the old key is read (unverified: it is exposed by definition) before
    anything moves;
-3. the old ``.magi/`` is moved to ``<backup root>/<id>/.magi``, outside every
-   working tree, and the backup is restricted to its owner again (a move across
-   volumes does not carry the ACL);
+3. ``<backup root>/<id>``, outside every working tree, is created and
+   restricted to its owner; the old ``.magi/`` is moved into it and its key
+   directory and key are restricted again (a move across volumes does not
+   carry the ACL);
 4. a new ``.magi/`` is created by the injected ``init`` (new key, new database);
 5. the old key is used once more, only for ``vault ls`` on the backup, so the
    operator learns which API keys to revoke (names only, never values).
@@ -44,9 +45,6 @@ from magi_rs_vault import VAULT_KEY_NAMES
 
 MAGI_DIR = KEY_DIR_PARTS[0]
 """The project directory that a rotation moves aside and recreates."""
-
-_CONFIG_FILENAME = "magi.toml"
-"""The ``magi-rs`` configuration that, with the key, marks a complete ``.magi/``."""
 
 _BACKUP_PARTS = ("magi", "rotated")
 """The backup root, relative to the platform's per-user state directory."""
@@ -179,7 +177,9 @@ class KeyRotation:
     """Moves an exposed ``.magi/`` to a backup and creates a new one.
 
     Example:
-        >>> rotation = KeyRotation(default_key_store(), run_ollama_init, list_vault_names)
+        >>> def vault_names(workdir, key):
+        ...     return VaultClient(executable, workdir, key).ls()
+        >>> rotation = KeyRotation(default_key_store(), run_ollama_init, vault_names)
         >>> report = rotation.rotate(os.getcwd(), assume_yes=True, is_tty=False)
         >>> report.names_to_revoke
         ['OPENAI_API_KEY']
@@ -248,6 +248,7 @@ class KeyRotation:
             )
         old_key = self._read_old_key(workdir)
         backup_dir = self._create_backup_dir(workdir)
+        self._secure_backup_dir(backup_dir)
         self._move(magi_dir, backup_dir)
         self._reharden(backup_dir, workdir)
         self._create_new(workdir, backup_dir, old_key)
@@ -276,7 +277,11 @@ class KeyRotation:
                 "the key rotation needs authorisation: without a terminal, rerun with --yes "
                 "(nothing was changed)"
             )
-        if confirm(_CONFIRM_PROMPT.format(workdir=workdir)).strip() not in _AUTHORISING_ANSWERS:
+        try:
+            answer = confirm(_CONFIRM_PROMPT.format(workdir=workdir))
+        except EOFError:
+            answer = ""
+        if answer.strip() not in _AUTHORISING_ANSWERS:
             raise RotationNotAuthorisedError(
                 "the key rotation was not confirmed (nothing was changed)"
             )
@@ -331,14 +336,63 @@ class KeyRotation:
             ) from error
         return candidate
 
+    def _secure_backup_dir(self, backup_dir: str) -> None:
+        """Restrict ``<backup root>/<id>`` to its owner and verify it, before anything goes into it.
+
+        Args:
+            backup_dir: The directory just created by :meth:`_create_backup_dir`.
+
+        Raises:
+            RotationFailedError: Hardening or verification failed; the empty
+                directory is removed (or the message says it was left) and
+                nothing was moved.
+        """
+        guard = self._store.guard
+        try:
+            guard.harden(backup_dir, True)
+            guard.verify(backup_dir, True)
+        except (KeyStoreError, OSError) as error:
+            leftover = ""
+            try:
+                shutil.rmtree(backup_dir)
+            except OSError:
+                leftover = f" (the empty {backup_dir} could not be removed: delete it)"
+            raise RotationFailedError(
+                f"cannot restrict the rotation backup {backup_dir} to its owner "
+                f"({_one_line(type(error).__name__)}){leftover}: nothing was moved"
+            ) from error
+
     @staticmethod
-    def _move(magi_dir: str, backup_dir: str) -> None:
+    def _source_still_complete(magi_dir: str, target: str) -> bool:
+        """Tell whether every path copied to ``target`` still exists under ``magi_dir``.
+
+        One walk of the copied tree: O(n) in the number of copied entries.
+
+        Args:
+            magi_dir: The source ``.magi/``.
+            target: The (possibly partial) copy.
+
+        Returns:
+            True when nothing that reached ``target`` is missing from the source.
+        """
+        if not os.path.isdir(magi_dir):
+            return False
+        for current, dirs, files in os.walk(target):
+            relative = os.path.relpath(current, target)
+            for name in (*dirs, *files):
+                if not os.path.lexists(os.path.normpath(os.path.join(magi_dir, relative, name))):
+                    return False
+        return True
+
+    @classmethod
+    def _move(cls, magi_dir: str, backup_dir: str) -> None:
         """Move ``.magi/`` into ``backup_dir``; on failure, keep whichever copy is complete.
 
         Across volumes ``shutil.move`` copies and then deletes the source, so a
         failure may leave the source partly deleted. The partial backup is
-        removed only when the source is still complete (its config and its key
-        exist); otherwise nothing is deleted and both paths are named.
+        removed only when the source is still complete (every path that reached
+        the copy still exists in the source); otherwise nothing is deleted and
+        both paths are named.
 
         Args:
             magi_dir: ``<workdir>/.magi``.
@@ -353,13 +407,11 @@ class KeyRotation:
             shutil.move(magi_dir, target)
         except OSError as error:
             reason = _one_line(str(error))
-            source_complete = os.path.isfile(
-                os.path.join(magi_dir, _CONFIG_FILENAME)
-            ) and os.path.isfile(os.path.join(magi_dir, *KEY_DIR_PARTS[1:], KEY_FILENAME))
-            if not source_complete:
+            if not cls._source_still_complete(magi_dir, target):
                 raise RotationFailedError(
-                    f"moving {magi_dir} to {target} failed ({reason}) after part of it was copied: nothing was "
-                    f"deleted; the copy in {target} is the complete one, move it back to {magi_dir} to retry"
+                    f"moving {magi_dir} to {target} failed ({reason}) after files were removed from the source: "
+                    f"both copies were kept and nothing was deleted; {target} holds what was copied, compare it "
+                    f"with {magi_dir} and move the complete one back to {magi_dir} to retry"
                 ) from error
             try:
                 shutil.rmtree(backup_dir)
@@ -373,10 +425,10 @@ class KeyRotation:
             ) from error
 
     def _reharden(self, backup_dir: str, workdir: str) -> None:
-        """Restrict the backup, its key directory and its key to the owner, then verify.
+        """Restrict the moved key directory and key to the owner again, then verify.
 
-        The backup directory itself is hardened here, after the move, so that a
-        guard failure always leaves the backup where it is.
+        A move across volumes does not carry the ACL, and a same-volume rename
+        keeps the old, possibly loosened one: both are re-restricted here.
 
         Args:
             backup_dir: ``<backup root>/<id>``.
@@ -390,7 +442,6 @@ class KeyRotation:
         key_file = os.path.join(secret_dir, KEY_FILENAME)
         guard = self._store.guard
         try:
-            guard.harden(backup_dir, True)
             guard.harden(secret_dir, True)
             guard.harden(key_file, False)
             guard.verify(secret_dir, True)
@@ -417,8 +468,8 @@ class KeyRotation:
         try:
             self._init(workdir, self._store)
         except Exception as error:  # noqa: BLE001 - any init failure must end in the described state
-            detail = _one_line(" ".join([str(error), *getattr(error, "__notes__", [])]))
-            detail = detail.replace(old_key.reveal(), _REDACTED) or type(error).__name__
+            raw = " ".join([str(error), *getattr(error, "__notes__", [])])
+            detail = _one_line(raw.replace(old_key.reveal(), _REDACTED)) or type(error).__name__
             leftover = ""
             if os.path.lexists(magi_dir):
                 try:
