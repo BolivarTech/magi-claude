@@ -118,7 +118,10 @@ class VaultClient:
 
         Raises:
             VaultCommandError: The command failed, or a line does not have the
-                shape ``NAME · created · updated``.
+                shape ``NAME · created · updated``, or names something outside
+                :data:`VAULT_KEY_NAMES` (e.g. a header row): an unrecognised
+                answer is never reported as keys to revoke; the rotation then
+                lists the whole closed list instead.
 
         Side effects:
             Launches ``magi-rs vault ls`` with the key in its environment.
@@ -211,13 +214,18 @@ class VaultClient:
             line: ``NAME · created · updated`` (the name may be padded).
 
         Returns:
-            The name.
+            The name, one of :data:`VAULT_KEY_NAMES`.
 
         Raises:
-            VaultCommandError: The line does not have that shape.
+            VaultCommandError: The line does not have that shape, or its name
+                is not one of :data:`VAULT_KEY_NAMES`.
         """
         columns = line.split(_LS_SEPARATOR)
         name = columns[0].strip()
         if len(columns) < _LS_MIN_COLUMNS or not _LS_NAME_PATTERN.fullmatch(name):
             raise VaultCommandError("vault ls answered in an unrecognised format")
+        if name not in VAULT_KEY_NAMES:
+            raise VaultCommandError(
+                f"vault ls listed {name!r}, which is not a vault name this plugin uses"
+            )
         return name
