@@ -330,3 +330,10 @@ def test_the_secret_directory_is_hardened_before_the_key_file_exists(tmp_path):
     # The later harden of directory and file stays.
     assert (os.path.dirname(key_file), True, True) in guard.seen
     assert (key_file, False, True) in guard.seen
+
+
+def test_a_key_is_never_usable_as_a_dict_key_or_set_member():
+    # [I-2] passes in Red by design (``__eq__`` without ``__hash__`` already disables hashing): pins that a
+    # secret is never hashed, so it cannot become a dict key or a set member by accident.
+    with pytest.raises(TypeError):
+        hash(MagiKey("c2VjcmV0"))
