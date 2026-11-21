@@ -2205,9 +2205,9 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
         is_tty: True when stdin is a terminal; the value is then prompted hidden.
 
     Returns:
-        0 on success; 1 for a fail-closed error or an empty value; 2 (a usage
-        error) for a blank value, one that contains a line break, or one that cannot
-        be encoded as UTF-8.
+        0 on success; 1 for a fail-closed error; 2 (a usage error) for an unusable
+        value: empty, blank, with leading or trailing blank space, with a line break,
+        or not encodable as UTF-8.
     """
     workdir = os.getcwd()
     try:
@@ -2217,10 +2217,12 @@ def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
         value = value.rstrip(_LINE_ENDINGS)
         if not value:
             print(f"ERROR: the value for {name} is empty; nothing was stored.", file=sys.stderr)
-            return 1
-        if not value.strip():
+            return _USAGE_EXIT_CODE
+        if value != value.strip():
+            # never silently stripped: an API key carries no blank space at either end
             print(
-                f"ERROR: the value for {name} is blank; nothing was stored.",
+                f"ERROR: the value for {name} is blank or has leading or trailing blank space; "
+                "nothing was stored.",
                 file=sys.stderr,
             )
             return _USAGE_EXIT_CODE
