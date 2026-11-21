@@ -601,3 +601,44 @@ def test_a_backup_database_that_does_not_verify_stops_the_rotation_and_names_the
     message = str(exc.value)
     assert backups[0] in message and "may be exposed" in message and "S-1-5-11" in message
     assert "\n" not in message.strip() and OLD.reveal() not in message
+
+
+def _link_victim_into_magi(tmp_path, work, kind):
+    """Plant a link to a path outside the project inside ``.magi/``; skip where it cannot be made."""
+    victim = tmp_path / "victim"
+    if kind == "file-symlink":
+        victim.write_text("outside", encoding="utf-8")
+        try:
+            os.symlink(victim, work / ".magi" / "planted")
+        except (OSError, NotImplementedError) as error:
+            pytest.skip(f"symlinks are not permitted here: {error}")
+    else:  # a directory junction: a Windows reparse point that needs no privilege
+        if sys.platform != "win32":
+            pytest.skip("junctions are Windows-only")
+        import _winapi
+
+        victim.mkdir()
+        _winapi.CreateJunction(str(victim), str(work / ".magi" / "index"))
+    return victim
+
+
+@pytest.mark.parametrize("kind", ["file-symlink", "junction"])
+def test_a_link_inside_the_backup_stops_the_rotation_and_its_target_is_never_touched(
+    tmp_path, kind
+):
+    # [W3 addition] hardening a link would chmod/icacls its TARGET, outside the backup: refuse, never follow.
+    work = _project(tmp_path)
+    victim = _link_victim_into_magi(tmp_path, work, kind)
+    guard = _RecordingGuard()
+    rotation, _ = _rotation(tmp_path, guard=guard)
+    with pytest.raises(RotationFailedError) as exc:
+        rotation.rotate(str(work), assume_yes=True, is_tty=False)
+    backups = os.listdir(tmp_path / "rotated")
+    assert len(backups) == 1 and not (work / ".magi").exists()
+    planted = "planted" if kind == "file-symlink" else "index"
+    touched = {os.path.normcase(os.path.realpath(path)) for _, path, _ in guard.calls}
+    assert os.path.normcase(os.path.realpath(victim)) not in touched
+    assert not any(os.path.basename(path) == planted for _, path, _ in guard.calls)
+    message = str(exc.value)
+    assert backups[0] in message and planted in message and "may be exposed" in message
+    assert "\n" not in message.strip() and OLD.reveal() not in message
