@@ -15,10 +15,12 @@ from types import SimpleNamespace
 import pytest
 
 import magi_rs_trio
+from magi_key import KeyExposedError, KeyHardeningError, KeyMissingError
 from magi_rs_bootstrap import DigestMismatchError
 from magi_rs_preflight import ProjectNotInitialisedError
 from magi_rs_trio import (
     _STDERR_ELISION_MARKER,
+    FAIL_CLOSED_ERRORS,
     MagiRsContractError,
     MagiRsProcessError,
     MagiRsTrio,
@@ -1090,3 +1092,8 @@ async def test_the_outer_clock_is_exactly_the_timeout_because_m4_found_no_oversh
     )
     await _run(monkeypatch, tmp_path)
     assert seen["timeout"] == _RUN_TIMEOUT
+
+
+@pytest.mark.parametrize("error", [KeyMissingError, KeyExposedError, KeyHardeningError])
+def test_every_new_preflight_error_is_rendered_fatal(error):
+    assert error in FAIL_CLOSED_ERRORS

@@ -5,6 +5,7 @@
 
 import pytest
 
+from magi_key import KeyMissingError
 from magi_rs_preflight import ProjectNotInitialisedError, ProjectPreflight
 
 
@@ -44,3 +45,41 @@ def test_the_preflight_error_is_not_a_validation_error():
     from synthesize import ValidationError
 
     assert not issubclass(ProjectNotInitialisedError, ValidationError)
+
+
+class _Recorder:
+    def __init__(self, order, name, error=None, value=None):
+        self.order, self.name, self.error, self.value = order, name, error, value
+
+    def load(self, workdir):
+        self.order.append(self.name)
+        if self.error:
+            raise self.error
+        return self.value
+
+
+def _init(tmp_path):
+    (tmp_path / ".magi").mkdir()
+    (tmp_path / ".magi" / "magi.toml").write_text("", encoding="utf-8")
+
+
+def test_the_preflight_checks_the_config_then_returns_the_loaded_key(tmp_path):
+    _init(tmp_path)
+    order = []
+    key = ProjectPreflight.require_ready(str(tmp_path), _Recorder(order, "key", value="K"))
+    assert order == ["key"] and key == "K"
+
+
+def test_a_key_error_propagates_from_the_preflight(tmp_path):
+    _init(tmp_path)
+    with pytest.raises(KeyMissingError):
+        ProjectPreflight.require_ready(
+            str(tmp_path), _Recorder([], "key", error=KeyMissingError("x"))
+        )
+
+
+def test_an_uninitialised_project_stops_before_the_key_is_read(tmp_path):
+    order = []
+    with pytest.raises(ProjectNotInitialisedError):
+        ProjectPreflight.require_ready(str(tmp_path), _Recorder(order, "key"))
+    assert order == []
