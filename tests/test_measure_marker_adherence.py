@@ -746,28 +746,46 @@ def test_a_claude_only_measurement_never_prepares_a_workspace(monkeypatch, tmp_p
     assert calls == []
 
 
+class _FakePopen:
+    """A ``subprocess.Popen`` stand-in for ``--ollama-init``: exits with ``returncode`` or hangs."""
+
+    instances: list = []
+
+    def __init__(self, command, returncode=0, hangs=False, **kwargs):
+        self.command, self.kwargs, self.pid = command, kwargs, 4242
+        self.returncode, self._hangs, self.killed = returncode, hangs, False
+        _FakePopen.instances.append(self)
+
+    def communicate(self, timeout=None):
+        self.timeouts = [*getattr(self, "timeouts", []), timeout]
+        if self._hangs and not self.killed:
+            raise mma.subprocess.TimeoutExpired(self.command, timeout)
+        return None, None
+
+    def kill(self):
+        self.killed = True
+
+
+def _fake_popen(monkeypatch, returncode=0, hangs=False):
+    _FakePopen.instances = []
+    monkeypatch.setattr(
+        mma.subprocess,
+        "Popen",
+        lambda command, **kwargs: _FakePopen(command, returncode, hangs, **kwargs),
+    )
+    return _FakePopen.instances
+
+
 def test_prepare_workspace_runs_ollama_init_inside_a_fresh_directory(monkeypatch, tmp_path):
-    captured = {}
-
-    def fake_run(command, **kwargs):
-        captured["command"], captured["cwd"] = command, kwargs.get("cwd")
-
-        class _Done:
-            returncode = 0
-
-        return _Done()
-
-    monkeypatch.setattr(mma.subprocess, "run", fake_run)
+    started = _fake_popen(monkeypatch)
     workspace = mma.prepare_workspace(tmp_path)
     assert workspace.is_dir() and workspace.parent == tmp_path
-    assert "--ollama-init" in captured["command"] and Path(captured["cwd"]) == workspace
+    assert "--ollama-init" in started[0].command
+    assert Path(started[0].kwargs["cwd"]) == workspace
 
 
 def test_prepare_workspace_fails_loudly_when_init_fails(monkeypatch, tmp_path):
-    class _Failed:
-        returncode = 3
-
-    monkeypatch.setattr(mma.subprocess, "run", lambda command, **kwargs: _Failed())
+    _fake_popen(monkeypatch, returncode=3)
     with pytest.raises(RuntimeError, match="3"):
         mma.prepare_workspace(tmp_path)
 
@@ -981,14 +999,29 @@ def test_a_tallied_cause_outside_the_artifact_columns_raises(monkeypatch):
 
 
 def test_prepare_workspace_turns_a_timeout_into_one_line_naming_it(monkeypatch, tmp_path):
-    seen = {}
-
-    def hangs(command, **kwargs):
-        seen["timeout"] = kwargs.get("timeout")
-        raise mma.subprocess.TimeoutExpired(command, kwargs.get("timeout"))
-
-    monkeypatch.setattr(mma.subprocess, "run", hangs)
+    started = _fake_popen(monkeypatch, hangs=True)
+    monkeypatch.setattr(mma, "windows_kill_tree", lambda pid: None)
     with pytest.raises(RuntimeError, match=str(mma.OLLAMA_INIT_TIMEOUT_SECONDS)) as exc:
         mma.prepare_workspace(tmp_path)
-    assert seen["timeout"] == mma.OLLAMA_INIT_TIMEOUT_SECONDS
+    assert started[0].timeouts[0] == mma.OLLAMA_INIT_TIMEOUT_SECONDS
     assert "\n" not in str(exc.value)
+
+
+def test_a_timed_out_init_has_its_whole_tree_killed_on_windows(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch, hangs=True)
+    killed = []
+    monkeypatch.setattr(mma, "windows_kill_tree", killed.append)
+    monkeypatch.setattr(mma.sys, "platform", "win32")
+    with pytest.raises(RuntimeError, match=str(mma.OLLAMA_INIT_TIMEOUT_SECONDS)):
+        mma.prepare_workspace(tmp_path)
+    assert killed == [started[0].pid]
+
+
+def test_a_timed_out_init_is_killed_directly_off_windows(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch, hangs=True)
+    killed = []
+    monkeypatch.setattr(mma, "windows_kill_tree", killed.append)
+    monkeypatch.setattr(mma.sys, "platform", "linux")
+    with pytest.raises(RuntimeError):
+        mma.prepare_workspace(tmp_path)
+    assert killed == [] and started[0].killed is True
