@@ -287,3 +287,18 @@ async def test_a_complete_envelope_still_unread_at_the_kill_is_kept(monkeypatch,
     verdicts = await asyncio.wait_for(executor.run_trio("", "agents", str(tmp_path), 0, {}, 1), 5)
     assert process.killed is True and executor.history_recorded is False
     assert len(verdicts) == 3
+
+
+def test_the_history_warning_marker_is_pinned_to_magi_rs_wording():
+    """The prefix magi-rs 0.25.0 prints when the review history is not recorded.
+
+    Source: magi-rs 0.25.0 ``src/tools/code_review.rs:1500``
+    (``HISTORY_NOT_UPDATED``), followed by ``: <cause>``. A pin that rewords it must fail
+    here before a run silently reports its history as recorded.
+    """
+    assert HISTORY_WARNING_MARKER == "warning: the review history was not updated"
+
+
+def test_the_timeout_rejection_marker_is_pinned_to_magi_rs_wording():
+    """Part of the budget rejection measured against magi-rs 0.25.0 (``pass --timeout``)."""
+    assert TIMEOUT_REJECTION_MARKER == "pass --timeout"
