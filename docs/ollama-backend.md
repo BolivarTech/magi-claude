@@ -371,7 +371,7 @@ warning points at `max_rotations` instead of recommending a timeout.
   (the `magi-rs` object, verbatim), `effort` (batches, duration, gate questions, tokens per batch
   with the batch `index`, so a failed batch leaves a visible gap) and `model_used_note`; there
   `model_used` and `gate_ran_on_unverified_context` are `null`, because the review envelope names
-  no per-seat model and carries no unmeasured-window list. At the top level, `degraded_causes`
+  no per-seat model and carries no per-seat `ran_unmeasured` (its `unmeasured_models` names the models instead). At the top level, `degraded_causes`
   appears only when a cause exists: `without_embedder`, `failed_batches` (a batch failed, or fewer
   batches completed than were planned) or `undelivered_units` (changed units that never reached
   the mages). Each cause degrades the run and prints one stderr warning; `input_size` and `guard`
