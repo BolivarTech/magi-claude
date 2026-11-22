@@ -1134,3 +1134,53 @@ def test_the_init_starts_its_own_session_on_posix_only(monkeypatch, tmp_path):
     monkeypatch.setattr(mma.sys, "platform", "win32")
     mma.prepare_workspace(tmp_path)
     assert started[0].kwargs.get("start_new_session") is False
+
+
+@pytest.mark.parametrize("value", [None, [], "x", 3])
+def test_a_non_dict_extraction_failures_is_a_measurement_error(tmp_path, value):
+    # G2 re-review: a missing tally reads as null in a real report, and null must not score clean.
+    def mutate(report):
+        report["magi_rs"]["extraction_failures"] = value
+
+    with pytest.raises(RuntimeError, match="extraction_failures"):
+        mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate))
+
+
+def test_a_real_report_built_from_an_envelope_without_the_tally_is_rejected(tmp_path):
+    # Produced through the plugin's own build_report_block, as a real report would be.
+    import run_magi
+    from magi_rs_result import ConsultResult
+
+    fixture = _MAGI_RS_FIXTURE.parent.parent / "magi-rs-consult" / "three-agents.json"
+    envelope = json.loads(fixture.read_text(encoding="utf-8"))
+    envelope["consult"].pop("extraction_failures", None)
+    result = ConsultResult.from_json(json.dumps(envelope))
+    report = {
+        "agents": [{"agent": name} for name in mma.AGENT_NAMES],
+        **run_magi.build_report_block(result, timeout_seconds=1),
+    }
+    assert report["magi_rs"]["extraction_failures"] is None
+    path = tmp_path / mma.RUN_REPORT_FILENAME
+    path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="extraction_failures"):
+        mma.measure_run_report(path)
+
+
+def test_empty_tallies_stay_a_legitimate_clean_run(tmp_path):
+    def mutate(report):
+        report["magi_rs"]["extraction_failures"] = {"caspar": [], "melchior": [], "balthasar": []}
+
+    mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate))
+    assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1
+    mma.reset_tally()
+
+    def mutate_empty(report):
+        report["magi_rs"]["extraction_failures"] = {}
+
+    mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate_empty))
+    assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1
+
+
+def test_the_real_derived_fixture_still_measures(tmp_path):
+    mma.measure_run_report(_copy_magi_rs_report(tmp_path))
+    assert mma.tally["melchior"]["missing_markers"] == 1
