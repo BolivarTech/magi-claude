@@ -2939,6 +2939,8 @@ def main() -> None:
         report["magi_rs"].update(code_review_report_blocks(review_result))
         # PM-S-7: never invent a per-mage model out of the joined string.
         report["magi_rs"]["model_used"] = None
+        # The code-review envelope has no ``ran_unmeasured``: unknown, never a definite false.
+        report["magi_rs"]["gate_ran_on_unverified_context"] = None
         report["magi_rs"]["model_used_note"] = _MODEL_USED_NOTE
         for cause in review_result.degrading_causes:
             # REQ-07 / integrity rule: context was lost, so the run approves no gate.
