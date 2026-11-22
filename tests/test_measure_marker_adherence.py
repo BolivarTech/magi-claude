@@ -951,3 +951,44 @@ def test_check_rejects_an_artifact_whose_mode_is_not_analysis(tmp_path):
     passed, message = mma.check_release_gate(report_path, mma._REPO_ROOT, mma._AGENTS_DIR)
 
     assert not passed and "mode" in message and "analysis" in message
+
+
+# --- MAGI run 1 on MS2 -------------------------------------------------------------
+
+
+def test_every_mapped_cause_is_a_column_of_the_artifact():
+    # A renamed CAUSES label must not let a mapped failure be tallied and then dropped.
+    assert set(mma.MAGI_RS_CAUSE_MAP.values()) <= set(mma.CAUSES)
+
+
+def test_the_map_covers_every_cause_of_the_real_derived_fixture():
+    report = json.loads(_MAGI_RS_FIXTURE.read_text(encoding="utf-8"))
+    found = {
+        record["cause"]
+        for records in report["magi_rs"]["extraction_failures"].values()
+        for record in records
+    }
+    assert found and found <= set(mma.MAGI_RS_CAUSE_MAP)
+
+
+def test_a_tallied_cause_outside_the_artifact_columns_raises(monkeypatch):
+    _fill_tally_all_ok()
+    mma.tally["caspar"]["renamed_cause"] += 1
+    with pytest.raises(RuntimeError, match="renamed_cause"):
+        mma.build_artifact(
+            mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+        )
+
+
+def test_prepare_workspace_turns_a_timeout_into_one_line_naming_it(monkeypatch, tmp_path):
+    seen = {}
+
+    def hangs(command, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        raise mma.subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+
+    monkeypatch.setattr(mma.subprocess, "run", hangs)
+    with pytest.raises(RuntimeError, match=str(mma.OLLAMA_INIT_TIMEOUT_SECONDS)) as exc:
+        mma.prepare_workspace(tmp_path)
+    assert seen["timeout"] == mma.OLLAMA_INIT_TIMEOUT_SECONDS
+    assert "\n" not in str(exc.value)
