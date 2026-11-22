@@ -38,7 +38,7 @@ from magi_rs_trio import (
     _stderr_tail,
     redact_captured,
 )
-from subprocess_utils import reap_and_drain_stderr
+from subprocess_utils import PROC_STDERR_DRAIN_TIMEOUT, reap_and_drain_stderr
 from trio_executor import TrioExecutor
 
 __all__ = [
@@ -282,6 +282,15 @@ class MagiRsCodeReview(TrioExecutor):
             # with a bounded wait that warns instead of raising, and hands back
             # what stderr still held.
             err.extend(await reap_and_drain_stderr(process))
+            # A complete envelope may sit written but unread in the pipe: take what is left
+            # (bounded, like stderr) before judging the output complete or not.
+            assert process.stdout is not None
+            try:
+                out.extend(
+                    await asyncio.wait_for(process.stdout.read(), timeout=PROC_STDERR_DRAIN_TIMEOUT)
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                pass  # the pipe never closed: judge what was read
             _emit(on_state, _TRIO_NODE, "timeout")
         stdout, stderr = (
             redact_captured(self._key, bytes(out)),
