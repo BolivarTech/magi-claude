@@ -116,6 +116,10 @@ DEFAULT_REPORT_FILENAME = "marker-adherence-report.json"
 #: same lens.
 DEFAULT_MODE = "analysis"
 
+#: The only mode an artifact may certify: the v8 baseline measures ``analysis`` (a different
+#: mode is a different lens, and the gate must not accept it as the same series).
+CERTIFIED_MODE = DEFAULT_MODE
+
 #: Artifact schema. v8 opens a new baseline: 7.x measured ``code-review`` bundles, so its
 #: series is not comparable and ``check_release_gate`` rejects it.
 MEASUREMENT_SCHEMA = "v8"
@@ -695,6 +699,12 @@ def check_release_gate(
     except json.JSONDecodeError as exc:
         return False, f"marker-adherence report at {report_path} is not valid JSON: {exc}"
 
+    if report.get("mode") != CERTIFIED_MODE:
+        return False, (
+            f"marker-adherence report at {report_path} measured mode {report.get('mode')!r}, "
+            f"not {CERTIFIED_MODE!r} -- re-run the measurement"
+        )
+
     if report.get("schema") != MEASUREMENT_SCHEMA:
         return False, (
             f"marker-adherence report at {report_path} has schema {report.get('schema')!r}, "
@@ -827,6 +837,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.ollama_bundle and not args.claude_bundle:
         print(
             "measure: pass at least one --ollama-bundle or --claude-bundle",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.ollama_bundle and args.mode != CERTIFIED_MODE:
+        print(
+            f"measure: --ollama-bundle runs measure only --mode {CERTIFIED_MODE} "
+            f"(got {args.mode!r})",
             file=sys.stderr,
         )
         return 1
