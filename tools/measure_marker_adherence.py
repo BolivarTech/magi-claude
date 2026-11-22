@@ -87,7 +87,7 @@ from retry_feedback import (  # noqa: E402
     retry_feedback_cause,
 )
 from run_magi import AGENTS  # noqa: E402
-from subprocess_utils import windows_kill_tree  # noqa: E402
+from subprocess_utils import PROC_WAIT_REAP_TIMEOUT, windows_kill_tree  # noqa: E402
 from verdict_markers import VerdictExtractionError, VerdictSentinel  # noqa: E402
 
 #: The three mage seats, in a fixed order. Single source of truth for BOTH the
@@ -468,6 +468,36 @@ def resolve_tool_timeout(explicit: int | None, *, ollama: bool) -> int:
     return DEFAULT_TIMEOUT_SECONDS
 
 
+def _kill_init_tree(process: "subprocess.Popen[bytes]") -> None:
+    """Kill ``--ollama-init`` and its descendants, then reap it within a bound.
+
+    ``windows_kill_tree`` is best-effort, so ``process.kill()`` always follows it; on
+    Windows the ``magi-rs init`` grandchild would otherwise outlive the child and keep the
+    workspace files open, so the scratch directory could not be removed. The reap is bounded
+    by ``PROC_WAIT_REAP_TIMEOUT``; if it also expires, one warning goes to stderr.
+
+    Args:
+        process: The running ``--ollama-init`` child.
+
+    Side effects:
+        Terminates processes; may print one warning to stderr.
+    """
+    if sys.platform == "win32":
+        windows_kill_tree(process.pid)
+    try:
+        process.kill()
+    except OSError:  # already gone
+        pass
+    try:
+        process.wait(timeout=PROC_WAIT_REAP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(
+            f"WARNING: --ollama-init (pid {process.pid}) did not exit within "
+            f"{PROC_WAIT_REAP_TIMEOUT}s of being killed; it may be orphaned.",
+            file=sys.stderr,
+        )
+
+
 def prepare_workspace(scratch: Path) -> Path:
     """Create a fresh workspace with its own ``.magi/`` for ``--ollama`` runs (PM-C-5).
 
@@ -486,24 +516,19 @@ def prepare_workspace(scratch: Path) -> Path:
             exceeds :data:`OLLAMA_INIT_TIMEOUT_SECONDS` (the message names the timeout).
     """
     workspace = Path(tempfile.mkdtemp(prefix=WORKSPACE_PREFIX, dir=scratch))
-    process = subprocess.Popen(
-        [sys.executable, str(_RUN_MAGI_PATH), "--ollama-init"], cwd=workspace
-    )
-    try:
-        process.communicate(timeout=OLLAMA_INIT_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as exc:
-        # ``Popen.kill`` ends only the direct child; on Windows the ``magi-rs init``
-        # grandchild would outlive it and keep the workspace files open, so the scratch
-        # directory could not be removed. Kill the whole tree, then reap.
-        if sys.platform == "win32":
-            windows_kill_tree(process.pid)
-        else:
-            process.kill()
-        process.communicate()
-        raise RuntimeError(
-            f"--ollama-init did not finish within {OLLAMA_INIT_TIMEOUT_SECONDS}s while "
-            f"preparing the measurement workspace {workspace}"
-        ) from exc
+    command = [sys.executable, str(_RUN_MAGI_PATH), "--ollama-init"]
+    with subprocess.Popen(command, cwd=workspace) as process:
+        try:
+            process.communicate(timeout=OLLAMA_INIT_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            _kill_init_tree(process)
+            raise RuntimeError(
+                f"--ollama-init did not finish within {OLLAMA_INIT_TIMEOUT_SECONDS}s while "
+                f"preparing the measurement workspace {workspace}"
+            ) from exc
+        except BaseException:
+            _kill_init_tree(process)  # Ctrl-C and friends: never leave the tree behind
+            raise
     if process.returncode != 0:
         raise RuntimeError(
             f"--ollama-init failed with exit code {process.returncode} while preparing "
