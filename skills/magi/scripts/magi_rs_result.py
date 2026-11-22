@@ -211,6 +211,10 @@ class MemoryContractError(MagiRsContractError):
 
 #: ``code_review`` flags that must be JSON booleans when present.
 _REVIEW_FLAGS = ("without_memory", "without_embedder")
+#: ``code_review`` counts that must be non-negative JSON integers when present (a ``bool`` is not).
+_REVIEW_COUNTS = ("batches_planned", "batches_completed", "undelivered_units_unlisted")
+#: ``code_review`` loss fields that must be JSON arrays when present.
+_REVIEW_LISTS = ("failed_batches", "undelivered_units")
 #: ``code_review`` keys copied into :meth:`CodeReviewResult.effort`.
 _EFFORT_FROM_REVIEW = ("batches_planned", "batches_completed", "gate_questions", "judged_fraction")
 #: Per-batch keys copied into ``tokens_by_batch`` (``index`` is the batch number, which a failed batch leaves a gap in).
@@ -316,7 +320,8 @@ class CodeReviewResult:
         Raises:
             MemoryContractError: ``code_review.without_memory`` is true.
             MagiRsContractError: Any :meth:`ConsultResult.from_json` failure, or
-                ``code_review`` absent or not an object.
+                ``code_review`` absent or not an object, or one of its flags, counts or
+                loss lists mistyped (the degrading causes read them, so they fail closed).
         """
         consult = ConsultResult.from_json(raw)
         envelope: dict[str, Any] = json.loads(raw)
@@ -327,6 +332,20 @@ class CodeReviewResult:
             if flag in review and not isinstance(review[flag], bool):
                 raise MagiRsContractError(
                     f"magi-rs 'code_review.{flag}' is not a JSON boolean: an off-contract envelope"
+                )
+        for count in _REVIEW_COUNTS:
+            value = review.get(count)
+            if count in review and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                raise MagiRsContractError(
+                    f"magi-rs 'code_review.{count}' is not a non-negative integer: "
+                    "an off-contract envelope"
+                )
+        for name in _REVIEW_LISTS:
+            if name in review and not isinstance(review[name], list):
+                raise MagiRsContractError(
+                    f"magi-rs 'code_review.{name}' is not a list: an off-contract envelope"
                 )
         if review.get("without_memory") is True:
             raise MemoryContractError(
