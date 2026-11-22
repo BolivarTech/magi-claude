@@ -307,7 +307,7 @@ def test_the_timeout_rejection_marker_is_pinned_to_magi_rs_wording():
 class _TwoChunkStdout:
     """A stdout that is silent until released, then yields two chunks and never closes."""
 
-    def __init__(self, chunks):
+    def __init__(self, chunks: list[bytes]) -> None:
         self._chunks, self.released = list(chunks), asyncio.Event()
 
     async def read(self, n=-1):

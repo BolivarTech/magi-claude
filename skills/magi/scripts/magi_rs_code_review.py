@@ -105,6 +105,31 @@ def build_review_argv(
     ]
 
 
+async def _drain_into(stream: asyncio.StreamReader, sink: bytearray) -> None:
+    """Read what is left of ``stream`` into ``sink`` under ONE deadline.
+
+    Chunk by chunk, so a deadline that cancels a pending read cannot discard chunks that
+    were already consumed: everything read before the deadline stays in ``sink``.
+
+    Args:
+        stream: The killed child's stdout.
+        sink: Receives the bytes read.
+
+    Complexity: O(n) in the bytes left in the pipe; the wait is bounded by
+    ``PROC_STDERR_DRAIN_TIMEOUT`` in total.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + PROC_STDERR_DRAIN_TIMEOUT
+    while (remaining := deadline - loop.time()) > 0:
+        try:
+            chunk = await asyncio.wait_for(stream.read(_STREAM_CHUNK_BYTES), timeout=remaining)
+        except (asyncio.TimeoutError, TimeoutError):
+            return  # the pipe never closed: judge what was read
+        if not chunk:
+            return  # EOF
+        sink.extend(chunk)
+
+
 class MagiRsCodeReview(TrioExecutor):
     """Run one ``magi-rs code-review`` and return the three validated verdicts.
 
@@ -289,12 +314,7 @@ class MagiRsCodeReview(TrioExecutor):
             # A complete envelope may sit written but unread in the pipe: take what is left
             # (bounded, like stderr) before judging the output complete or not.
             assert process.stdout is not None
-            try:
-                out.extend(
-                    await asyncio.wait_for(process.stdout.read(), timeout=PROC_STDERR_DRAIN_TIMEOUT)
-                )
-            except (asyncio.TimeoutError, TimeoutError):
-                pass  # the pipe never closed: judge what was read
+            await _drain_into(process.stdout, out)
             emit_state(on_state, _TRIO_NODE, "timeout")
         stdout, stderr = (
             redact_captured(self._key, bytes(out)),
