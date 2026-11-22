@@ -1036,12 +1036,10 @@ def test_a_timed_out_init_has_its_whole_tree_killed_on_windows(monkeypatch, tmp_
 
 def test_a_timed_out_init_is_killed_directly_off_windows(monkeypatch, tmp_path):
     started = _fake_popen(monkeypatch, hangs=True)
-    killed = []
-    monkeypatch.setattr(mma, "windows_kill_tree", killed.append)
-    monkeypatch.setattr(mma.sys, "platform", "linux")
+    _patch_posix_group_kill(monkeypatch)  # never a real killpg on the fake pid
     with pytest.raises(RuntimeError):
         mma.prepare_workspace(tmp_path)
-    assert killed == [] and started[0].killed is True
+    assert started[0].killed is True
 
 
 def test_an_init_that_survives_the_kill_warns_and_still_raises_without_hanging(
@@ -1135,4 +1133,4 @@ def test_the_init_starts_its_own_session_on_posix_only(monkeypatch, tmp_path):
     started = _fake_popen(monkeypatch)
     monkeypatch.setattr(mma.sys, "platform", "win32")
     mma.prepare_workspace(tmp_path)
-    assert "start_new_session" not in started[0].kwargs
+    assert started[0].kwargs.get("start_new_session") is False

@@ -61,6 +61,8 @@ import argparse
 import collections
 import hashlib
 import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -480,10 +482,12 @@ def resolve_tool_timeout(explicit: int | None, *, ollama: bool) -> int:
 def _kill_init_tree(process: "subprocess.Popen[bytes]") -> None:
     """Kill ``--ollama-init`` and its descendants, then reap it within a bound.
 
-    ``windows_kill_tree`` is best-effort, so ``process.kill()`` always follows it; on
-    Windows the ``magi-rs init`` grandchild would otherwise outlive the child and keep the
-    workspace files open, so the scratch directory could not be removed. The reap is bounded
-    by ``PROC_WAIT_REAP_TIMEOUT``; if it also expires, one warning goes to stderr.
+    On Windows ``windows_kill_tree`` kills the tree (best-effort); on POSIX the child was
+    started in its own session, so its whole process group gets SIGKILL. In both cases
+    ``process.kill()`` always follows, because without it the ``magi-rs init`` grandchild
+    could outlive the child and keep the workspace files open, and the scratch directory
+    could not be removed. The reap is bounded by ``PROC_WAIT_REAP_TIMEOUT``; if it also
+    expires, one warning goes to stderr.
 
     Args:
         process: The running ``--ollama-init`` child.
@@ -493,6 +497,11 @@ def _kill_init_tree(process: "subprocess.Popen[bytes]") -> None:
     """
     if sys.platform == "win32":
         windows_kill_tree(process.pid)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:  # the group is already gone (ProcessLookupError is an OSError)
+            pass
     try:
         process.kill()
     except OSError:  # already gone
@@ -528,7 +537,8 @@ def prepare_workspace(scratch: Path) -> Path:
     command = [sys.executable, str(_RUN_MAGI_PATH), "--ollama-init"]
     # No ``with``: ``Popen.__exit__`` waits with NO timeout, which would hang on a child that
     # survived the bounded kill. There are no pipes to close, so nothing else is lost.
-    process = subprocess.Popen(command, cwd=workspace)
+    # POSIX: a session of its own, so a timeout can kill the whole group (see _kill_init_tree).
+    process = subprocess.Popen(command, cwd=workspace, start_new_session=sys.platform != "win32")
     try:
         process.communicate(timeout=OLLAMA_INIT_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
