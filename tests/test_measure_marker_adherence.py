@@ -923,3 +923,31 @@ def test_an_unknown_magi_rs_cause_is_rejected_not_dropped(tmp_path):
 
     with pytest.raises(ValueError, match="brand-new-cause"):
         mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate))
+
+
+def test_an_ollama_measurement_refuses_a_mode_other_than_analysis(monkeypatch, tmp_path, capsys):
+    # Loop 1 m4: the v8 baseline is `analysis` (DIR-6); another mode measures another lens.
+    _, seen, bundle = _record_runs(monkeypatch, tmp_path)
+    code = mma.main(
+        [
+            "measure",
+            "--ollama-bundle",
+            str(bundle),
+            "--mode",
+            "design",
+            "--out",
+            str(tmp_path / "out.json"),
+        ]
+    )
+    assert code == 1 and seen == []
+    err = capsys.readouterr().err
+    assert "analysis" in err and len(err.strip().splitlines()) == 1
+
+
+def test_check_rejects_an_artifact_whose_mode_is_not_analysis(tmp_path):
+    report_path = tmp_path / "report.json"
+    _write_report(report_path, mode="design")
+
+    passed, message = mma.check_release_gate(report_path, mma._REPO_ROOT, mma._AGENTS_DIR)
+
+    assert not passed and "mode" in message and "analysis" in message
