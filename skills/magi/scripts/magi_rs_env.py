@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 8.0.0
+# Date: 2026-11-21
 """Build the environment handed to the ``magi-rs`` child process.
 
 The environment is built by ALLOWLIST: only what is declared here is inherited,
@@ -16,6 +16,8 @@ closed by construction.
 from __future__ import annotations
 
 from collections.abc import Mapping
+
+from magi_key import MagiKey
 
 _PLATFORM_VARIABLES = (
     "PATH",
@@ -76,6 +78,9 @@ they are left OUT deliberately: none of them changes how ``magi-rs`` formats
 anything this plugin reads, and an allowlist grows by evidence of a run that
 failed, never by completeness for its own sake."""
 
+PASSPHRASE_VARIABLE = "MAGI_PASSPHRASE"
+"""The one variable ``magi-rs`` reads its passphrase from; injected, never inherited."""
+
 ALLOWED_VARIABLES = frozenset(
     _PLATFORM_VARIABLES + _PROXY_VARIABLES + _CA_VARIABLES + _OLLAMA_VARIABLES + _LOCALE_VARIABLES
 )
@@ -100,16 +105,19 @@ class EnvironmentPolicy:
     """
 
     @staticmethod
-    def build(parent_env: Mapping[str, str]) -> dict[str, str]:
+    def build(parent_env: Mapping[str, str], passphrase: MagiKey | None = None) -> dict[str, str]:
         """Project the parent environment onto the allowlist.
 
         Args:
             parent_env: Usually ``os.environ``.
+            passphrase: The key to hand the child as ``MAGI_PASSPHRASE``, or
+                ``None`` to hand it none.
 
         Returns:
             A new dict holding only the declared variables that were present.
-            ``MAGI_PASSPHRASE`` is absent by construction -- it is not declared,
-            so it is never copied.
+            ``MAGI_PASSPHRASE`` is the injected key or absent -- never the
+            parent's value, since it is not allowlisted. No API-key variable
+            is allowlisted either: the vault is their only source.
 
         Side effects:
             None. The parent environment is not modified.
@@ -117,7 +125,10 @@ class EnvironmentPolicy:
         Complexity:
             O(n) in the number of variables in ``parent_env``, once per launch.
         """
-        return {name: value for name, value in parent_env.items() if name in ALLOWED_VARIABLES}
+        child_env = {name: value for name, value in parent_env.items() if name in ALLOWED_VARIABLES}
+        if passphrase is not None:
+            child_env[PASSPHRASE_VARIABLE] = passphrase.reveal()
+        return child_env
 
     @staticmethod
     def withheld(parent_env: Mapping[str, str]) -> list[str]:

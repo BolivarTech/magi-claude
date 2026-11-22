@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 7.0.1
-# Date: 2026-10-14
+# Version: 8.0.0
+# Date: 2026-11-21
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
 Launches Melchior, Balthasar, and Caspar in parallel using asyncio,
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 from collections import Counter, defaultdict
 import os
@@ -62,9 +63,8 @@ from bundle_segmenter import (  # noqa: E402
     SegmentTooLargeError,
     mentions,
 )
-from magi_rs_paths import bin_dir, pin_path, plugin_root  # noqa: E402
-from magi_rs_pin import Pin  # noqa: E402
-from magi_rs_result import ConsultResult, describe_reasoning  # noqa: E402
+from magi_rs_code_review import MagiRsCodeReview  # noqa: E402
+from magi_rs_result import CodeReviewResult, ConsultResult, describe_reasoning  # noqa: E402
 from magi_rs_trio import (  # noqa: E402
     DEFAULT_OLLAMA_TIMEOUT_SECONDS,
     FAIL_CLOSED_ERRORS,
@@ -73,7 +73,34 @@ from magi_rs_trio import (  # noqa: E402
     MagiRsTrio,
 )
 from magi_rs_trio import resolve_timeout as resolve_magi_rs_timeout  # noqa: E402
-from ollama_init import run_ollama_init  # noqa: E402
+from magi_key_permissions import default_key_store  # noqa: E402
+from magi_rs_bootstrap import (  # noqa: E402
+    plugin_binary_location,
+    verified_plugin_executable,
+)
+from magi_rs_preflight import ProjectPreflight  # noqa: E402
+from magi_key import MagiKey  # noqa: E402
+from magi_rs_targets import DEFAULT_BASE, InvalidTargetError, ReviewTarget  # noqa: E402
+from magi_key_rotation import (  # noqa: E402
+    KeyRotation,
+    magi_dir_problem,
+    rotation_backup_root,
+    RotationFailedError,
+    RotationNotAuthorisedError,
+)
+from magi_rs_vault import VAULT_KEY_NAMES, VaultClient, VaultValueEncodingError  # noqa: E402
+from cli_commands import (  # noqa: E402
+    INIT_DEST,
+    INIT_FLAG,
+    ROTATE_KEY_DEST,
+    ROTATE_KEY_FLAG,
+    VAULT_SET_DEST,
+    VAULT_SET_FLAG,
+    YES_FLAG,
+    command,
+)
+from ollama_init import MagiDirExistsError, run_ollama_init  # noqa: E402
+from one_line import one_line  # noqa: E402
 from run_lock import (  # noqa: E402
     refresh_lock,
     remove_lock,
@@ -143,12 +170,21 @@ VALID_MODES = ("code-review", "design", "analysis")
 #: Attempts per model, by default: the original + 1 retry with corrective feedback.
 DEFAULT_MAX_ATTEMPTS = 2
 
+#: Default ``--enrich-max-chars``: the cap on the enriched code-review context.
+DEFAULT_ENRICH_MAX_CHARS = 512_000
+
 #: The bounds themselves live in ``validate`` and are RE-EXPORTED here so the two doors --
 #: this flag and any direct ``run_orchestrator`` caller -- cannot disagree.
 #: **This is not paranoia:** ``--max-attempts 1000`` (one zero too many)
 #: turns a stubborn mage into a thousand calls -- expensive on Ollama, where `:cloud` is a paid
 #: tier, and hundreds of dollars on Claude. The comment that used to sit here claimed the 5.x
 #: TOML "already validates this way". It did not: it accepted 1000 (MAGI gate, Balthasar).
+
+
+_VAULT_VALUE_PROMPT = "API key value (input hidden): "
+_USAGE_EXIT_CODE = 2
+"""The exit status of an unusable invocation, as argparse uses."""
+_LINE_ENDINGS = "\r\n"
 
 
 def _max_attempts(raw: str) -> int:
@@ -225,6 +261,39 @@ def _resolve_timeout(flag: int | None) -> float:
     if flag is not None:
         return float(flag)
     return DEFAULT_TIMEOUT_SECONDS
+
+
+def _check_subcommands(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject a standalone subcommand mixed with a mode, an input, ``--ollama`` or another one, and a stray ``--yes``.
+
+    The standalone subcommands are ``--check-prompts``, ``--ollama-init``,
+    ``--ollama-vault-set`` and ``--ollama-rotate-key``. A destructive rotation (or an initialisation) must
+    never be honoured from any position of a normal run, so the mix is an
+    argument error before anything runs.
+
+    Args:
+        parser: Reports the error.
+        args: The parsed arguments.
+
+    Raises:
+        SystemExit: Exit code 2, via ``parser.error``, for any invalid mix.
+    """
+    chosen = [
+        flag
+        for flag, given in (
+            ("--check-prompts", args.check_prompts),
+            (INIT_FLAG, args.ollama_init),
+            (VAULT_SET_FLAG, args.ollama_vault_set is not None),
+            (ROTATE_KEY_FLAG, args.ollama_rotate_key),
+        )
+        if given
+    ]
+    if len(chosen) > 1:
+        parser.error(f"{' and '.join(chosen)} cannot be combined; run one at a time")
+    if args.yes and not args.ollama_rotate_key:
+        parser.error(f"{YES_FLAG} applies only to {ROTATE_KEY_FLAG}")
+    if chosen and (args.mode is not None or args.input is not None or args.ollama):
+        parser.error(f"{chosen[0]} takes no mode, input or --ollama")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -329,8 +398,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--base",
-        default="main",
-        help="Base ref for code-review context enrichment (default: main)",
+        default=None,
+        help=(
+            f"Base ref of the diff (default: {DEFAULT_BASE}): the enrichment base of the Claude path, and "
+            "with code-review --ollama the base of the branch to review (needs --head)."
+        ),
+    )
+    parser.add_argument("--commit", help="With code-review --ollama: review this commit.")
+    parser.add_argument(
+        "--from",
+        dest="from_",
+        help="With code-review --ollama: start of the range to review (needs --to).",
+    )
+    parser.add_argument(
+        "--to", help="With code-review --ollama: end of the range to review (needs --from)."
+    )
+    parser.add_argument(
+        "--head", help="With code-review --ollama: head of the branch to review (needs --base)."
+    )
+    parser.add_argument(
+        "--uncommitted",
+        action="store_true",
+        help="With code-review --ollama: review staged, unstaged and untracked changes.",
     )
     parser.add_argument(
         "--no-enrich",
@@ -341,13 +430,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--enrich-max-chars",
         type=int,
-        default=512_000,
-        help="Max chars of enriched code-review context (default: 512000)",
+        # None sentinel, like --max-attempts: "was it passed?" is asked below.
+        default=None,
+        help=f"Max chars of enriched code-review context (default: {DEFAULT_ENRICH_MAX_CHARS})",
     )
     parser.add_argument(
         "--warn-input-tokens",
         type=int,
-        default=WARN_INPUT_TOKENS,
+        default=None,
         help=(
             f"Warn when estimated input tokens exceed this value "
             f"(default: {WARN_INPUT_TOKENS}). Warning reflects the RAW input "
@@ -364,9 +454,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--ollama-init",
+        INIT_FLAG,
+        dest=INIT_DEST,
         action="store_true",
         help="Initialise this project for magi-rs (`magi-rs init -w <cwd>`, creates .magi/) and exit.",
+    )
+    parser.add_argument(
+        VAULT_SET_FLAG,
+        dest=VAULT_SET_DEST,
+        metavar="NAME",
+        choices=VAULT_KEY_NAMES,
+        default=None,
+        help=(
+            f"Store one API key in the magi-rs vault of .magi/ and exit. NAME is one of "
+            f"{', '.join(VAULT_KEY_NAMES)}; the value is read from stdin, or from a hidden prompt at a "
+            "terminal, never from the command line. Takes no mode, input or --ollama."
+        ),
+    )
+    parser.add_argument(
+        ROTATE_KEY_FLAG,
+        dest=ROTATE_KEY_DEST,
+        action="store_true",
+        help=(
+            "Replace an exposed magi-rs key: move .magi/ to a backup outside the project, create a new "
+            "one and list the API keys to revoke, then exit. Asks for confirmation at a terminal; "
+            f"elsewhere it needs {YES_FLAG}. Takes no mode, input or --ollama."
+        ),
+    )
+    parser.add_argument(
+        YES_FLAG,
+        action="store_true",
+        help=f"With {ROTATE_KEY_FLAG} only: authorise the rotation without asking.",
     )
     # ``model_source`` is declared here with its siblings, not only assigned in
     # the body below: a hand-built Namespace (tests, embedders) would otherwise
@@ -385,14 +503,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "runs (keeping only the one about to be created), or --keep-runs "
             "-1 to disable cleanup entirely."
         )
-    if args.warn_input_tokens <= 0:
+    if args.warn_input_tokens is not None and args.warn_input_tokens <= 0:
         parser.error("--warn-input-tokens must be a positive integer")
-    if not args.check_prompts and (args.mode is None or args.input is None):
+    _check_subcommands(parser, args)
+    standalone = args.ollama_init or args.ollama_vault_set is not None or args.ollama_rotate_key
+    native_review = args.mode == "code-review" and args.ollama
+    target_flags = [
+        flag
+        for flag, given in (
+            ("--commit", args.commit is not None),
+            ("--from", args.from_ is not None),
+            ("--to", args.to is not None),
+            ("--head", args.head is not None),
+            ("--uncommitted", args.uncommitted),
+        )
+        if given
+    ]
+    if target_flags and not native_review:
+        parser.error(f"{', '.join(target_flags)} apply only to code-review --ollama")
+    if (
+        not args.check_prompts
+        and not standalone
+        and (args.mode is None or (args.input is None and not native_review))
+    ):
         parser.error("the following arguments are required: mode, input")
     if args.ollama and args.model is not None:
         parser.error(
             "--model does not apply with --ollama; the trio is declared in .magi/magi.toml "
-            "(run --ollama-init once per project)."
+            f"({command(INIT_FLAG)} once per project)."
         )
     if args.ollama and args.max_attempts is not None:
         # R13/R18: with --ollama, magi-rs owns the retries and the rotation; the flag
@@ -404,8 +542,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "magi-rs owns every retry and rotation (.magi/magi.toml)",
             file=sys.stderr,
         )
+    if native_review:
+        # code-review --ollama delegates the whole review to magi-rs: the plugin neither
+        # enriches nor measures the input, so these Claude-path flags are inert there.
+        inert = [
+            flag
+            for flag, given in (
+                ("--no-enrich", args.enrich is False),
+                ("--enrich-max-chars", args.enrich_max_chars is not None),
+                ("--warn-input-tokens", args.warn_input_tokens is not None),
+            )
+            if given
+        ]
+        if inert:
+            print(
+                f"[!] WARNING: {', '.join(inert)} has no effect with code-review --ollama: "
+                "magi-rs builds the review context itself",
+                file=sys.stderr,
+            )
     if args.max_attempts is None:
         args.max_attempts = DEFAULT_MAX_ATTEMPTS
+    if args.enrich_max_chars is None:
+        args.enrich_max_chars = DEFAULT_ENRICH_MAX_CHARS
+    if args.warn_input_tokens is None:
+        args.warn_input_tokens = WARN_INPUT_TOKENS
     # INVARIANT: --model must stay None when --ollama is set. Do NOT collapse
     # this into `args.model or MODE_DEFAULT_MODELS[...]` — that would silently
     # re-enable `--ollama --model` and feed Ollama a Claude-shaped model name.
@@ -737,14 +897,77 @@ def _select_executor(args: argparse.Namespace, timeout: int) -> MagiRsTrio | Non
     """
     if not args.ollama:
         return None
-    root = plugin_root()
+    pin, directory = plugin_binary_location()
     return MagiRsTrio(
         workdir=os.getcwd(),
         mode=args.mode,
         timeout=timeout,
-        bin_dir=bin_dir(root),
-        pin=Pin.load(pin_path(root)),
+        bin_dir=directory,
+        pin=pin,
     )
+
+
+def _run_git(argv: list[str]) -> str:
+    """Run ``git <argv>`` in the current directory and return its stdout.
+
+    Args:
+        argv: The git arguments, without the leading ``git``.
+
+    Returns:
+        The captured stdout.
+
+    Raises:
+        OSError: ``git`` cannot be started.
+        subprocess.SubprocessError: ``git`` exits non-zero.
+    """
+    return subprocess.run(
+        ["git", *argv], capture_output=True, text=True, check=True, cwd=os.getcwd()
+    ).stdout
+
+
+def _resolve_review_target(args: argparse.Namespace) -> ReviewTarget:
+    """Validate the ``code-review --ollama`` target flags before anything else runs.
+
+    Args:
+        args: Parsed CLI namespace (the target flags and ``.input`` are read).
+
+    Returns:
+        The validated target.
+
+    Raises:
+        InvalidTargetError: The flags do not name one reviewable target.
+    """
+    return ReviewTarget.resolve(
+        path=args.input,
+        commit=args.commit,
+        from_=args.from_,
+        to=args.to,
+        base=args.base,
+        head=args.head,
+        uncommitted=args.uncommitted,
+        workdir=os.getcwd(),
+        forbidden_roots=[rotation_backup_root()],
+        git=_run_git,
+    )
+
+
+def _select_review_executor(target: ReviewTarget, timeout: int) -> MagiRsCodeReview:
+    """Build the native ``code-review`` executor bound to the resolved timeout.
+
+    Args:
+        target: The validated review target.
+        timeout: The wall-clock ceiling already resolved (and reported) for this run.
+
+    Returns:
+        A :class:`MagiRsCodeReview` for the current working directory, whose
+        constructor timeout is the only source of the child's deadline.
+
+    Raises:
+        PluginRootError: ``CLAUDE_PLUGIN_ROOT`` is set but is not a directory.
+        PinFormatError: The shipped pin does not parse.
+    """
+    pin, directory = plugin_binary_location()
+    return MagiRsCodeReview(os.getcwd(), target, timeout, bin_dir=directory, pin=pin)
 
 
 # --- MS4b: segmentation of a bundle that does not fit the consult ceiling ----------------
@@ -1279,6 +1502,22 @@ def _default_agents_dir() -> str:
     return os.path.join(os.path.dirname(script_dir), "agents")
 
 
+def _render_fatal(exc: BaseException) -> str:
+    """Render a fail-closed error as the ONE ``[FATAL]`` line every CLI site prints.
+
+    Every run of whitespace -- newlines included -- collapses to one space, so a
+    multi-line message can never spill a second line.
+
+    Args:
+        exc: The error to render.
+
+    Returns:
+        ``"[FATAL] <message>"`` on a single line, without a newline; the
+        error's class name stands in for an empty message.
+    """
+    return f"[FATAL] {one_line(str(exc)) or type(exc).__name__}"
+
+
 def check_prompts(agents_dir: str) -> None:
     """Validate a directory of agent prompts and exit. The dry run of the startup guard.
 
@@ -1301,7 +1540,7 @@ def check_prompts(agents_dir: str) -> None:
     try:
         AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
     except PromptContractError as exc:
-        print(f"[FATAL] {exc}", file=sys.stderr)
+        print(_render_fatal(exc), file=sys.stderr)
         sys.exit(1)
     print(f"OK: the prompts in {agents_dir} honour the verdict-marker contract.")
     sys.exit(0)
@@ -1348,6 +1587,91 @@ _CLOCK_ROTATIONS_WARNING = (
 """The flag on a timeout at or below the recommended one points at the config:
 recommending the value already in use would contradict itself (measured
 2026-09-29: max_rotations = 0 turns 16820 into a 7005 s per-mage ceiling)."""
+
+
+_REVIEW_BANNER_PREFIX = "|  "
+_NOT_A_LIST = "n/a"
+_MODEL_USED_NOTE = (
+    "the code-review envelope names the trio as one joined string, not per mage; "
+    "no per-mage model is attributed"
+)
+#: One stderr sentence per cause of :attr:`CodeReviewResult.degrading_causes`.
+_DEGRADING_CAUSE_TEXT = {
+    "without_embedder": (
+        "without_embedder: the review ran without the embedder (no documentation or history "
+        "context)."
+    ),
+    "failed_batches": "failed_batches: at least one review batch failed and was not reviewed.",
+    "undelivered_units": "undelivered_units: some changed units never reached the mages.",
+}
+
+
+def format_target_banner(target: ReviewTarget) -> str:
+    """Render the reviewed target for the startup banner.
+
+    Args:
+        target: The validated review target.
+
+    Returns:
+        ``"|  Target: <label>"``.
+    """
+    return f"{_REVIEW_BANNER_PREFIX}Target: {target.label}"
+
+
+def _count(value: Any, unlisted: Any = None) -> Any:
+    """Length of a list field, or ``n/a`` when magi-rs did not send a list.
+
+    Args:
+        value: The (possibly capped) list magi-rs sent.
+        unlisted: The matching ``*_unlisted`` counter; shown as ``N (+M unlisted)`` when positive.
+    """
+    if not isinstance(value, list):
+        return _NOT_A_LIST
+    if isinstance(unlisted, int) and not isinstance(unlisted, bool) and unlisted > 0:
+        return f"{len(value)} (+{unlisted} unlisted)"
+    return len(value)
+
+
+def format_review_banner(result: CodeReviewResult) -> list[str]:
+    """Render the review summary an operator needs (REQ-06), one line per datum.
+
+    Args:
+        result: The parsed code-review result.
+
+    Returns:
+        Banner lines: batches, discarded, filtered by the gate, judged fraction,
+        skipped, masked; plus ``gate stopped``/``gate causes`` (verbatim, never
+        interpreted) and ``without_memory``/``without_embedder`` only when they
+        appear.
+    """
+    review = result.code_review
+    lines = [
+        f"batches: {review.get('batches_completed')}/{review.get('batches_planned')}",
+        f"discarded: {_count(review.get('discarded'))}",
+        f"filtered by the gate: {_count(review.get('filtered'))}",
+        f"judged: {review.get('judged_fraction')}",
+        f"skipped: {_count(review.get('skipped'), review.get('skipped_unlisted'))}",
+        f"masked: {_count(review.get('masked'), review.get('masked_unlisted'))}",
+    ]
+    if review.get("gate_stopped") is not None:
+        lines.append(f"gate stopped: {review.get('gate_stopped')}")
+        lines.append(f"gate causes: {json.dumps(review.get('gate_causes'), sort_keys=True)}")
+    for flag in ("without_memory", "without_embedder"):
+        if review.get(flag) is True:
+            lines.append(flag)
+    return [f"{_REVIEW_BANNER_PREFIX}{line}" for line in lines]
+
+
+def code_review_report_blocks(result: CodeReviewResult) -> dict[str, Any]:
+    """Build the code-review additions to the report's ``magi_rs`` block.
+
+    Args:
+        result: The parsed code-review result.
+
+    Returns:
+        ``{"code_review": <the object, verbatim>, "effort": <result.effort()>}``.
+    """
+    return {"code_review": result.code_review, "effort": result.effort()}
 
 
 def build_report_block(result: ConsultResult, *, timeout_seconds: int) -> dict[str, Any]:
@@ -2083,6 +2407,126 @@ def _write_report_file(report_text: str, out_path: str) -> None:
         raise
 
 
+def vault_set_main(name: str, stdin: IO[str], is_tty: bool) -> int:
+    """``--ollama-vault-set NAME``: store one API key in the magi-rs vault.
+
+    Order matters: the name was validated by argparse (``choices``), then the
+    binary is verified and the key preflighted, and only then is the value read
+    -- so a secret is never typed or piped into a session that was already
+    refused. The value is never placed in argv, printed or logged.
+
+    Args:
+        name: One name from ``VAULT_KEY_NAMES`` (``VaultClient.set`` checks it again).
+        stdin: Where a non-interactive value is read from.
+        is_tty: True when stdin is a terminal; the value is then prompted hidden.
+
+    Returns:
+        0 on success; 1 for a fail-closed error; 2 (a usage error) for an unusable
+        value: empty, blank, with leading or trailing blank space, with a line break,
+        or not encodable as UTF-8.
+    """
+    workdir = os.getcwd()
+    try:
+        executable = verified_plugin_executable()
+        key = ProjectPreflight.require_ready(workdir, default_key_store())
+        value = getpass.getpass(_VAULT_VALUE_PROMPT) if is_tty else stdin.read()
+        value = value.rstrip(_LINE_ENDINGS)
+        if not value:
+            print(f"ERROR: the value for {name} is empty; nothing was stored.", file=sys.stderr)
+            return _USAGE_EXIT_CODE
+        if value != value.strip():
+            # never silently stripped: an API key carries no blank space at either end
+            print(
+                f"ERROR: the value for {name} is blank or has leading or trailing blank space; "
+                "nothing was stored.",
+                file=sys.stderr,
+            )
+            return _USAGE_EXIT_CODE
+        if any(ending in value for ending in _LINE_ENDINGS):
+            print(
+                f"ERROR: the value for {name} contains a line break; nothing was stored "
+                "(pass the key alone, on one line).",
+                file=sys.stderr,
+            )
+            return _USAGE_EXIT_CODE
+        VaultClient(executable, workdir, key).set(name, value)
+    except VaultValueEncodingError as exc:
+        print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
+        return _USAGE_EXIT_CODE
+    except ValidationError as exc:
+        print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - every key/bootstrap error is fail-closed here
+        print(_render_fatal(exc), file=sys.stderr)
+        return 1
+    print(f"{name} stored in the magi-rs vault.")
+    return 0
+
+
+def rotate_main(assume_yes: bool, is_tty: bool) -> int:
+    """``--ollama-rotate-key [--yes]``: replace an exposed key, its database and its vault.
+
+    The binary is verified first, before anything moves, because the rotation
+    ends by running ``magi-rs init`` and ``magi-rs vault ls``. The rotation
+    itself (:class:`magi_key_rotation.KeyRotation`) moves the current
+    ``.magi/`` to a backup outside the working tree and creates a new one; this
+    handler prints where the backup went and which API keys to revoke (names,
+    never values). Neither key is ever printed.
+
+    Args:
+        assume_yes: True when ``--yes`` was given; it authorises without asking.
+        is_tty: True when stdin is a terminal; without ``--yes`` the operator
+            is then asked to confirm.
+
+    Returns:
+        0 on success; 1 when the binary does not verify, the rotation is not
+        authorised or it stopped, or there is no usable ``.magi/`` to rotate (one
+        line on stderr, never a traceback). The ``.magi/`` is checked first, so an
+        operator is never asked to confirm a rotation that cannot happen.
+    """
+    problem = magi_dir_problem(os.getcwd())
+    if problem is not None:
+        print(f"ERROR: {problem}", file=sys.stderr)
+        return 1
+    try:
+        executable = verified_plugin_executable()
+    except Exception as exc:  # noqa: BLE001 - as in vault_set_main: every bootstrap error is fail-closed
+        print(_render_fatal(exc), file=sys.stderr)
+        return 1
+
+    def _vault_ls(workdir: str, key: MagiKey) -> list[str]:
+        """List the vault names under ``workdir`` with the verified binary."""
+        return VaultClient(executable, workdir, key).ls()
+
+    rotation = KeyRotation(default_key_store(), run_ollama_init, _vault_ls)
+    try:
+        report = rotation.rotate(os.getcwd(), assume_yes=assume_yes, is_tty=is_tty)
+    except (RotationNotAuthorisedError, RotationFailedError) as exc:
+        print(f"ERROR: {one_line(str(exc))}", file=sys.stderr)
+        return 1
+    print(
+        f"Key rotated. The old .magi/ is in {report.backup_dir}: destroy it once you no longer need it."
+    )
+    if not report.names_from_vault:
+        why = f" ({report.listing_detail})" if report.listing_detail else ""
+        print(
+            f"The old vault could not be listed exactly{why}, "
+            "so every name it may have held is listed."
+        )
+    if report.names_to_revoke:
+        print(
+            "Treat these API keys as compromised: revoke each one at its provider, then store the new value"
+        )
+        print(f"with {command(VAULT_SET_FLAG, '<NAME>')}:")
+        for name in report.names_to_revoke:
+            print(f"  {name}")
+    else:
+        print(
+            f"The old vault held no API keys; store new ones with {command(VAULT_SET_FLAG, '<NAME>')}."
+        )
+    return 0
+
+
 def main() -> None:
     """CLI entry point for MAGI orchestrator."""
     # Must run BEFORE any ``print`` or ``sys.exit`` — every output
@@ -2091,24 +2535,34 @@ def main() -> None:
     # happened on an earlier print.
     _enable_utf8_console_io()
 
-    # Short-circuit: --ollama-init delegates to ``magi-rs init`` and exits
-    # before parse_args() so that mode/input positional arguments are not
-    # required. We screen sys.argv directly; the flag is unambiguous (no value
-    # follows it). The whole command is ONE call (R5): no config of the
-    # plugin's own is written, nothing under .claude/ is read.
-    if "--ollama-init" in sys.argv[1:]:
+    args = parse_args()
+
+    # The standalone subcommands are dispatched from the PARSED args, so argparse
+    # lists them in --help, expands their abbreviations and rejects any mix with a
+    # mode, an input or each other before anything runs (parse_args). None of
+    # them needs a mode or an input. --ollama-init is ONE call (R5): no config of
+    # the plugin's own is written, nothing under .claude/ is read.
+    if args.ollama_init:
         try:
             output = run_ollama_init(os.getcwd())
+        except MagiDirExistsError as exc:
+            # REQ-12: an initialised project is left untouched, and that is not a failure here.
+            print(exc)
+            sys.exit(0)
         except Exception as exc:  # noqa: BLE001 - every bootstrap error is fatal here
             # The bootstrap's fail-closed errors are siblings of Exception on
             # purpose; at the CLI boundary each of them is a [FATAL] with its
             # own actionable message, never a traceback.
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
         print(output, end="" if output.endswith("\n") else "\n")
         sys.exit(0)
 
-    args = parse_args()
+    # The value of --ollama-vault-set never comes from argv, only its NAME does.
+    if args.ollama_vault_set is not None:
+        sys.exit(vault_set_main(args.ollama_vault_set, sys.stdin, sys.stdin.isatty()))
+    if args.ollama_rotate_key:
+        sys.exit(rotate_main(args.yes, sys.stdin.isatty()))
 
     # A dry run of the prompt guard: no mode, no input, no tokens. Decided from the PARSED
     # args, not by scanning sys.argv -- a raw scan duplicates the flag name as a magic string
@@ -2116,6 +2570,17 @@ def main() -> None:
     # and then quietly ignored (MAGI gate, Balthasar).
     if args.check_prompts:
         check_prompts(_default_agents_dir())
+
+    # ``code-review --ollama`` is a native magi-rs review: its target (a path or a git
+    # revision) is validated FIRST (CP2-M20), so a bad one never touches the binary,
+    # the key or the network. No input is read, enriched, guarded or segmented there.
+    review_target: ReviewTarget | None = None
+    if args.ollama and args.mode == "code-review":
+        try:
+            review_target = _resolve_review_target(args)
+        except InvalidTargetError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     # v6: the open-weight executor is chosen and verified HERE, before any input is
     # read -- see _select_executor. ``executor`` stays None on the Claude path.
@@ -2137,7 +2602,11 @@ def main() -> None:
         if timeout_warning is not None:
             print(f"[!] WARNING: {timeout_warning}", file=sys.stderr)
         try:
-            executor = _select_executor(args, resolved_timeout)
+            executor = (
+                _select_review_executor(review_target, resolved_timeout)
+                if review_target is not None
+                else _select_executor(args, resolved_timeout)
+            )
             # Bootstrap + project preflight BEFORE the payload is built (spec
             # §3.2): both are fail-closed and free; a bundle built for a run
             # that cannot start is pure waste. (``None`` is the Claude path's
@@ -2149,43 +2618,49 @@ def main() -> None:
             # the bootstrap's, ProjectNotInitialisedError): at the CLI boundary
             # each is a [FATAL] with its own message, never a traceback, exactly
             # like --ollama-init.
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
 
-    try:
-        input_content, input_label = _load_input_content(args.input)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
+    input_content, input_label = "", ""
+    est_tokens, oversize, raw_input_chars = 0, False, 0
+    review_diff, enrich_note, prompt = "", None, ""
+    if review_target is None:
+        try:
+            input_content, input_label = _load_input_content(args.input)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
 
-    # Input-size telemetry: estimate token footprint and flag oversized inputs.
-    # Pure/total — never raises. Runs after load so the enriched content is NOT
-    # measured here (enrichment happens below); we measure the raw user input.
-    est_tokens, oversize = check_input_size(input_content, args.warn_input_tokens)
-    raw_input_chars = len(input_content)  # capture BEFORE _maybe_enrich reassigns input_content
+        # Input-size telemetry: estimate token footprint and flag oversized inputs.
+        # Pure/total — never raises. Runs after load so the enriched content is NOT
+        # measured here (enrichment happens below); we measure the raw user input.
+        est_tokens, oversize = check_input_size(input_content, args.warn_input_tokens)
+        raw_input_chars = len(input_content)  # capture BEFORE _maybe_enrich reassigns input_content
 
-    # A2: resolve the review diff ONCE (code-review only) and thread the same
-    # value to BOTH the enrichment path and the finding guard so they can never
-    # diverge. ``resolve_diff`` is TOTAL (returns "" on any failure); "" makes
-    # the guard a no-op.
-    review_diff = (
-        resolve_diff(input_content, os.getcwd(), args.base) if args.mode == "code-review" else ""
-    )
+        # A2: resolve the review diff ONCE (code-review only) and thread the same
+        # value to BOTH the enrichment path and the finding guard so they can never
+        # diverge. ``resolve_diff`` is TOTAL (returns "" on any failure); "" makes
+        # the guard a no-op.
+        review_diff = (
+            resolve_diff(input_content, os.getcwd(), args.base or DEFAULT_BASE)
+            if args.mode == "code-review"
+            else ""
+        )
 
-    input_content, enrich_note = _maybe_enrich(
-        args.mode,
-        input_content,
-        base_ref=args.base,
-        enrich=args.enrich,
-        max_chars=args.enrich_max_chars,
-        diff=review_diff,
-    )
+        input_content, enrich_note = _maybe_enrich(
+            args.mode,
+            input_content,
+            base_ref=args.base or DEFAULT_BASE,
+            enrich=args.enrich,
+            max_chars=args.enrich_max_chars,
+            diff=review_diff,
+        )
 
-    try:
-        prompt = build_user_prompt(args.mode, input_content)
-    except InvalidInputError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
+        try:
+            prompt = build_user_prompt(args.mode, input_content)
+        except InvalidInputError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     agents_dir = _default_agents_dir()
 
@@ -2215,7 +2690,7 @@ def main() -> None:
     try:
         AgentPromptGuard(Path(agents_dir), VerdictSentinel()).check()
     except PromptContractError as exc:
-        print(f"[FATAL] {exc}", file=sys.stderr)
+        print(_render_fatal(exc), file=sys.stderr)
         sys.exit(1)
 
     if not args.ollama:
@@ -2247,7 +2722,10 @@ def main() -> None:
     print("|          MAGI SYSTEM -- INITIALIZING              |")
     print("+==================================================+")
     print(f"|  Mode: {args.mode}")
-    print(f"|  Input: {input_label}")
+    if review_target is not None:
+        print(format_target_banner(review_target))
+    else:
+        print(f"|  Input: {input_label}")
     if enrich_note is not None:
         print(f"|  Context: {enrich_note}")
     if args.ollama:
@@ -2264,7 +2742,7 @@ def main() -> None:
     # is split at section boundaries and evaluated one segment at a time. The whole
     # prompt is what travels, so the wrapper sanitize adds is charged against the
     # ceiling. Decided BEFORE anything runs; a section too large to fit is refused.
-    if executor is not None:
+    if executor is not None and review_target is None:
         sections = split_sections(input_content)
         wrapper_bytes = len(build_user_prompt(args.mode, "").encode("utf-8"))
         try:
@@ -2276,7 +2754,7 @@ def main() -> None:
         except SegmentTooLargeError as exc:
             if is_temp_dir:
                 shutil.rmtree(output_dir, ignore_errors=True)
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
         if segment_plan.is_segmented:
             announce_segmentation(
@@ -2300,7 +2778,7 @@ def main() -> None:
                 # Only the bootstrap's fail-closed family reaches here: a segment's
                 # own failures are tabled inside run_segmented (§6.2.5).
                 if isinstance(exc, FAIL_CLOSED_ERRORS):
-                    print(f"[FATAL] {exc}", file=sys.stderr)
+                    print(_render_fatal(exc), file=sys.stderr)
                     sys.exit(1)
                 raise
             print(f"\nFull report saved to: {os.path.join(output_dir, 'magi-report.json')}")
@@ -2338,7 +2816,7 @@ def main() -> None:
         if isinstance(exc, FAIL_CLOSED_ERRORS):
             # The preflight run_trio repeats (R4) failed differently from the
             # one main() ran: same rendering as the first, never a traceback.
-            print(f"[FATAL] {exc}", file=sys.stderr)
+            print(_render_fatal(exc), file=sys.stderr)
             sys.exit(1)
         if isinstance(exc, (MagiRsProcessError, MagiRsContractError)):
             # BDD-14a/14b/14d: the trio never formed (the child died, timed out,
@@ -2353,20 +2831,23 @@ def main() -> None:
     # mode-agnostic (it never receives the diff); the guard runs here, on the
     # successful agents, using the single resolved ``review_diff`` shared with
     # enrichment. ``files`` empty (non-code-review or no diff) makes it a no-op.
-    files, ranges = _diff_files_and_ranges(review_diff)
-    # FIX 3b: emit ONE stderr line in code-review so a no-diff no-op is visible.
-    if args.mode == "code-review":
-        if files:
-            print(f"[guard] active: {len(files)} file(s) in diff", file=sys.stderr)
-        else:
-            print("[guard] skipped: no resolvable diff", file=sys.stderr)
-    # F4: collect the guard's observable effect into the report so an agent that
-    # votes but has all its findings dropped is explained in the audit artifact.
-    guard_summary: dict[str, Any] = {}
-    report["agents"] = _apply_finding_guard(
-        report["agents"], args.mode, files, ranges, summary=guard_summary
-    )
-    report["guard"] = guard_summary
+    # The native review has no plugin-side diff to ground against: magi-rs judges
+    # its own findings (REQ-04).
+    if review_target is None:
+        files, ranges = _diff_files_and_ranges(review_diff)
+        # FIX 3b: emit ONE stderr line in code-review so a no-diff no-op is visible.
+        if args.mode == "code-review":
+            if files:
+                print(f"[guard] active: {len(files)} file(s) in diff", file=sys.stderr)
+            else:
+                print("[guard] skipped: no resolvable diff", file=sys.stderr)
+        # F4: collect the guard's observable effect into the report so an agent that
+        # votes but has all its findings dropped is explained in the audit artifact.
+        guard_summary: dict[str, Any] = {}
+        report["agents"] = _apply_finding_guard(
+            report["agents"], args.mode, files, ranges, summary=guard_summary
+        )
+        report["guard"] = guard_summary
 
     # A5: outside code-review there is no diff to ground file/line against, so
     # strip them to ``None`` — this forces title-based dedup for design/analysis
@@ -2386,7 +2867,7 @@ def main() -> None:
     # ``>= 2`` precondition of ``determine_consensus`` — real runs always reach
     # here with >= 2 agents (the orchestrator raised otherwise), so this only
     # skips the refresh under stubbed/degenerate agent lists.
-    if len(report["agents"]) >= 2:
+    if review_target is None and len(report["agents"]) >= 2:
         report["consensus"] = determine_consensus(report["agents"])
 
     report_text = format_report(report["agents"], report["consensus"])
@@ -2431,12 +2912,19 @@ def main() -> None:
     # ``cost`` block discipline: set BEFORE json.dump). ``est_tokens``,
     # ``oversize``, and ``raw_input_chars`` were all computed right after
     # _load_input_content, before _maybe_enrich could reassign input_content.
-    report["input_size"] = {
-        "chars": raw_input_chars,
-        "est_tokens": est_tokens,
-        "oversize": oversize,
-        "warn_threshold_tokens": args.warn_input_tokens,
-    }
+    # None for the native review: its input is a target, not text the plugin measures.
+    if review_target is not None:
+        report["guard"] = None
+    report["input_size"] = (
+        None
+        if review_target is not None
+        else {
+            "chars": raw_input_chars,
+            "est_tokens": est_tokens,
+            "oversize": oversize,
+            "warn_threshold_tokens": args.warn_input_tokens,
+        }
+    )
 
     # Attribution (5.4.0): record which model produced this verdict, same
     # set-before-json.dump discipline as the two blocks above.
@@ -2463,9 +2951,27 @@ def main() -> None:
     # MS4: the magi-rs telemetry travels VERBATIM into the report (R15/R16),
     # from the executor's last parsed envelope -- same set-before-json.dump
     # discipline as the blocks above. Absent on the Claude path (additive).
-    magi_rs_result: ConsultResult | None = getattr(executor, "last_result", None)
+    review_result: CodeReviewResult | None = (
+        executor.last_result if isinstance(executor, MagiRsCodeReview) else None
+    )
+    magi_rs_result: ConsultResult | None = (
+        review_result.consult
+        if review_result is not None
+        else getattr(executor, "last_result", None)
+    )
     if magi_rs_result is not None:
         report.update(build_report_block(magi_rs_result, timeout_seconds=resolved_timeout))
+    if review_result is not None:
+        report["magi_rs"].update(code_review_report_blocks(review_result))
+        # PM-S-7: never invent a per-mage model out of the joined string.
+        report["magi_rs"]["model_used"] = None
+        # The code-review envelope has no ``ran_unmeasured``: unknown, never a definite false.
+        report["magi_rs"]["gate_ran_on_unverified_context"] = None
+        report["magi_rs"]["model_used_note"] = _MODEL_USED_NOTE
+        for cause in review_result.degrading_causes:
+            # REQ-07 / integrity rule: context was lost, so the run approves no gate.
+            report["degraded"] = True
+            report.setdefault("degraded_causes", []).append(cause)
 
     report_path = os.path.join(output_dir, "magi-report.json")
     with open(report_path, "w", encoding="utf-8") as f:
@@ -2476,9 +2982,28 @@ def main() -> None:
     if magi_rs_result is not None:
         announce_magi_rs_telemetry(
             magi_rs_result,
-            degraded_locally=bool(report.get("degraded", False)),
+            degraded_locally=(
+                bool(report.get("failed_agents"))
+                if review_result is not None
+                else bool(report.get("degraded", False))
+            ),
             timeout_seconds=resolved_timeout,
         )
+    if review_result is not None:
+        for line in format_review_banner(review_result):
+            print(line)
+        for cause in review_result.degrading_causes:
+            print(
+                f"[!] WARNING: {_DEGRADING_CAUSE_TEXT[cause]} The run is DEGRADED and the gate is "
+                "INVALID whatever the verdict says.",
+                file=sys.stderr,
+            )
+        if isinstance(executor, MagiRsCodeReview) and executor.history_recorded is False:
+            print(
+                "[!] WARNING: the review history was not recorded; the report above stays valid "
+                "but the next review will not see this one.",
+                file=sys.stderr,
+            )
 
     # R18 made ACTIVE: filing the counts was not enough (MAGI gate, Caspar). Announced here,
     # after the report exists, so the message and the file it points to always agree.
@@ -2488,7 +3013,8 @@ def main() -> None:
     total_usd = report["cost"]["total_usd"]
     cost_label = "unpriced (magi-rs exposes no usage)" if total_usd is None else f"${total_usd:.4f}"
     print(f"Cost: {cost_label} ({len(report['agents'])} agents)")
-    print(f"Input size: ~{est_tokens} tokens ({raw_input_chars} chars)")
+    if review_target is None:
+        print(f"Input size: ~{est_tokens} tokens ({raw_input_chars} chars)")
     if oversize:
         print(
             f"[!] WARNING: input ~{est_tokens} tokens is very large; MAGI reviews it whole "

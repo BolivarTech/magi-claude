@@ -1,0 +1,32 @@
+{
+  "agents": [
+    {
+      "agent": "caspar"
+    },
+    {
+      "agent": "melchior"
+    },
+    {
+      "agent": "balthasar"
+    }
+  ],
+  "magi_rs": {
+    "extraction_failures": {
+      "balthasar": [
+        {
+          "attempt": 1,
+          "cause": "invalid-json",
+          "model": "mistral-large-3:675b-cloud"
+        }
+      ],
+      "caspar": [],
+      "melchior": [
+        {
+          "attempt": 1,
+          "cause": "missing-markers",
+          "model": "gemma4:cloud"
+        }
+      ]
+    }
+  }
+}

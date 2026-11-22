@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.1.2
-# Date: 2026-09-18
+# Version: 8.0.0
+# Date: 2026-11-21
 """Obtain, verify and install the pinned ``magi-rs`` executable.
 
 Side effects -- this module has five, and every public function documents its
@@ -34,6 +34,8 @@ import urllib.request
 import zipfile
 from typing import IO
 
+from magi_rs_env import EnvironmentPolicy
+from magi_rs_paths import bin_dir, pin_path, plugin_root
 from magi_rs_pin import Pin
 
 _CHUNK_BYTES = 64 * 1024
@@ -670,6 +672,66 @@ class VersionMismatchError(Exception):
     """
 
 
+def verified_executable(bootstrap: BinaryBootstrap) -> str:
+    """Install the pinned binary if needed, then verify it; return its path.
+
+    The one way every launcher obtains the executable: in the steady state
+    ``ensure()`` checks only the digest, so ``verify()`` (digest, then
+    ``--version``) always follows it.
+
+    Args:
+        bootstrap: The bootstrap bound to the pin and ``bin/``.
+
+    Returns:
+        The path ``verify()`` returned.
+
+    Raises:
+        Anything ``ensure()`` or ``verify()`` raises (see
+        :meth:`BinaryBootstrap.ensure` and :meth:`BinaryBootstrap.verify`).
+        The binary is not executed before its digest matched.
+
+    Example:
+        >>> path = verified_executable(BinaryBootstrap(pin, "bin"))  # doctest: +SKIP
+    """
+    bootstrap.ensure()
+    return bootstrap.verify()
+
+
+def plugin_binary_location() -> tuple[Pin, str]:
+    """Return the pin and the ``bin/`` directory of the running plugin.
+
+    Returns:
+        ``(Pin.load(<root>/skills/magi/magi-rs.pin.json), <root>/bin)`` for the
+        plugin root :func:`magi_rs_paths.plugin_root` resolves.
+
+    Raises:
+        PluginRootError: ``CLAUDE_PLUGIN_ROOT`` is set but is not a directory.
+        PinFormatError: The shipped pin does not parse.
+    """
+    root = plugin_root()
+    return Pin.load(pin_path(root)), bin_dir(root)
+
+
+def verified_plugin_executable() -> str:
+    """Return the verified ``magi-rs`` executable of the running plugin.
+
+    The one composition every launcher uses: plugin root, pin, ``bin/``, then
+    :class:`BinaryBootstrap` and :func:`verified_executable`.
+
+    Returns:
+        The path of the verified executable.
+
+    Raises:
+        Anything :func:`plugin_binary_location` or :func:`verified_executable`
+        raises. The binary is not executed before its digest matched.
+
+    Example:
+        >>> path = verified_plugin_executable()  # doctest: +SKIP
+    """
+    pin, directory = plugin_binary_location()
+    return verified_executable(BinaryBootstrap(pin, directory))
+
+
 class BinaryBootstrap:
     """Obtain, verify and install the pinned ``magi-rs`` executable.
 
@@ -863,7 +925,7 @@ class BinaryBootstrap:
             OSError: The binary could not be launched.
 
         Side effects:
-            Executes ``path`` once, with a timeout.
+            Executes ``path`` once, with a timeout and the allowlisted environment.
         """
         try:
             # Decoded as UTF-8 with replacement on purpose: the probe must
@@ -876,6 +938,7 @@ class BinaryBootstrap:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=EnvironmentPolicy.build(os.environ),
                 timeout=_VERSION_PROBE_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:

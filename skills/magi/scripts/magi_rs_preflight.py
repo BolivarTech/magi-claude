@@ -1,14 +1,20 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 8.0.0
+# Date: 2026-11-21
 """Check that a project has been initialised for the magi-rs backend."""
 
 from __future__ import annotations
 
 import os
 
-_CONFIG_RELATIVE_PATH = os.path.join(".magi", "magi.toml")
-_INIT_COMMAND = "/magi --ollama-init"
+from cli_commands import INIT_FLAG, command
+from link_guard import link_refusal
+from one_line import one_line
+from magi_rs_embedder import EmbedderProbe
+from magi_key import KEY_DIR_PARTS, REGENERATION_GUIDANCE, KeyStore, MagiKey
+
+_CONFIG_RELATIVE_PATH = os.path.join(KEY_DIR_PARTS[0], "magi.toml")
+_INIT_COMMAND = command(INIT_FLAG)
 
 
 class ProjectNotInitialisedError(Exception):
@@ -42,18 +48,69 @@ class ProjectPreflight:
             Absolute path of ``.magi/magi.toml``.
 
         Raises:
-            ProjectNotInitialisedError: The file is absent. The message names
-                the exact command that creates it.
+            ProjectNotInitialisedError: ``.magi`` is a link or reparse point (never followed,
+                like the key, init and rotation entry points), or the file is absent. Without a ``.magi/``
+                the message names the command that creates it; with a
+                ``.magi/`` that lacks its config (which ``--ollama-init``
+                refuses to touch) it gives the whole regeneration procedure.
 
         Side effects:
             Reads the filesystem. Writes NOTHING -- a gate run never
             initialises a project on the fly.
         """
-        config = os.path.join(workdir, _CONFIG_RELATIVE_PATH)
-        if not os.path.isfile(config):
+        magi_dir = os.path.join(workdir, KEY_DIR_PARTS[0])
+        try:
+            refusal = link_refusal(magi_dir) if os.path.lexists(magi_dir) else None
+        except OSError as error:
             raise ProjectNotInitialisedError(
-                f"{workdir} is not initialised for magi-rs ({config} is absent); "
-                f"run `{_INIT_COMMAND}` in that project first. A gate run never "
-                "initialises a project on its own."
+                f"cannot inspect {magi_dir}: {one_line(str(error))}"
+            ) from error
+        if refusal is not None:
+            raise ProjectNotInitialisedError(refusal)
+        config = os.path.join(workdir, _CONFIG_RELATIVE_PATH)
+        if os.path.isfile(config):
+            return config
+        if os.path.lexists(os.path.join(workdir, KEY_DIR_PARTS[0])):
+            raise ProjectNotInitialisedError(
+                f"{workdir} has a {KEY_DIR_PARTS[0]}/ without its config ({config} is absent): "
+                f"{REGENERATION_GUIDANCE}. A gate run never initialises a project on its own."
             )
-        return config
+        raise ProjectNotInitialisedError(
+            f"{workdir} is not initialised for magi-rs ({config} is absent); "
+            f"run `{_INIT_COMMAND}` in that project first. A gate run never "
+            "initialises a project on its own."
+        )
+
+    @staticmethod
+    def require_ready(
+        workdir: str, key_store: KeyStore, probe: EmbedderProbe | None = None
+    ) -> MagiKey:
+        """Run the ordered preflight: project config, then the key, then the embedder.
+
+        An uninitialised project stops before the key store is touched; a key
+        failure stops before the embedder is probed.
+
+        Args:
+            workdir: Project root, the same path passed to ``magi-rs`` as ``-w``.
+            key_store: Store the key is loaded from.
+            probe: Embedder probe, given only on the code-review path.
+
+        Returns:
+            The loaded key, ready to be injected into the child environment.
+
+        Raises:
+            ProjectNotInitialisedError: ``.magi/magi.toml`` is absent.
+            KeyMissingError: The key file is absent, empty or unreadable.
+            KeyUnverifiableError: The key's permissions could not be read.
+            KeyExposedError: The key's permissions are looser than owner-only.
+            EmbedderUnreachableError: The probe found the embedder unreachable.
+
+        Side effects:
+            Reads the filesystem; one network request when ``probe`` is given.
+            Writes nothing.
+        """
+        config = ProjectPreflight.require_initialised(workdir)
+        key = key_store.load(workdir)
+        if probe is not None:
+            probe.check(config)
+        return key

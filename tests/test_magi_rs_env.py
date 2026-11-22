@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-09-19
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for the allowlisted child environment of magi-rs (MS3 Task 1)."""
 
 import os
@@ -8,7 +8,17 @@ import sys
 
 import pytest
 
-from magi_rs_env import EnvironmentPolicy
+from magi_key import MagiKey
+from magi_rs_env import PASSPHRASE_VARIABLE, EnvironmentPolicy
+from magi_rs_vault import VAULT_KEY_NAMES
+
+_API_KEY_NAMES = (
+    "OPENAI_API_KEY",
+    "MAGI_API_KEY",
+    "CODE_REVIEW_API_KEY",
+    "EMBEDDING_API_KEY",
+    "DECISION_API_KEY",
+)
 
 
 def test_the_built_environment_holds_NOTHING_beyond_the_allowlist():
@@ -42,13 +52,20 @@ def test_an_undeclared_LC_variable_does_NOT_travel():
     assert "LC_TELEPHONE" not in built
 
 
-def test_the_passphrase_never_reaches_the_child():
-    # R7/BDD-8a: the plugin does not read MAGI_PASSPHRASE -- but the CHILD does,
-    # in its first statement. An operator who exported it in their shell would
-    # open the vault without meaning to, and the same command would take a
-    # different execution path depending on who launched it.
-    built = EnvironmentPolicy.build({"MAGI_PASSPHRASE": "hunter2", "PATH": "/usr/bin"})
-    assert "MAGI_PASSPHRASE" not in built
+def test_an_inherited_passphrase_never_reaches_the_child():
+    env = EnvironmentPolicy.build({"MAGI_PASSPHRASE": "from-the-shell", "PATH": "/bin"})
+    assert PASSPHRASE_VARIABLE not in env
+
+
+def test_the_injected_key_reaches_the_child_and_wins_over_the_inherited_one():
+    key = MagiKey("injected-key-value-abcdefghijklmnop")
+    env = EnvironmentPolicy.build({"MAGI_PASSPHRASE": "from-the-shell"}, passphrase=key)
+    assert env[PASSPHRASE_VARIABLE] == key.reveal()
+
+
+def test_no_api_key_variable_ever_travels():
+    parent = {name: "secret" for name in _API_KEY_NAMES}
+    assert not set(EnvironmentPolicy.build(parent)) & set(_API_KEY_NAMES)
 
 
 @pytest.mark.parametrize(
@@ -151,3 +168,7 @@ def test_windows_path_reaches_the_child_whatever_its_case_in_the_registry():
     # is spelled in the registry. Pinned against the REAL os.environ.
     child = EnvironmentPolicy.build(os.environ)
     assert "PATH" in child and child["PATH"] == os.environ["PATH"]
+
+
+def test_the_env_test_list_equals_the_vault_closed_list():
+    assert _API_KEY_NAMES == VAULT_KEY_NAMES

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-09-29
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for the R17a release gate: ``tools/measure_marker_adherence.py``.
 
 A broken measurement instrument does not give a bad number -- it gives a FALSE one, which
@@ -261,7 +261,9 @@ def test_a_retry_recovered_omission_is_NOT_measured_as_clean(tmp_path):
 
     assert mma.tally["caspar"]["missing_markers"] == 1, "the first attempt's omission IS VISIBLE"
     assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1, "and so is the retry that got it right"
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
     assert artifact["verdict"] == "red", "a run with an omission is NOT a green run"
 
 
@@ -286,7 +288,9 @@ def test_the_report_carries_the_causes_the_spy_STRUCTURALLY_cannot_see(tmp_path)
 
     mma.measure_output_dir(tmp_path)
 
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
     assert artifact["per_seat"]["caspar"]["echoed_example"] == 1
     assert artifact["per_seat"]["melchior"]["agent_identity"] == 2
     assert artifact["verdict"] == "red"
@@ -324,7 +328,9 @@ def test_a_run_measured_by_the_BLIND_fallback_can_NEVER_certify_green(tmp_path):
     mma.install_spy()
 
     mma.measure_output_dir(tmp_path)
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
 
     assert artifact["fallback_measured"] == 1, "the artifact SAYS it measured blind"
     assert artifact["verdict"] != "green", "a blind measurement certifies nothing"
@@ -352,7 +358,9 @@ def test_every_cause_of_the_retry_contract_has_a_column_in_the_artifact():
     for agent in mma.AGENT_NAMES:
         mma.tally[agent][mma.OK_TALLY_KEY] = 1
 
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
 
     for agent in mma.AGENT_NAMES:
         assert set(artifact["per_seat"][agent]) == {mma.OK_TALLY_KEY, *FEEDBACK_TEMPLATES}
@@ -369,7 +377,9 @@ def _fill_tally_all_ok() -> None:
 def test_build_artifact_includes_git_sha_and_prompts_sha256():
     _fill_tally_all_ok()
 
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 1})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 1}, mode="analysis"
+    )
 
     assert artifact["git_sha"] == mma._git_head_sha(mma._REPO_ROOT)
     assert artifact["prompts_sha256"] == mma._prompts_sha256(mma._AGENTS_DIR)
@@ -382,7 +392,9 @@ def test_build_artifact_verdict_red_when_any_failure_present():
     _fill_tally_all_ok()
     mma.tally["caspar"]["missing_markers"] = 1
 
-    artifact = mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
 
     assert artifact["verdict"] == "red"
     assert artifact["per_seat"]["caspar"]["missing_markers"] == 1
@@ -394,7 +406,9 @@ def test_build_artifact_raises_when_a_seat_has_zero_data():
     # balthasar never appears at all.
 
     with pytest.raises(RuntimeError, match="balthasar"):
-        mma.build_artifact(mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0})
+        mma.build_artifact(
+            mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+        )
 
 
 # --- check_release_gate --------------------------------------------------------------
@@ -405,6 +419,8 @@ def _write_report(path: Path, **overrides) -> None:
         "git_sha": mma._git_head_sha(mma._REPO_ROOT),
         "prompts_sha256": mma._prompts_sha256(mma._AGENTS_DIR),
         "measured_at": "2026-07-13T00:00:00Z",
+        "schema": "v8",
+        "mode": "analysis",
         "runs": {"ollama": 5, "claude": 2},
         "fallback_measured": 0,
         "per_seat": {a: {"ok": 5, "missing_markers": 0} for a in mma.AGENT_NAMES},
@@ -631,10 +647,13 @@ def test_main_passes_the_backend_timeout_to_each_run(monkeypatch, tmp_path):
     import magi_rs_trio
 
     seen = []
+    monkeypatch.setattr(mma, "prepare_workspace", lambda scratch: tmp_path)
     monkeypatch.setattr(
         mma,
         "run_real_magi",
-        lambda mode, bundle, *, ollama, timeout, output_dir: seen.append((ollama, timeout)),
+        lambda mode, bundle, *, ollama, timeout, output_dir, cwd=mma._REPO_ROOT: seen.append(
+            (ollama, timeout)
+        ),
     )
     monkeypatch.setattr(mma, "measure_output_dir", lambda run_dir: None)
     monkeypatch.setattr(mma, "build_artifact", lambda *a, **k: {"verdict": "green"})
@@ -676,3 +695,492 @@ def test_the_parent_bound_exceeds_the_childs_worst_case_at_the_new_default(monke
     bundle.write_text("x", encoding="utf-8")
     mma.run_real_magi("code-review", bundle, ollama=True, timeout=timeout, output_dir=tmp_path)
     assert captured["timeout"] > timeout
+
+
+# --- v8: analysis lens, isolated workspace, schema (REQ-15, BDD-21) -------------------
+
+
+def test_the_default_mode_is_analysis_because_code_review_is_native_in_v8():
+    assert mma.DEFAULT_MODE == "analysis"
+
+
+def _record_runs(monkeypatch, tmp_path):
+    workspace = tmp_path / "scratch-ws"
+    workspace.mkdir()
+    seen = []
+    monkeypatch.setattr(mma, "prepare_workspace", lambda scratch: workspace)
+    monkeypatch.setattr(
+        mma,
+        "run_real_magi",
+        lambda mode, bundle, *, ollama, timeout, output_dir, cwd=mma._REPO_ROOT: seen.append(
+            (mode, ollama, cwd)
+        ),
+    )
+    monkeypatch.setattr(mma, "measure_output_dir", lambda run_dir: None)
+    monkeypatch.setattr(mma, "build_artifact", lambda *a, **k: {"verdict": "green"})
+    bundle = tmp_path / "b.md"
+    bundle.write_text("x", encoding="utf-8")
+    return workspace, seen, bundle
+
+
+def test_an_ollama_run_executes_in_the_prepared_workspace_never_the_repo_root(
+    monkeypatch, tmp_path
+):
+    workspace, seen, bundle = _record_runs(monkeypatch, tmp_path)
+    mma.main(["measure", "--ollama-bundle", str(bundle), "--out", str(tmp_path / "out.json")])
+    assert seen == [("analysis", True, workspace)]
+    assert workspace.resolve() != mma._REPO_ROOT.resolve()
+
+
+def test_a_claude_run_keeps_the_repo_root(monkeypatch, tmp_path):
+    _, seen, bundle = _record_runs(monkeypatch, tmp_path)
+    mma.main(["measure", "--claude-bundle", str(bundle), "--out", str(tmp_path / "out.json")])
+    assert seen == [("analysis", False, mma._REPO_ROOT)]
+
+
+def test_a_claude_only_measurement_never_prepares_a_workspace(monkeypatch, tmp_path):
+    _, _, bundle = _record_runs(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(mma, "prepare_workspace", lambda scratch: calls.append(scratch))
+    mma.main(["measure", "--claude-bundle", str(bundle), "--out", str(tmp_path / "out.json")])
+    assert calls == []
+
+
+class _FakePopen:
+    """A ``subprocess.Popen`` stand-in for ``--ollama-init``.
+
+    ``hangs``: the first ``communicate`` raises TimeoutExpired. ``immortal``: it never dies,
+    so a bounded ``wait`` expires. Otherwise a hung child dies on ``kill()`` only.
+    ``interrupt``: the first ``communicate`` raises KeyboardInterrupt.
+    """
+
+    instances: list = []
+
+    def __init__(self, command, returncode=0, hangs=False, immortal=False, interrupt=False, **kw):
+        self.command, self.kwargs, self.pid = command, kw, 4242
+        self.returncode, self._hangs, self._immortal = returncode, hangs, immortal
+        self._interrupt, self.killed = interrupt, False
+        self.timeouts, self.wait_timeouts = [], []
+        _FakePopen.instances.append(self)
+
+    def communicate(self, timeout=None):
+        self.timeouts.append(timeout)
+        if self._interrupt and len(self.timeouts) == 1:
+            raise KeyboardInterrupt
+        if self._hangs and len(self.timeouts) == 1:
+            raise mma.subprocess.TimeoutExpired(self.command, timeout)
+        return None, None
+
+    def wait(self, timeout=None):
+        self.wait_timeouts.append(timeout)
+        if self._immortal or (self._hangs and not self.killed):
+            raise mma.subprocess.TimeoutExpired(self.command, timeout)
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+
+
+def _fake_popen(monkeypatch, returncode=0, **flags):
+    _FakePopen.instances = []
+    monkeypatch.setattr(
+        mma.subprocess,
+        "Popen",
+        lambda command, **kwargs: _FakePopen(command, returncode, **flags, **kwargs),
+    )
+    return _FakePopen.instances
+
+
+def test_prepare_workspace_runs_ollama_init_inside_a_fresh_directory(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch)
+    workspace = mma.prepare_workspace(tmp_path)
+    assert workspace.is_dir() and workspace.parent == tmp_path
+    assert "--ollama-init" in started[0].command
+    assert Path(started[0].kwargs["cwd"]) == workspace
+
+
+def test_prepare_workspace_fails_loudly_when_init_fails(monkeypatch, tmp_path):
+    _fake_popen(monkeypatch, returncode=3)
+    with pytest.raises(RuntimeError, match="3"):
+        mma.prepare_workspace(tmp_path)
+
+
+def test_the_workspace_is_removed_even_when_a_run_fails(monkeypatch, tmp_path):
+    made = []
+
+    def fake_prepare(scratch):
+        workspace = scratch / "ws"
+        workspace.mkdir()
+        made.append(workspace)
+        return workspace
+
+    def boom(*a, **k):
+        raise RuntimeError("died")
+
+    monkeypatch.setattr(mma, "prepare_workspace", fake_prepare)
+    monkeypatch.setattr(mma, "run_real_magi", boom)
+    bundle = tmp_path / "b.md"
+    bundle.write_text("x", encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        mma.main(["measure", "--ollama-bundle", str(bundle), "--out", str(tmp_path / "out.json")])
+    assert made and not made[0].exists()
+
+
+def test_run_real_magi_runs_the_child_in_the_given_cwd(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(mma.subprocess, "run", fake_run)
+    mma.run_real_magi(
+        "analysis", tmp_path / "b.md", ollama=True, timeout=900, output_dir=tmp_path, cwd=tmp_path
+    )
+    assert Path(captured["cwd"]) == tmp_path
+
+
+def test_run_real_magi_passes_a_relative_bundle_as_an_absolute_path(monkeypatch, tmp_path):
+    # [CP2-M15] the child runs in the workspace; a relative bundle would not resolve there.
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+
+        class _Done:
+            returncode = 0
+
+        return _Done()
+
+    monkeypatch.setattr(mma.subprocess, "run", fake_run)
+    monkeypatch.chdir(tmp_path)
+    mma.run_real_magi(
+        "analysis",
+        Path("b.md"),
+        ollama=True,
+        timeout=900,
+        output_dir=tmp_path,
+        cwd=tmp_path / "ws",
+    )
+    assert any(Path(str(part)) == tmp_path / "b.md" for part in captured["command"])
+
+
+def test_the_artifact_declares_the_v8_baseline_and_its_mode():
+    _fill_tally_all_ok()
+    artifact = mma.build_artifact(
+        mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+    )
+    assert artifact["schema"] == "v8" and artifact["mode"] == "analysis"
+
+
+def test_check_rejects_an_artifact_of_the_7x_series(tmp_path):
+    report_path = tmp_path / "report.json"
+    _write_report(report_path)
+    legacy = json.loads(report_path.read_text(encoding="utf-8"))
+    del legacy["schema"]
+    report_path.write_text(json.dumps(legacy), encoding="utf-8")
+    passed, message = mma.check_release_gate(report_path, mma._REPO_ROOT, mma._AGENTS_DIR)
+    assert not passed and "schema" in message
+
+
+# --- magi-rs per-attempt tally (Loop 1, C1) ------------------------------------------
+
+_MAGI_RS_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "magi-rs-run-reports"
+    / "extraction-failures.json"
+)
+
+
+def _copy_magi_rs_report(tmp_path: Path, mutate=None) -> Path:
+    """Copy the real-derived magi-rs report fixture into *tmp_path* (never edit it on disk)."""
+    report = json.loads(_MAGI_RS_FIXTURE.read_text(encoding="utf-8"))
+    if mutate is not None:
+        mutate(report)
+    path = tmp_path / mma.RUN_REPORT_FILENAME
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return path
+
+
+def test_magi_rs_marker_failures_are_folded_into_the_tally(tmp_path):
+    """A seat that failed on magi-rs attempt 1 must NOT be scored clean (real corpus shape)."""
+    path = _copy_magi_rs_report(tmp_path)
+
+    mma.measure_run_report(path)
+
+    assert mma.tally["melchior"]["missing_markers"] == 1
+    assert mma.tally["balthasar"]["invalid_json"] == 1
+    assert mma.tally["caspar"]["missing_markers"] == 0
+    assert mma.tally["melchior"][mma.OK_TALLY_KEY] == 1
+
+
+@pytest.mark.parametrize(
+    ("magi_rs_cause", "tool_cause"),
+    [
+        ("missing-markers", "missing_markers"),
+        ("unterminated", "unterminated_block"),
+        ("ambiguous", "ambiguous_markers"),
+        ("invalid-json", "invalid_json"),
+        ("malformed-object", "schema"),
+        ("schema", "schema"),
+        ("echoed-example", "echoed_example"),
+        ("agent-identity", "agent_identity"),
+    ],
+)
+def test_every_magi_rs_cause_maps_into_the_tool_vocabulary(tmp_path, magi_rs_cause, tool_cause):
+    """The closed mapping covers every label magi-core 4.2.0 serialises."""
+
+    def mutate(report):
+        report["magi_rs"]["extraction_failures"]["caspar"] = [
+            {"attempt": 1, "cause": magi_rs_cause, "model": "m"}
+        ]
+
+    mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate))
+
+    assert mma.tally["caspar"][tool_cause] == 1
+    assert tool_cause in mma.CAUSES
+
+
+def test_an_unknown_magi_rs_cause_is_rejected_not_dropped(tmp_path):
+    """An unmapped cause raises one line naming it: dropping it would score the seat clean."""
+
+    def mutate(report):
+        report["magi_rs"]["extraction_failures"]["caspar"] = [
+            {"attempt": 1, "cause": "brand-new-cause", "model": "m"}
+        ]
+
+    with pytest.raises(ValueError, match="brand-new-cause"):
+        mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate))
+
+
+def test_an_ollama_measurement_refuses_a_mode_other_than_analysis(monkeypatch, tmp_path, capsys):
+    # Loop 1 m4: the v8 baseline is `analysis` (DIR-6); another mode measures another lens.
+    _, seen, bundle = _record_runs(monkeypatch, tmp_path)
+    code = mma.main(
+        [
+            "measure",
+            "--ollama-bundle",
+            str(bundle),
+            "--mode",
+            "design",
+            "--out",
+            str(tmp_path / "out.json"),
+        ]
+    )
+    assert code == 1 and seen == []
+    err = capsys.readouterr().err
+    assert "analysis" in err and len(err.strip().splitlines()) == 1
+
+
+def test_check_rejects_an_artifact_whose_mode_is_not_analysis(tmp_path):
+    report_path = tmp_path / "report.json"
+    _write_report(report_path, mode="design")
+
+    passed, message = mma.check_release_gate(report_path, mma._REPO_ROOT, mma._AGENTS_DIR)
+
+    assert not passed and "mode" in message and "analysis" in message
+
+
+# --- MAGI run 1 on MS2 -------------------------------------------------------------
+
+
+def test_every_mapped_cause_is_a_column_of_the_artifact():
+    # A renamed CAUSES label must not let a mapped failure be tallied and then dropped.
+    assert set(mma.MAGI_RS_CAUSE_MAP.values()) <= set(mma.CAUSES)
+
+
+def test_the_map_covers_every_cause_of_the_real_derived_fixture():
+    report = json.loads(_MAGI_RS_FIXTURE.read_text(encoding="utf-8"))
+    found = {
+        record["cause"]
+        for records in report["magi_rs"]["extraction_failures"].values()
+        for record in records
+    }
+    assert found and found <= set(mma.MAGI_RS_CAUSE_MAP)
+
+
+def test_a_tallied_cause_outside_the_artifact_columns_raises(monkeypatch):
+    _fill_tally_all_ok()
+    mma.tally["caspar"]["renamed_cause"] += 1
+    with pytest.raises(RuntimeError, match="renamed_cause"):
+        mma.build_artifact(
+            mma._REPO_ROOT, mma._AGENTS_DIR, {"ollama": 1, "claude": 0}, mode="analysis"
+        )
+
+
+def test_prepare_workspace_turns_a_timeout_into_one_line_naming_it(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch, hangs=True)
+    monkeypatch.setattr(mma, "windows_kill_tree", lambda pid: None)
+    with pytest.raises(RuntimeError, match=str(mma.OLLAMA_INIT_TIMEOUT_SECONDS)) as exc:
+        mma.prepare_workspace(tmp_path)
+    assert started[0].timeouts[0] == mma.OLLAMA_INIT_TIMEOUT_SECONDS
+    assert "\n" not in str(exc.value)
+
+
+def test_a_timed_out_init_has_its_whole_tree_killed_on_windows(monkeypatch, tmp_path):
+    # windows_kill_tree is best-effort: it is a no-op here and the child only dies on kill().
+    started = _fake_popen(monkeypatch, hangs=True)
+    killed = []
+    monkeypatch.setattr(mma, "windows_kill_tree", killed.append)
+    monkeypatch.setattr(mma.sys, "platform", "win32")
+    with pytest.raises(RuntimeError, match=str(mma.OLLAMA_INIT_TIMEOUT_SECONDS)):
+        mma.prepare_workspace(tmp_path)
+    assert killed == [started[0].pid] and started[0].killed is True
+    assert started[0].wait_timeouts == [mma.PROC_WAIT_REAP_TIMEOUT]
+
+
+def test_a_timed_out_init_is_killed_directly_off_windows(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch, hangs=True)
+    _patch_posix_group_kill(monkeypatch)  # never a real killpg on the fake pid
+    with pytest.raises(RuntimeError):
+        mma.prepare_workspace(tmp_path)
+    assert started[0].killed is True
+
+
+def test_an_init_that_survives_the_kill_warns_and_still_raises_without_hanging(
+    monkeypatch, tmp_path, capsys
+):
+    started = _fake_popen(monkeypatch, hangs=True, immortal=True)
+    monkeypatch.setattr(mma, "windows_kill_tree", lambda pid: None)
+    with pytest.raises(RuntimeError, match=str(mma.OLLAMA_INIT_TIMEOUT_SECONDS)) as exc:
+        mma.prepare_workspace(tmp_path)
+    assert "\n" not in str(exc.value)
+    assert started[0].wait_timeouts == [mma.PROC_WAIT_REAP_TIMEOUT]
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "4242" in err
+
+
+def test_an_interrupt_kills_the_init_tree_and_propagates(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch, interrupt=True)
+    killed = []
+    monkeypatch.setattr(mma, "windows_kill_tree", killed.append)
+    monkeypatch.setattr(mma.sys, "platform", "win32")
+    with pytest.raises(KeyboardInterrupt):
+        mma.prepare_workspace(tmp_path)
+    assert killed == [started[0].pid] and started[0].killed is True
+
+
+# --- MAGI run 2 wave ---------------------------------------------------------------
+
+
+def test_a_magi_rs_report_without_extraction_failures_is_a_measurement_error(tmp_path):
+    # G2: absence must not read as "no failures"; a seat would be scored clean on silence.
+    def mutate(report):
+        del report["magi_rs"]["extraction_failures"]
+
+    path = _copy_magi_rs_report(tmp_path, mutate)
+    with pytest.raises(RuntimeError, match="extraction_failures") as exc:
+        mma.measure_run_report(path)
+    assert str(path) in str(exc.value) and "\n" not in str(exc.value)
+
+
+def test_a_report_without_a_magi_rs_block_is_still_measured(tmp_path):
+    path = _write_run_report(tmp_path, agents=mma.AGENT_NAMES)
+    mma.measure_run_report(path)
+    assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1
+
+
+def _patch_posix_group_kill(monkeypatch):
+    """Platform patched to linux; ``os.killpg``/``signal.SIGKILL`` recorded (absent on Windows)."""
+    groups = []
+    monkeypatch.setattr(mma.sys, "platform", "linux")
+    monkeypatch.setattr(mma.os, "killpg", lambda pid, sig: groups.append((pid, sig)), raising=False)
+    monkeypatch.setattr(mma.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(mma, "windows_kill_tree", lambda pid: pytest.fail("not on POSIX"))
+    return groups
+
+
+def test_a_timed_out_init_has_its_process_group_killed_on_posix(monkeypatch, tmp_path):
+    # G1: the magi-rs init grandchild must not survive the parent.
+    started = _fake_popen(monkeypatch, hangs=True)
+    groups = _patch_posix_group_kill(monkeypatch)
+    with pytest.raises(RuntimeError):
+        mma.prepare_workspace(tmp_path)
+    assert groups == [(started[0].pid, 9)] and started[0].killed is True
+
+
+def test_an_interrupt_kills_the_process_group_on_posix(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch, interrupt=True)
+    groups = _patch_posix_group_kill(monkeypatch)
+    with pytest.raises(KeyboardInterrupt):
+        mma.prepare_workspace(tmp_path)
+    assert groups == [(started[0].pid, 9)]
+
+
+def test_a_missing_process_group_is_tolerated(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch, hangs=True)
+    _patch_posix_group_kill(monkeypatch)
+
+    def gone(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(mma.os, "killpg", gone, raising=False)
+    with pytest.raises(RuntimeError, match=str(mma.OLLAMA_INIT_TIMEOUT_SECONDS)):
+        mma.prepare_workspace(tmp_path)
+    assert started[0].killed is True
+
+
+def test_the_init_starts_its_own_session_on_posix_only(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch)
+    monkeypatch.setattr(mma.sys, "platform", "linux")
+    mma.prepare_workspace(tmp_path)
+    assert started[0].kwargs.get("start_new_session") is True
+    started = _fake_popen(monkeypatch)
+    monkeypatch.setattr(mma.sys, "platform", "win32")
+    mma.prepare_workspace(tmp_path)
+    assert started[0].kwargs.get("start_new_session") is False
+
+
+@pytest.mark.parametrize("value", [None, [], "x", 3])
+def test_a_non_dict_extraction_failures_is_a_measurement_error(tmp_path, value):
+    # G2 re-review: a missing tally reads as null in a real report, and null must not score clean.
+    def mutate(report):
+        report["magi_rs"]["extraction_failures"] = value
+
+    with pytest.raises(RuntimeError, match="extraction_failures"):
+        mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate))
+
+
+def test_a_real_report_built_from_an_envelope_without_the_tally_is_rejected(tmp_path):
+    # Produced through the plugin's own build_report_block, as a real report would be.
+    import run_magi
+    from magi_rs_result import ConsultResult
+
+    fixture = _MAGI_RS_FIXTURE.parent.parent / "magi-rs-consult" / "three-agents.json"
+    envelope = json.loads(fixture.read_text(encoding="utf-8"))
+    envelope["consult"].pop("extraction_failures", None)
+    result = ConsultResult.from_json(json.dumps(envelope))
+    report = {
+        "agents": [{"agent": name} for name in mma.AGENT_NAMES],
+        **run_magi.build_report_block(result, timeout_seconds=1),
+    }
+    assert report["magi_rs"]["extraction_failures"] is None
+    path = tmp_path / mma.RUN_REPORT_FILENAME
+    path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="extraction_failures"):
+        mma.measure_run_report(path)
+
+
+def test_empty_tallies_stay_a_legitimate_clean_run(tmp_path):
+    def mutate(report):
+        report["magi_rs"]["extraction_failures"] = {"caspar": [], "melchior": [], "balthasar": []}
+
+    mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate))
+    assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1
+    mma.reset_tally()
+
+    def mutate_empty(report):
+        report["magi_rs"]["extraction_failures"] = {}
+
+    mma.measure_run_report(_copy_magi_rs_report(tmp_path, mutate_empty))
+    assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1
+
+
+def test_the_real_derived_fixture_still_measures(tmp_path):
+    mma.measure_run_report(_copy_magi_rs_report(tmp_path))
+    assert mma.tally["melchior"]["missing_markers"] == 1

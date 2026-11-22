@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-09-29
+# Version: 8.0.0
+# Date: 2026-11-21
 """Release gate: measure MAGI's adherence to the verdict-sentinel markers (R17a).
 
 MS2 replaced heuristic verdict recovery with the ``<MAGI_VERDICT>`` / ``</MAGI_VERDICT>``
@@ -61,6 +61,8 @@ import argparse
 import collections
 import hashlib
 import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -87,6 +89,7 @@ from retry_feedback import (  # noqa: E402
     retry_feedback_cause,
 )
 from run_magi import AGENTS  # noqa: E402
+from subprocess_utils import PROC_WAIT_REAP_TIMEOUT, windows_kill_tree  # noqa: E402
 from verdict_markers import VerdictExtractionError, VerdictSentinel  # noqa: E402
 
 #: The three mage seats, in a fixed order. Single source of truth for BOTH the
@@ -111,7 +114,21 @@ DEFAULT_TIMEOUT_SECONDS = 900
 #: both, so it is unchanged.
 PARENT_TIMEOUT_FACTOR = 6
 DEFAULT_REPORT_FILENAME = "marker-adherence-report.json"
-DEFAULT_MODE = "code-review"
+#: ``analysis`` because ``code-review --ollama`` no longer reaches ``consult`` in v8 and its
+#: envelope carries no per-attempt adherence tally (decision M8); both backends use the
+#: same lens.
+DEFAULT_MODE = "analysis"
+
+#: The only mode an artifact may certify: the v8 baseline measures ``analysis`` (a different
+#: mode is a different lens, and the gate must not accept it as the same series).
+CERTIFIED_MODE = DEFAULT_MODE
+
+#: Artifact schema. v8 opens a new baseline: 7.x measured ``code-review`` bundles, so its
+#: series is not comparable and ``check_release_gate`` rejects it.
+MEASUREMENT_SCHEMA = "v8"
+
+#: Prefix of the per-measurement workspace directory created under the scratch root.
+WORKSPACE_PREFIX = "workspace-"
 
 #: The report a real ``run_magi.py`` invocation writes into its ``--output-dir``. It
 #: carries ``extraction_failures`` -- the run's OWN per-attempt tally (R18), which is the
@@ -126,6 +143,28 @@ OK_TALLY_KEY = "ok"
 #: column in the artifact -- and a real failure would be reported as a zero, which is the
 #: exact blindness this instrument exists to prevent.
 CAUSES: tuple[str, ...] = tuple(FEEDBACK_TEMPLATES)
+
+#: The CLOSED mapping from the cause labels magi-rs serialises (magi-core 4.2.0
+#: ``ExtractionFailureCause``, kebab-case; ``report["magi_rs"]["extraction_failures"]``) into
+#: :data:`CAUSES`. ``malformed-object`` (valid JSON that is not a verdict object) has no column
+#: of its own here: it is the schema contract failing, so it counts as ``schema``. A label NOT
+#: in this table raises -- dropping it would score the seat clean.
+MAGI_RS_CAUSE_MAP: Mapping[str, str] = {
+    "missing-markers": "missing_markers",
+    "unterminated": "unterminated_block",
+    "ambiguous": "ambiguous_markers",
+    "invalid-json": "invalid_json",
+    "malformed-object": "schema",
+    "schema": "schema",
+    "echoed-example": "echoed_example",
+    "agent-identity": "agent_identity",
+}
+
+#: Seconds ``--ollama-init`` may take in :func:`prepare_workspace`. Generous on purpose: on a
+#: fresh machine it may download and verify the pinned magi-rs binary (about 12 MB, plus a
+#: ``--version`` spawn) and then run ``magi-rs init``; ten minutes covers a slow link without
+#: letting a wedged child hang the release measurement forever.
+OLLAMA_INIT_TIMEOUT_SECONDS = 600
 
 #: How many runs had to be measured through the BLIND fallback (no ``magi-report.json``,
 #: so only each mage's last attempt is on disk). It is carried INTO the artifact and it
@@ -333,20 +372,50 @@ def measure_run_report(report_path: Path) -> None:
     numbers is therefore the marker-omission rate per PARSED attempt, which is the quantity
     R17 is about; counting a timed-out attempt as a clean one would understate it.
 
+    The magi-rs path keeps the same tally under ``magi_rs.extraction_failures`` (a list of
+    ``{attempt, cause, model}`` records per mage); each record is folded in under its mapped
+    cause (:data:`MAGI_RS_CAUSE_MAP`).
+
     Args:
         report_path: Path to a run's ``magi-report.json``.
 
     Raises:
         json.JSONDecodeError: If the report is not valid JSON -- an infrastructure problem
             with the sample, never silently swallowed into a zero.
+        ValueError: If a magi-rs record carries a cause missing from the mapping.
+        RuntimeError: If the report has a ``magi_rs`` block whose ``extraction_failures`` is
+            absent or not an object.
     """
     report: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
     failures: Mapping[str, Mapping[str, int]] = report.get("extraction_failures", {})
     delivered = {agent.get("agent") for agent in report.get("agents", [])}
 
+    magi_rs_block = report.get("magi_rs")
+    magi_rs_failures: Mapping[str, list[Mapping[str, Any]]] = {}
+    if magi_rs_block is not None:
+        # A magi-rs report always carries the tally as an object (an empty one is a clean
+        # run). A missing tally is written as ``null``, and any non-object value is as
+        # unreadable: both are a broken measurement, never a clean seat.
+        tally_value = magi_rs_block.get("extraction_failures")
+        if not isinstance(tally_value, dict):
+            raise RuntimeError(
+                f"{report_path} has a magi_rs block whose extraction_failures is "
+                f"{'absent' if 'extraction_failures' not in magi_rs_block else 'not an object'}"
+                ": the run cannot be scored"
+            )
+        magi_rs_failures = tally_value
+
     for agent in AGENT_NAMES:
         for cause, count in failures.get(agent, {}).items():
             tally[agent][cause] += count
+        for record in magi_rs_failures.get(agent, []):
+            label = str(record.get("cause"))
+            if label not in MAGI_RS_CAUSE_MAP:
+                raise ValueError(
+                    f"magi-rs extraction_failures carries the unmapped cause {label!r} for "
+                    f"{agent}: add it to MAGI_RS_CAUSE_MAP"
+                )
+            tally[agent][MAGI_RS_CAUSE_MAP[label]] += 1
         if agent in delivered:
             tally[agent][OK_TALLY_KEY] += 1
 
@@ -414,6 +483,85 @@ def resolve_tool_timeout(explicit: int | None, *, ollama: bool) -> int:
     return DEFAULT_TIMEOUT_SECONDS
 
 
+def _kill_init_tree(process: "subprocess.Popen[bytes]") -> None:
+    """Kill ``--ollama-init`` and its descendants, then reap it within a bound.
+
+    On Windows ``windows_kill_tree`` kills the tree (best-effort); on POSIX the child was
+    started in its own session, so its whole process group gets SIGKILL. In both cases
+    ``process.kill()`` always follows, because without it the ``magi-rs init`` grandchild
+    could outlive the child and keep the workspace files open, and the scratch directory
+    could not be removed. The reap is bounded by ``PROC_WAIT_REAP_TIMEOUT``; if it also
+    expires, one warning goes to stderr.
+
+    Args:
+        process: The running ``--ollama-init`` child.
+
+    Side effects:
+        Terminates processes; may print one warning to stderr.
+    """
+    if sys.platform == "win32":
+        windows_kill_tree(process.pid)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:  # the group is already gone (ProcessLookupError is an OSError)
+            pass
+    try:
+        process.kill()
+    except OSError:  # already gone
+        pass
+    try:
+        process.wait(timeout=PROC_WAIT_REAP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(
+            f"WARNING: --ollama-init (pid {process.pid}) did not exit within "
+            f"{PROC_WAIT_REAP_TIMEOUT}s of being killed; it may be orphaned.",
+            file=sys.stderr,
+        )
+
+
+def prepare_workspace(scratch: Path) -> Path:
+    """Create a fresh workspace with its own ``.magi/`` for ``--ollama`` runs (PM-C-5).
+
+    The project's real ``.magi/`` is never used: its accumulated state would change the
+    result between measurements.
+
+    Args:
+        scratch: Existing directory (the measurement's temporary root) to create it under.
+
+    Returns:
+        The new workspace directory, holding a key and ``.magi/`` made by
+        ``run_magi.py --ollama-init``.
+
+    Raises:
+        RuntimeError: If ``--ollama-init`` exits non-zero (the message names the code) or
+            exceeds :data:`OLLAMA_INIT_TIMEOUT_SECONDS` (the message names the timeout).
+    """
+    workspace = Path(tempfile.mkdtemp(prefix=WORKSPACE_PREFIX, dir=scratch))
+    command = [sys.executable, str(_RUN_MAGI_PATH), "--ollama-init"]
+    # No ``with``: ``Popen.__exit__`` waits with NO timeout, which would hang on a child that
+    # survived the bounded kill. There are no pipes to close, so nothing else is lost.
+    # POSIX: a session of its own, so a timeout can kill the whole group (see _kill_init_tree).
+    process = subprocess.Popen(command, cwd=workspace, start_new_session=sys.platform != "win32")
+    try:
+        process.communicate(timeout=OLLAMA_INIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        _kill_init_tree(process)
+        raise RuntimeError(
+            f"--ollama-init did not finish within {OLLAMA_INIT_TIMEOUT_SECONDS}s while "
+            f"preparing the measurement workspace {workspace}"
+        ) from exc
+    except BaseException:
+        _kill_init_tree(process)  # Ctrl-C and friends: never leave the tree behind
+        raise
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"--ollama-init failed with exit code {process.returncode} while preparing "
+            f"the measurement workspace {workspace}"
+        )
+    return workspace
+
+
 def run_real_magi(
     mode: str,
     bundle: Path,
@@ -421,6 +569,7 @@ def run_real_magi(
     ollama: bool,
     timeout: int,
     output_dir: Path,
+    cwd: Path = _REPO_ROOT,
 ) -> None:
     """Invoke the real ``run_magi.py`` CLI as a subprocess -- an actual MAGI run.
 
@@ -430,12 +579,14 @@ def run_real_magi(
     entire point of measuring the code that ships.
 
     Args:
-        mode: One of ``run_magi``'s ``VALID_MODES`` (default usage: ``"code-review"``).
+        mode: One of ``run_magi``'s ``VALID_MODES`` (default usage: ``"analysis"``).
         bundle: Path to the input file (a real ``git diff``, not synthetic text).
         ollama: If ``True``, pass ``--ollama``; otherwise the default Claude backend.
         timeout: Per-agent timeout in seconds, forwarded as ``--timeout``.
         output_dir: Directory the run writes its per-agent artifacts into. Created if
             absent.
+        cwd: Working directory of the child. The bundle is passed as an absolute path,
+            so a relative one still resolves against the caller's directory.
 
     Note:
         The subprocess's own exit code is deliberately not checked: a degraded run (or
@@ -448,7 +599,7 @@ def run_real_magi(
         sys.executable,
         str(_RUN_MAGI_PATH),
         mode,
-        str(bundle),
+        str(bundle.absolute()),
         "--output-dir",
         str(output_dir),
         "--timeout",
@@ -466,9 +617,7 @@ def run_real_magi(
     # the child's own worst case is several times its per-mage timeout. Killing a healthy run
     # would be worse than waiting on a sick one; this is a deadlock guard, not a schedule.
     try:
-        subprocess.run(
-            command, check=False, cwd=_REPO_ROOT, timeout=timeout * PARENT_TIMEOUT_FACTOR
-        )
+        subprocess.run(command, check=False, cwd=cwd, timeout=timeout * PARENT_TIMEOUT_FACTOR)
     except subprocess.TimeoutExpired:
         print(
             f"WARNING: the run over {bundle} did not finish within "
@@ -528,6 +677,8 @@ def build_artifact(
     repo_root: Path,
     agents_dir: Path,
     runs: Mapping[str, int],
+    *,
+    mode: str,
 ) -> dict[str, Any]:
     """Build the release-gate artifact from the accumulated module-level :data:`tally`.
 
@@ -537,9 +688,11 @@ def build_artifact(
             hash.
         runs: Number of real runs performed per backend, e.g.
             ``{"ollama": 5, "claude": 2}``.
+        mode: The analysis mode the runs used, recorded as ``mode``.
 
     Returns:
-        A JSON-serialisable dict matching the artifact schema: ``git_sha``,
+        A JSON-serialisable dict matching the artifact schema: ``schema``, ``mode``,
+        ``git_sha``,
         ``prompts_sha256``, ``measured_at``, ``runs``, ``per_seat`` (per agent: ``ok``
         plus each cause in :data:`CAUSES`), and ``verdict`` -- ``"green"`` only
         if every seat has zero extraction failures, ``"red"`` otherwise.
@@ -567,12 +720,26 @@ def build_artifact(
                 "from zero samples for a seat cannot certify anything"
             )
 
+    stray = sorted(
+        cause
+        for counts in tally.values()
+        for cause, count in counts.items()
+        if count and cause != OK_TALLY_KEY and cause not in CAUSES
+    )
+    if stray:
+        raise RuntimeError(
+            f"tallied cause {stray[0]!r} is not a column of the artifact (CAUSES): "
+            "it would be dropped and the seat scored clean"
+        )
+
     if fallback_measured:
         # A blind measurement cannot certify anything -- not even when it saw no failure.
         # This is the one place the instrument used to hand out a green it had not earned.
         verdict = "red"
 
     return {
+        "schema": MEASUREMENT_SCHEMA,
+        "mode": mode,
         "git_sha": _git_head_sha(repo_root),
         "prompts_sha256": _prompts_sha256(agents_dir),
         "measured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -614,6 +781,19 @@ def check_release_gate(
         report: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         return False, f"marker-adherence report at {report_path} is not valid JSON: {exc}"
+
+    if report.get("mode") != CERTIFIED_MODE:
+        return False, (
+            f"marker-adherence report at {report_path} measured mode {report.get('mode')!r}, "
+            f"not {CERTIFIED_MODE!r} -- re-run the measurement"
+        )
+
+    if report.get("schema") != MEASUREMENT_SCHEMA:
+        return False, (
+            f"marker-adherence report at {report_path} has schema {report.get('schema')!r}, "
+            f"not {MEASUREMENT_SCHEMA!r} (the 7.x series measured a different path and does "
+            "not certify this release) -- re-run the measurement"
+        )
 
     current_sha = _git_head_sha(repo_root)
     if report.get("git_sha") != current_sha:
@@ -679,14 +859,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="PATH",
-        help="A real code-review bundle (e.g. a git diff) to run via --ollama. Repeatable.",
+        help="A real bundle (e.g. a git diff) to run via --ollama. Repeatable.",
     )
     measure.add_argument(
         "--claude-bundle",
         action="append",
         default=[],
         metavar="PATH",
-        help="A real code-review bundle to run via the default Claude backend. Repeatable.",
+        help="A real bundle to run via the default Claude backend. Repeatable.",
     )
     measure.add_argument(
         "--mode", default=DEFAULT_MODE, help=f"Analysis mode (default: {DEFAULT_MODE})"
@@ -744,11 +924,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if args.ollama_bundle and args.mode != CERTIFIED_MODE:
+        print(
+            f"measure: --ollama-bundle runs measure only --mode {CERTIFIED_MODE} "
+            f"(got {args.mode!r})",
+            file=sys.stderr,
+        )
+        return 1
+
     reset_tally()
     install_spy()
     try:
         with tempfile.TemporaryDirectory(prefix="magi-marker-adherence-run-") as scratch_root:
             scratch = Path(scratch_root)
+            # One fresh workspace per measurement, inside the temporary root (removed on
+            # exit even when a run fails); the project's real ``.magi/`` is never touched.
+            workspace = prepare_workspace(scratch) if args.ollama_bundle else _REPO_ROOT
             for index, bundle in enumerate(args.ollama_bundle):
                 run_dir = scratch / f"ollama-{index}"
                 run_real_magi(
@@ -757,6 +948,7 @@ def main(argv: list[str] | None = None) -> int:
                     ollama=True,
                     timeout=resolve_tool_timeout(args.timeout, ollama=True),
                     output_dir=run_dir,
+                    cwd=workspace,
                 )
                 measure_output_dir(run_dir)
             for index, bundle in enumerate(args.claude_bundle):
@@ -774,6 +966,7 @@ def main(argv: list[str] | None = None) -> int:
                 _REPO_ROOT,
                 _AGENTS_DIR,
                 {"ollama": len(args.ollama_bundle), "claude": len(args.claude_bundle)},
+                mode=args.mode,
             )
     finally:
         uninstall_spy()

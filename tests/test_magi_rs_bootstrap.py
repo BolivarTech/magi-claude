@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-09-18
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for the magi-rs binary bootstrap (MS2 Tasks 2-5).
 
 No test touches the network or the plugin's real ``bin/``: downloads are served
@@ -38,7 +38,9 @@ from magi_rs_bootstrap import (
     require_real_directory,
     sha256_of,
     sweep,
+    verified_executable,
 )
+from magi_rs_env import EnvironmentPolicy
 from magi_rs_pin import Asset, Pin
 
 # --------------------------------------------------------------------------
@@ -1038,3 +1040,44 @@ def test_a_failed_rollback_in_the_rename_dance_propagates_and_discards_the_stage
     assert len(attempts_on_final) == 2  # once directly, once after renaming aside
     assert (bin_dir / _installed_name()).read_bytes() == b"previous version"  # rolled back
     assert sorted(p.name for p in bin_dir.iterdir()) == [_installed_name()]  # staged discarded
+
+
+def test_verified_executable_ensures_then_verifies_and_returns_the_verified_path():
+    # [Loop1 M-4] one helper for "a verified executable": ensure() alone skips the version check
+    # in the steady state, so every launcher must also verify().
+    calls = []
+    bootstrap = SimpleNamespace(
+        ensure=lambda: calls.append("ensure") or "/bin/ensured",
+        verify=lambda: calls.append("verify") or "/bin/verified",
+    )
+    assert verified_executable(bootstrap) == "/bin/verified"
+    assert calls == ["ensure", "verify"]
+
+
+def test_verified_executable_propagates_a_verification_failure():
+    def _fail():
+        raise VersionMismatchError("reports 0.24.1")
+
+    bootstrap = SimpleNamespace(ensure=lambda: "/bin/magi-rs", verify=_fail)
+    with pytest.raises(VersionMismatchError):
+        verified_executable(bootstrap)
+
+
+def test_the_version_probe_runs_with_the_allowlisted_environment_only(tmp_path, monkeypatch):
+    # The probe is a magi-rs child like any other: no API key, no passphrase, no loader variable.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-leak")
+    monkeypatch.setenv("MAGI_PASSPHRASE", "leak")
+    monkeypatch.setenv("LD_PRELOAD", "/tmp/evil.so")
+    seen: dict[str, object] = {}
+
+    def _run(argv, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(stdout="not-the-pinned-version", stderr="", returncode=0)
+
+    monkeypatch.setattr("magi_rs_bootstrap.subprocess.run", _run)
+    with pytest.raises(VersionMismatchError):
+        BinaryBootstrap(_pin_with("0" * 64), str(tmp_path))._require_version("magi-rs")
+    assert seen.get("env") == EnvironmentPolicy.build(os.environ)
+    env = seen.get("env")
+    assert isinstance(env, dict)
+    assert not {"OPENAI_API_KEY", "MAGI_PASSPHRASE", "LD_PRELOAD"} & set(env)

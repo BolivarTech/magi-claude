@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.0.1
-# Date: 2026-10-14
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for reading a magi-rs consult envelope (MS3 Task 3c).
 
 The fixtures under ``tests/fixtures/magi-rs-consult/`` derive from ONE real
@@ -14,7 +14,7 @@ import os
 
 import pytest
 
-from magi_rs_result import ConsultResult, describe_reasoning
+from magi_rs_result import CodeReviewResult, ConsultResult, MemoryContractError, describe_reasoning
 from magi_rs_trio import MagiRsContractError
 
 _FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "magi-rs-consult")
@@ -514,7 +514,7 @@ def _report_without(key):
 
 def test_the_raw_output_is_persisted_verbatim_under_its_own_name(tmp_path):
     # R16: two producers, two names.
-    from magi_rs_trio import write_raw_artifact
+    from magi_rs_common import write_raw_artifact
 
     raw = _fixture("three-agents.json")
     write_raw_artifact(str(tmp_path), raw)
@@ -523,7 +523,7 @@ def test_the_raw_output_is_persisted_verbatim_under_its_own_name(tmp_path):
 
 
 def test_a_raw_artifact_that_cannot_be_written_raises_not_swallows(tmp_path):
-    from magi_rs_trio import write_raw_artifact
+    from magi_rs_common import write_raw_artifact
 
     with pytest.raises(OSError):
         write_raw_artifact(str(tmp_path / "missing" / "dir"), "{}")
@@ -932,3 +932,125 @@ def test_a_flagged_default_timeout_points_at_max_rotations_not_at_itself(capsys)
     assert len(lines) == 1
     assert "WARNING" in lines[0] and str(default) in lines[0]
     assert "recommended --timeout is" not in lines[0]
+
+
+_CR_FIXTURE = os.path.join(
+    os.path.dirname(__file__), "fixtures", "magi-rs-code-review", "one-commit.json"
+)
+
+
+def _cr_envelope():
+    with open(_CR_FIXTURE, encoding="utf-8") as handle:
+        return json.loads(handle.read())
+
+
+def _raw(**overrides):
+    envelope = _cr_envelope()
+    envelope["code_review"].update(overrides)
+    return json.dumps(envelope)
+
+
+def test_the_real_envelope_parses_into_three_verdicts_and_a_review_block():
+    result = CodeReviewResult.from_json(_raw())
+    assert len(result.consult.agents) == 3
+    assert "batches_planned" in result.code_review
+
+
+def test_the_review_block_is_carried_verbatim():
+    envelope = _cr_envelope()
+    assert CodeReviewResult.from_json(json.dumps(envelope)).code_review == envelope["code_review"]
+
+
+def test_an_envelope_without_code_review_is_a_contract_error():
+    envelope = _cr_envelope()
+    del envelope["code_review"]
+    with pytest.raises(MagiRsContractError):
+        CodeReviewResult.from_json(json.dumps(envelope))
+
+
+def test_without_memory_is_a_memory_contract_error():
+    with pytest.raises(MemoryContractError):
+        CodeReviewResult.from_json(_raw(without_memory=True))
+
+
+def test_without_embedder_is_read_as_a_flag():
+    assert CodeReviewResult.from_json(_raw(without_embedder=True)).without_embedder is True
+
+
+def test_effort_has_exactly_the_declared_keys():
+    effort = CodeReviewResult.from_json(_raw()).effort()
+    assert set(effort) == {
+        "batches_planned",
+        "batches_completed",
+        "duration_ms",
+        "gate_questions",
+        "judged_fraction",
+        "tokens_by_batch",
+    }
+
+
+def test_an_absent_effort_field_is_null_not_omitted():
+    envelope = _cr_envelope()
+    envelope["code_review"].pop("gate_questions", None)
+    assert CodeReviewResult.from_json(json.dumps(envelope)).effort()["gate_questions"] is None
+
+
+def test_tokens_are_copied_from_batches_never_estimated():
+    envelope = _cr_envelope()
+    effort = CodeReviewResult.from_json(json.dumps(envelope)).effort()
+    assert effort["tokens_by_batch"] == [
+        {k: b.get(k) for k in ("index", "input_tokens", "output_tokens", "ms")}
+        for b in envelope["code_review"]["batches"]
+    ]
+
+
+def test_the_duration_is_the_envelope_total():
+    # [RD-D22] the capture has no code_review.duration_ms; the run's total is timings.total_ms.
+    envelope = _cr_envelope()
+    effort = CodeReviewResult.from_json(json.dumps(envelope)).effort()
+    assert effort["duration_ms"] == envelope["timings"]["total_ms"]
+
+
+def test_both_flags_are_false_on_the_clean_capture():
+    result = CodeReviewResult.from_json(_raw())
+    assert result.without_memory is False
+    assert result.without_embedder is False
+
+
+@pytest.mark.parametrize("field", ["without_memory", "without_embedder"])
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_a_non_boolean_flag_is_an_off_contract_envelope(field, value):
+    with pytest.raises(MagiRsContractError, match=field):
+        CodeReviewResult.from_json(_raw(**{field: value}))
+
+
+def test_a_failed_batch_does_not_shift_the_batch_index():
+    # Loop 1 m6: batch 2 failed, so list position 1 is batch 3; the index must say so.
+    envelope = _cr_envelope()
+    batches = envelope["code_review"]["batches"]
+    batches[:] = [dict(batches[0], index=1), dict(batches[0], index=3)]
+    effort = CodeReviewResult.from_json(json.dumps(envelope)).effort()
+    assert [entry["index"] for entry in effort["tokens_by_batch"]] == [1, 3]
+
+
+# --- MAGI run 2 wave, G3: the counts the degrading causes read must be well typed ---------
+
+
+@pytest.mark.parametrize(
+    "field", ["batches_planned", "batches_completed", "undelivered_units_unlisted"]
+)
+@pytest.mark.parametrize("value", ["2", True, -1, 1.5, None])
+def test_a_badly_typed_count_is_an_off_contract_envelope(field, value):
+    with pytest.raises(MagiRsContractError, match=field):
+        CodeReviewResult.from_json(_raw(**{field: value}))
+
+
+@pytest.mark.parametrize("field", ["failed_batches", "undelivered_units"])
+@pytest.mark.parametrize("value", ["x", 1, {"a": 1}, None])
+def test_a_non_list_loss_field_is_an_off_contract_envelope(field, value):
+    with pytest.raises(MagiRsContractError, match=field):
+        CodeReviewResult.from_json(_raw(**{field: value}))
+
+
+def test_the_clean_capture_passes_the_type_checks():
+    assert CodeReviewResult.from_json(_raw()).degrading_causes == []

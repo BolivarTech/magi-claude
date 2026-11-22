@@ -1,20 +1,32 @@
 # Author: Julian Bolivar
-# Version: 2.1.0
-# Date: 2026-09-29
+# Version: 8.0.0
+# Date: 2026-11-21
 """Tests for run_magi.py — async Python orchestrator."""
 
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import sys
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
+import run_magi
+from _magi_rs_fakes import _CR_FIXTURE, _StreamingProcess, _cr_payload
+from magi_rs_code_review import MagiRsCodeReview
+from magi_rs_result import CodeReviewResult
+from magi_rs_targets import ReviewTarget
+from run_magi import code_review_report_blocks, format_review_banner, format_target_banner
+from magi_key import KeyExposedError, KeyHardeningError, KeyStore, KeyUnverifiableError, MagiKey
+from magi_key_rotation import RotationFailedError, RotationNotAuthorisedError, RotationReport
+from magi_rs_bootstrap import DigestMismatchError, VersionMismatchError
 from models import ModelSpec
+from ollama_init import OllamaInitError
 from rotation_harness import (
     _run,
     _trio_from_launch,
@@ -2741,7 +2753,7 @@ class TestEnrichIntegration:
         import run_magi
 
         a = run_magi.parse_args(["code-review", "in.txt"])
-        assert a.base == "main" and a.enrich is True and a.enrich_max_chars == 512_000
+        assert a.base is None and a.enrich is True and a.enrich_max_chars == 512_000
 
     def test_no_enrich(self):
         import run_magi
@@ -5272,3 +5284,1098 @@ def test_the_timeout_help_names_the_ollama_default_from_its_constant(capsys):
     help_text = " ".join(capsys.readouterr().out.split())
     assert f"default {magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS}" in help_text
     assert "default 1800" not in help_text
+
+
+def _raise(exception):
+    """A callable with any signature that raises `exception`."""
+
+    def _raiser(*args, **kwargs):
+        raise exception
+
+    return _raiser
+
+
+def test_a_failed_init_is_one_fatal_line_at_the_cli(monkeypatch, capsys):
+    # [CP2-C33] the guard the closed list removed, at the level it belongs to.
+    monkeypatch.setattr(
+        "run_magi.run_ollama_init", _raise(OllamaInitError("error: init died\nsecond line"))
+    )
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    err = capsys.readouterr().err
+    assert (
+        exc.value.code == 1
+        and err.startswith("[FATAL]")
+        and "init died" in err
+        and "Traceback" not in err
+        and err.count("\n") == 1
+    )
+
+
+def _stub_vault_preflight(monkeypatch, key_error=None, bootstrap_fails=False):
+    """Stub bootstrap and the ordered key preflight (`require_ready`) for `vault_set_main` [CP2-B11].
+
+    [CP2-M46] Records what the handler preflights with, so a test can pin the store and the workdir.
+    """
+    seen = {"sentinel": object(), "bootstrapped": 0}
+
+    def _verify():
+        seen["bootstrapped"] += 1  # [CP2-C43]
+        if bootstrap_fails:
+            raise DigestMismatchError("checksum mismatch")
+        return "/bin/magi-rs"
+
+    def _ready(workdir, key_store):
+        seen.update(workdir=workdir, store=key_store)
+        if key_error is not None:
+            raise key_error
+        return MagiKey("k" * 44)
+
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(ensure=_verify, verify=_verify),
+    )
+    monkeypatch.setattr("run_magi.default_key_store", lambda: seen["sentinel"])
+    monkeypatch.setattr("run_magi.ProjectPreflight.require_ready", staticmethod(_ready))
+    return seen
+
+
+def test_vault_set_strips_the_trailing_newline_of_a_piped_value(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(
+        "run_magi.VaultClient.set",
+        lambda self, name, value: captured.update(name=name, value=value),
+    )
+    _stub_vault_preflight(monkeypatch)  # helper: bootstrap + config + key load stubbed
+    code = run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("sk-value\r\n"), is_tty=False)
+    assert code == 0 and captured == {"name": "OPENAI_API_KEY", "value": "sk-value"}
+
+
+def test_vault_set_on_a_tty_reads_the_value_hidden(monkeypatch, tmp_path):
+    # [PM-MS1-C8] the hidden prompt is the TTY path; the value never comes from argv.
+    captured = {}
+    monkeypatch.setattr("run_magi.getpass.getpass", lambda prompt="": "sk-hidden")
+    monkeypatch.setattr(
+        "run_magi.VaultClient.set", lambda self, name, value: captured.update(value=value)
+    )
+    _stub_vault_preflight(monkeypatch)
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(""), is_tty=True) == 0
+    assert captured == {"value": "sk-hidden"}
+
+
+def test_vault_set_refuses_a_name_outside_the_list_before_any_preflight(monkeypatch, capsys):
+    # [CP2-C43] stubbed bootstrap (no test reaches the real binary), and neither it nor the preflight ran.
+    # [R6] the closed list is argparse's ``choices`` now: an unknown NAME is an argument error (exit 2).
+    seen = _stub_vault_preflight(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-vault-set", "AWS_SECRET"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code == 2 and "invalid choice" in capsys.readouterr().err
+    assert "workdir" not in seen and seen["bootstrapped"] == 0
+
+
+def test_vault_set_refuses_an_empty_value(monkeypatch, tmp_path, capsys):
+    _stub_vault_preflight(monkeypatch)
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("\n"), is_tty=False) != 0
+    assert "empty" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
+def test_vault_set_refuses_a_value_with_an_interior_line_break(monkeypatch, capsys, separator):
+    # [V5] a pasted two-line value would be stored truncated or corrupted; refuse it, never echo it.
+    stored = []
+    monkeypatch.setattr("run_magi.VaultClient.set", lambda self, name, value: stored.append(value))
+    _stub_vault_preflight(monkeypatch)
+    value = f"sk-first{separator}sk-second"
+    code = run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(value + "\n"), is_tty=False)
+    captured = capsys.readouterr()
+    assert code == 2 and stored == []
+    assert "OPENAI_API_KEY" in captured.err and "line break" in captured.err
+    assert "sk-first" not in captured.out + captured.err
+    assert "sk-second" not in captured.out + captured.err
+    assert "\n" not in captured.err.strip()
+
+
+def test_vault_set_refuses_a_value_that_is_not_encodable_as_utf8(monkeypatch, capsys):
+    # [Z1] a lone surrogate cannot reach the binary's stdin; refuse it by name, never echo it.
+    # the real VaultClient.set refuses it before launching anything
+    _stub_vault_preflight(monkeypatch)
+    value = "sk-\ud800-tail"
+    code = run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(value + "\n"), is_tty=False)
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "OPENAI_API_KEY" in captured.err and "UTF-8" in captured.err
+    assert "sk-" not in captured.out + captured.err and "tail" not in captured.out + captured.err
+    assert "\n" not in captured.err.strip()
+
+
+@pytest.mark.parametrize("value", ["   ", "\t", " \t "])
+def test_vault_set_refuses_a_whitespace_only_value(monkeypatch, capsys, value):
+    # [M9] blank is not a key: refuse it by name, never echo it.
+    stored = []
+    monkeypatch.setattr("run_magi.VaultClient.set", lambda self, name, value: stored.append(value))
+    _stub_vault_preflight(monkeypatch)
+    code = run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(value + "\n"), is_tty=False)
+    captured = capsys.readouterr()
+    assert code == 2 and stored == []
+    assert "OPENAI_API_KEY" in captured.err and "blank" in captured.err
+    assert "\n" not in captured.err.strip()
+
+
+def test_vault_set_exits_2_for_an_empty_value_too(monkeypatch, capsys):
+    # [N3] every unusable value is a usage error (exit 2), the empty one included.
+    _stub_vault_preflight(monkeypatch)
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("\n"), is_tty=False) == 2
+    assert "OPENAI_API_KEY" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["sk-secret ", " sk-secret", "sk-secret\t", "\tsk-secret"])
+def test_vault_set_refuses_a_value_with_leading_or_trailing_blanks_never_stripping_it(
+    monkeypatch, capsys, value
+):
+    # [N3] an API key never carries them: refuse it (exit 2), never silently strip, never echo it.
+    stored = []
+    monkeypatch.setattr("run_magi.VaultClient.set", lambda self, name, value: stored.append(value))
+    _stub_vault_preflight(monkeypatch)
+    code = run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(value + "\n"), is_tty=False)
+    captured = capsys.readouterr()
+    assert code == 2 and stored == []
+    assert "OPENAI_API_KEY" in captured.err and "sk-secret" not in captured.out + captured.err
+    assert "\n" not in captured.err.strip()
+
+
+def test_vault_set_preflights_the_production_store_in_the_working_directory(monkeypatch, tmp_path):
+    # [CP2-M46] [CP2-B13] the production store, the cwd, and the verified binary is the one handed the key.
+    built = {}
+    monkeypatch.chdir(tmp_path)
+    seen = _stub_vault_preflight(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.VaultClient",
+        lambda exe, workdir, key, **k: (
+            built.update(exe=exe, workdir=workdir) or SimpleNamespace(set=lambda name, value: None)
+        ),
+    )
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("v"), is_tty=False) == 0
+    assert seen["store"] is seen["sentinel"] and seen["workdir"] == os.getcwd()
+    assert built == {"exe": "/bin/magi-rs", "workdir": os.getcwd()}
+
+
+def test_vault_set_with_an_unverified_binary_is_fatal_and_prompts_nothing(monkeypatch, capsys):
+    # [CP2-M42] mirrors CP2-M4: the value travels with the key, so an unverified binary is worse here.
+    prompted = []
+    monkeypatch.setattr(
+        "run_magi.getpass.getpass", lambda prompt="": prompted.append(prompt) or "sk"
+    )
+    _stub_vault_preflight(monkeypatch, bootstrap_fails=True)
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(""), is_tty=True) == 1
+    assert prompted == [] and "[FATAL]" in capsys.readouterr().err
+
+
+def test_vault_set_with_an_exposed_key_on_a_tty_prompts_nothing(monkeypatch, capsys):
+    # [CP2-M42] no secret is typed into a session the preflight already refused.
+    prompted = []
+    monkeypatch.setattr(
+        "run_magi.getpass.getpass", lambda prompt="": prompted.append(prompt) or "sk"
+    )
+    _stub_vault_preflight(monkeypatch, key_error=KeyExposedError("exposed"))
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO(""), is_tty=True) == 1
+    assert prompted == []
+
+
+@pytest.mark.parametrize(
+    "argv, handler, expected",
+    [
+        (["--ollama-vault-set", "OPENAI_API_KEY"], "vault_set_main", "OPENAI_API_KEY"),
+        (["--ollama-rotate-key", "--yes"], "rotate_main", True),
+        (["--ollama-rotate-key"], "rotate_main", False),
+    ],
+)
+def test_main_dispatches_the_key_subcommands_without_mode_or_input(
+    monkeypatch, argv, handler, expected
+):
+    # [CP2-M31] the CLI short-circuit itself, not only the handlers.
+    seen = {}
+    monkeypatch.setattr(f"run_magi.{handler}", lambda args, *rest: seen.update(args=args) or 0)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", *argv])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code in (0, None) and seen["args"] == expected
+
+
+def test_vault_set_with_an_exposed_key_is_fatal_and_calls_nothing(monkeypatch, capsys):
+    _stub_vault_preflight(monkeypatch, key_error=KeyExposedError("exposed"))
+    called = []
+    monkeypatch.setattr("run_magi.VaultClient.set", lambda *a: called.append(a))
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("v"), is_tty=False) == 1
+    assert called == [] and "[FATAL]" in capsys.readouterr().err
+
+
+def test_a_failed_cleanup_note_reaches_the_one_fatal_line(monkeypatch, capsys):
+    # [R7] the cleanup note travels in the message now, not as an exception note.
+    error = KeyHardeningError("cannot harden\n/w/.magi could not be removed; delete it by hand")
+    monkeypatch.setattr("run_magi.run_ollama_init", _raise(error))
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-init"])
+    with pytest.raises(SystemExit):
+        run_magi.main()
+    err = capsys.readouterr().err
+    assert err.startswith("[FATAL]") and "delete it by hand" in err and err.count(chr(10)) == 1
+
+
+@pytest.fixture(autouse=True)
+def _rotation_project(request, monkeypatch, tmp_path_factory):
+    """[Z7] rotate_main checks there is a .magi/ first: run its tests inside a project that has one."""
+    if "rotate" in request.node.name and "without_a_magi_dir" not in request.node.name:
+        project = tmp_path_factory.mktemp("rotate-project")
+        (project / ".magi").mkdir()
+        monkeypatch.chdir(project)
+
+
+def _stub_rotation_bootstrap(monkeypatch, fails=False):
+    """[CP2-M4] Fake the binary verification rotate_main runs before anything moves."""
+
+    def _verify():
+        if fails:
+            raise DigestMismatchError("checksum mismatch")
+        return "/bin/magi-rs"
+
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(ensure=_verify, verify=_verify),
+    )
+
+
+def test_rotate_main_verifies_the_binary_before_rotating(monkeypatch, capsys):
+    rotated = []
+    _stub_rotation_bootstrap(monkeypatch, fails=True)
+    monkeypatch.setattr("run_magi.KeyRotation.rotate", lambda self, *a, **k: rotated.append(a))
+    assert run_magi.rotate_main(True, is_tty=False) != 0
+    assert rotated == [] and capsys.readouterr().err.startswith("[FATAL]")
+
+
+def test_rotate_main_renders_any_bootstrap_error_as_one_fatal_line(monkeypatch, capsys):
+    # [fix 3] the same exception set as vault_set_main: never a traceback.
+    rotated = []
+    failing = _raise(RuntimeError("unexpected"))
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(ensure=failing, verify=failing),
+    )
+    monkeypatch.setattr("run_magi.KeyRotation.rotate", lambda self, *a, **k: rotated.append(a))
+    assert run_magi.rotate_main(True, is_tty=False) == 1
+    err = capsys.readouterr().err
+    assert rotated == [] and err.startswith("[FATAL]") and len(err.strip().splitlines()) == 1
+
+
+def test_rotate_main_renders_a_failed_rotation_as_one_line_naming_the_backup(monkeypatch, capsys):
+    # [CP2-C35] REQ-13h's most dangerous state (no .magi/ at the root) reaches the operator, never as a traceback.
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.KeyRotation.rotate",
+        _raise(
+            RotationFailedError(
+                "rotation failed: the old .magi/ is at /backups/x/.magi; move it back to .magi/ to retry"
+            )
+        ),
+    )
+    assert run_magi.rotate_main(True, is_tty=False) == 1
+    err = capsys.readouterr().err
+    assert "/backups/x" in err and len(err.strip().splitlines()) == 1 and "Traceback" not in err
+
+
+def test_rotate_main_without_yes_and_without_tty_exits_nonzero_and_says_so(monkeypatch, capsys):
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.KeyRotation.rotate", _raise(RotationNotAuthorisedError("needs --yes"))
+    )
+    assert run_magi.rotate_main(False, is_tty=False) != 0
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_rotate_main_says_when_the_names_are_the_whole_closed_list(monkeypatch, capsys):
+    # [CP2-B17] names_from_vault=False gets its consumer: "revoke these" and "we could not read it" are different.
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.KeyRotation.rotate",
+        lambda self, *a, **k: RotationReport("/backups/x", ["OPENAI_API_KEY"], False),
+    )
+    assert run_magi.rotate_main(True, is_tty=False) == 0
+    assert "could not be listed exactly" in capsys.readouterr().out
+
+
+def test_rotate_main_relays_why_the_vault_listing_fell_back(monkeypatch, capsys):
+    # [Z3] the one-line detail (which entry, never a value) reaches the operator.
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.KeyRotation.rotate",
+        lambda self, *a, **k: RotationReport(
+            "/backups/x", ["OPENAI_API_KEY"], False, "vault ls listed 'STRAY_NAME'"
+        ),
+    )
+    assert run_magi.rotate_main(True, is_tty=False) == 0
+    out = capsys.readouterr().out
+    assert "could not be listed exactly (vault ls listed 'STRAY_NAME')" in out
+
+
+def test_rotate_main_prints_backup_names_and_next_steps_never_values(monkeypatch, capsys):
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        "run_magi.KeyRotation.rotate",
+        lambda self, *a, **k: RotationReport("/backups/x", ["OPENAI_API_KEY"], True),
+    )
+    assert run_magi.rotate_main(True, is_tty=False) == 0
+    out = capsys.readouterr().out
+    assert "/backups/x" in out and "OPENAI_API_KEY" in out
+    assert "--ollama-vault-set" in out and "revoke" in out
+    assert "destroy" in out  # [CP2-C14] REQ-13g.1
+
+
+def test_rotate_main_builds_the_rotation_with_the_production_parts(monkeypatch):
+    # [CP2-C14] [CP2-C27] [CP2-B13] [CP2-B14] REQ-13g.2, BDD-18: real init, the production store (whose guard
+    # T2 pins), the default backup root, the cwd, and a vault_ls bound to the VERIFIED binary.
+    # The spy has KeyRotation's exact signature, so a wrong call shape is a TypeError.
+    seen, built = {}, {}
+    sentinel = object()
+
+    class _Spy:
+        def __init__(self, key_store, init, vault_ls, backup_root=None, *, clock=None):
+            seen.update(key_store=key_store, init=init, vault_ls=vault_ls, backup_root=backup_root)
+
+        def rotate(self, workdir, *args, **kwargs):
+            seen["workdir"] = workdir
+            return RotationReport("/backups/x", [], False)
+
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr("run_magi.default_key_store", lambda: sentinel)
+    monkeypatch.setattr("run_magi.KeyRotation", _Spy)
+    monkeypatch.setattr(
+        "run_magi.VaultClient",
+        lambda exe, workdir, key, **k: (
+            built.update(exe=exe, workdir=workdir) or SimpleNamespace(ls=lambda: [])
+        ),
+    )
+    assert run_magi.rotate_main(True, is_tty=False) == 0
+    assert seen["init"] is run_magi.run_ollama_init and seen["key_store"] is sentinel
+    assert seen["backup_root"] is None  # the default: rotation_backup_root()
+    assert seen["workdir"] == os.getcwd()
+    seen["vault_ls"]("/backups/x/.magi-parent", MagiKey("k" * 44))
+    assert built == {"exe": "/bin/magi-rs", "workdir": "/backups/x/.magi-parent"}
+
+
+class _GuardRaising:
+    """A permission guard whose verification of the key file raises `error`."""
+
+    def __init__(self, error):
+        self.error = error
+
+    def harden(self, path, directory):
+        pass
+
+    def verify(self, path):
+        if path.endswith("magi.key"):
+            raise self.error
+
+
+@pytest.mark.parametrize(
+    "error, expected, forbidden",
+    [
+        (
+            KeyExposedError("magi.key grants access to S-1-5-11 (DACL protected: no)"),
+            ["S-1-5-11", "DACL protected: no", "compromised"],
+            "could not be verified",
+        ),
+        (
+            KeyUnverifiableError("cannot read the permissions of magi.key: powershell.exe failed"),
+            ["powershell.exe failed", "could not be verified"],
+            "compromised",
+        ),
+    ],
+)
+def test_the_ollama_preflight_fatal_line_carries_the_guards_diagnostic(
+    monkeypatch, tmp_path, capsys, error, expected, forbidden
+):
+    # [Loop1 I-1] through main(): the cause is on the [FATAL] line, not only in __cause__.
+    secret = tmp_path / ".magi" / ".secret"
+    secret.mkdir(parents=True)
+    (tmp_path / ".magi" / "magi.toml").write_text("", encoding="utf-8")
+    (secret / "magi.key").write_text("k" * 44, encoding="ascii")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
+    monkeypatch.setattr(
+        "magi_rs_trio.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(
+            ensure=lambda: "/bin/magi-rs", verify=lambda: "/bin/magi-rs"
+        ),
+    )
+    monkeypatch.setattr("magi_rs_trio.default_key_store", lambda: KeyStore(_GuardRaising(error)))
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    err = capsys.readouterr().err
+    assert exc.value.code == 1 and err.startswith("[FATAL]") and err.count("\n") == 1
+    assert all(part in err for part in expected) and forbidden not in err
+    assert "k" * 44 not in err
+
+
+def _ensure_ok_verify_fails(monkeypatch):
+    """A bootstrap whose ensure() succeeds (steady state) but whose verify() fails."""
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(
+            ensure=lambda: "/bin/magi-rs", verify=_raise(VersionMismatchError("reports 0.24.1"))
+        ),
+    )
+
+
+def test_vault_set_runs_the_full_binary_verification(monkeypatch, capsys):
+    # [Loop1 M-4] ensure() alone skips the --version check; the vault child gets the key and a secret.
+    _stub_vault_preflight(monkeypatch)
+    _ensure_ok_verify_fails(monkeypatch)
+    called = []
+    monkeypatch.setattr("run_magi.VaultClient.set", lambda *a: called.append(a))
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("v"), is_tty=False) == 1
+    err = capsys.readouterr().err
+    assert called == [] and err.startswith("[FATAL]") and "0.24.1" in err
+
+
+def test_rotate_main_runs_the_full_binary_verification(monkeypatch, capsys):
+    _ensure_ok_verify_fails(monkeypatch)
+    rotated = []
+    monkeypatch.setattr("run_magi.KeyRotation.rotate", lambda self, *a, **k: rotated.append(a))
+    assert run_magi.rotate_main(True, is_tty=False) == 1
+    err = capsys.readouterr().err
+    assert rotated == [] and err.startswith("[FATAL]") and "0.24.1" in err
+
+
+def _noted(error):
+    """`error` with a two-line message and a cleanup sentence folded into it [R7]."""
+    return type(error)(f"{error}\nthe half-made .magi could not be removed; delete it by hand")
+
+
+def _assert_one_fatal_line_with_the_note(err):
+    assert err.startswith("[FATAL]") and err.count("\n") == 1
+    assert "first line second line" in err and "delete it by hand" in err
+
+
+def test_the_ollama_preflight_fatal_is_one_line_with_its_notes(monkeypatch, tmp_path, capsys):
+    # [Loop1 M-7] every [FATAL] site renders the same way: whitespace collapsed, one line.
+    from magi_rs_trio import MagiRsTrio
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "design", "hello", "--ollama", "--no-status"])
+    monkeypatch.setattr(
+        MagiRsTrio, "preflight", _raise(_noted(KeyExposedError("first line\nsecond line")))
+    )
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code == 1
+    _assert_one_fatal_line_with_the_note(capsys.readouterr().err)
+
+
+def test_the_vault_set_fatal_is_one_line_with_its_notes(monkeypatch, capsys):
+    _stub_vault_preflight(monkeypatch, key_error=_noted(KeyExposedError("first line\nsecond line")))
+    assert run_magi.vault_set_main("OPENAI_API_KEY", io.StringIO("v"), is_tty=False) == 1
+    _assert_one_fatal_line_with_the_note(capsys.readouterr().err)
+
+
+def test_the_rotate_fatal_is_one_line_with_its_notes(monkeypatch, capsys):
+    failing = _raise(_noted(DigestMismatchError("first line\nsecond line")))
+    monkeypatch.setattr(
+        "magi_rs_bootstrap.BinaryBootstrap",
+        lambda *a, **k: SimpleNamespace(ensure=failing, verify=failing),
+    )
+    assert run_magi.rotate_main(True, is_tty=False) == 1
+    _assert_one_fatal_line_with_the_note(capsys.readouterr().err)
+
+
+def test_rotate_main_turns_an_interrupted_init_into_one_line_and_exit_1(
+    monkeypatch, tmp_path, capsys
+):
+    # [W1] a KeyboardInterrupt inside magi-rs init, after the move: one line naming the backup, never a traceback.
+    class _OpenGuard:
+        def harden(self, path, directory):
+            pass
+
+        def verify(self, path):
+            pass
+
+    work = tmp_path / "repo"
+    (work / ".magi" / ".secret").mkdir(parents=True)
+    (work / ".magi" / ".secret" / "magi.key").write_text("old-key-" + "E" * 36, encoding="ascii")
+    state = tmp_path / "state"
+    monkeypatch.setenv("LOCALAPPDATA" if sys.platform == "win32" else "XDG_STATE_HOME", str(state))
+    monkeypatch.chdir(work)
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr("run_magi.default_key_store", lambda: KeyStore(_OpenGuard()))
+    monkeypatch.setattr("run_magi.run_ollama_init", _raise(KeyboardInterrupt()))
+    assert run_magi.rotate_main(True, is_tty=False) == 1
+    err = capsys.readouterr().err
+    (backup,) = os.listdir(state / "magi" / "rotated")
+    assert err.startswith("ERROR:") and err.count("\n") == 1 and "Traceback" not in err
+    assert backup in err and "move it back" in err
+
+
+def test_the_key_subcommands_appear_in_help(capsys):
+    # [W2] four published surfaces tell the user to run them: --help must list them.
+    with pytest.raises(SystemExit) as exc:
+        run_magi.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert exc.value.code == 0
+    assert "--ollama-vault-set" in out and "--ollama-rotate-key" in out and "--yes" in out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["analysis", "bundle.md", "--ollama-rotate-key", "--yes"],
+        ["analysis", "bundle.md", "--ollama-rotate-key"],
+        ["--ollama-rotate-key", "analysis"],
+        ["analysis", "bundle.md", "--ollama-vault-set", "OPENAI_API_KEY"],
+        ["--ollama-rotate-key", "--ollama-vault-set", "OPENAI_API_KEY"],
+        ["--ollama-init", "--ollama-rotate-key", "--yes"],
+        ["--ollama-init", "--ollama-vault-set", "OPENAI_API_KEY"],
+        ["--yes"],
+        ["analysis", "bundle.md", "--yes"],
+        ["--ollama-vault-set", "OPENAI_API_KEY", "--yes"],
+        ["code-review", "x.md", "--ollama-init"],  # [R6] --ollama-init joins the standalone set
+        ["--ollama-init", "--ollama"],
+        ["--ollama-rotate-key", "--yes", "--ollama"],
+        ["--ollama-vault-set", "OPENAI_API_KEY", "--ollama"],
+        ["--check-prompts", "--ollama-init"],  # [T6] the dry run joins the standalone set
+        ["--check-prompts", "--ollama-rotate-key", "--yes"],
+        ["--check-prompts", "analysis", "x.md"],
+        ["--check-prompts", "--ollama"],
+    ],
+)
+def test_a_key_subcommand_mixed_with_anything_else_is_an_argument_error_and_runs_nothing(
+    monkeypatch, argv
+):
+    # [W2] a destructive rotation is never honoured from any position: argparse rejects the mix first.
+    called = []
+    for handler, result in (("rotate_main", 0), ("vault_set_main", 0), ("run_ollama_init", "")):
+        monkeypatch.setattr(
+            f"run_magi.{handler}", lambda *a, _h=handler, _r=result, **k: called.append(_h) or _r
+        )
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", *argv])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code == 2 and called == []
+
+
+def test_an_abbreviated_rotate_flag_is_expanded_by_argparse(monkeypatch):
+    # [W2] argparse's own abbreviation handling applies, as for every other flag.
+    seen = {}
+    monkeypatch.setattr("run_magi.rotate_main", lambda args, *rest: seen.update(args=args) or 0)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", "--ollama-rotate", "--yes"])
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code in (0, None) and seen["args"] is True
+
+
+def test_rotate_main_without_a_magi_dir_says_so_before_any_prompt(monkeypatch, tmp_path, capsys):
+    # [Z7] nothing to rotate: no confirmation question, no binary verification, one line, exit 1.
+    monkeypatch.chdir(tmp_path)
+    _stub_rotation_bootstrap(monkeypatch, fails=True)  # would fail loudly if it were reached
+
+    def _asked(prompt=""):
+        raise AssertionError("the operator was asked before checking there is something to rotate")
+
+    monkeypatch.setattr("builtins.input", _asked)
+    assert run_magi.rotate_main(False, is_tty=True) == 1
+    err = capsys.readouterr().err
+    assert "nothing to rotate" in err and "\n" not in err.strip()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a symlink without privileges")
+def test_rotate_main_refuses_a_magi_entry_that_is_a_link_before_any_prompt(
+    monkeypatch, tmp_path, capsys
+):
+    (tmp_path / "real").mkdir()
+    os.symlink(tmp_path / "real", tmp_path / ".magi", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    _stub_rotation_bootstrap(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
+    assert run_magi.rotate_main(False, is_tty=True) == 1
+    assert "is a link" in capsys.readouterr().err
+
+
+def test_rotate_main_with_a_regular_file_named_magi_says_nothing_to_rotate_before_any_prompt(
+    monkeypatch, tmp_path, capsys
+):
+    # [m-3] a file is not a project directory: no prompt, no binary check.
+    (tmp_path / ".magi").write_text("not a directory", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    _stub_rotation_bootstrap(monkeypatch, fails=True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
+    assert run_magi.rotate_main(False, is_tty=True) == 1
+    err = capsys.readouterr().err
+    assert "nothing to rotate" in err and "\n" not in err.strip()
+
+
+def test_render_fatal_names_the_error_class_when_the_message_is_empty():
+    # [O6] a bare EOFError (an exhausted stdin) must never render as a bare "[FATAL]".
+    assert run_magi._render_fatal(EOFError()) == "[FATAL] EOFError"
+    assert run_magi._render_fatal(ValueError("one\ntwo")) == "[FATAL] one two"
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [  # [CP2-C15] every "only with code-review --ollama" flag
+        ["--commit", "abc"],
+        ["--from", "a"],
+        ["--to", "b"],
+        ["--head", "HEAD"],
+        ["--uncommitted"],
+    ],
+)
+def test_target_flags_without_ollama_are_refused(capsys, flag):
+    with pytest.raises(SystemExit):
+        run_magi.parse_args(["code-review", "x.md", *flag])
+    # [RD-D20] without this, today's "unrecognized arguments" (no --commit at all) passes the test.
+    assert "unrecognized arguments" not in capsys.readouterr().err
+
+
+def test_code_review_ollama_needs_no_positional_input():
+    args = run_magi.parse_args(["code-review", "--ollama"])
+    assert args.input is None and args.ollama
+
+
+def test_design_ollama_still_requires_its_input(capsys):
+    with pytest.raises(SystemExit):
+        run_magi.parse_args(["design", "--ollama"])
+
+
+def test_the_banner_always_prints_the_reviewed_target():
+    target = ReviewTarget("path", ("bundle.md",), "path bundle.md")
+    assert format_target_banner(target) == "|  Target: path bundle.md"
+
+
+def test_the_review_banner_shows_what_an_operator_needs():
+    result = CodeReviewResult.from_json(open(_CR_FIXTURE, encoding="utf-8").read())
+    lines = " | ".join(format_review_banner(result))
+    for label in (
+        "batches:",
+        "discarded:",
+        "filtered by the gate:",
+        "judged:",
+        "skipped:",
+        "masked:",
+    ):
+        assert label in lines
+    assert "without_embedder" not in lines
+    assert (
+        "files" not in lines.lower()
+    )  # [CP2-C10] [CP2-C21] the 0.25.0 envelope has no file list; none is invented
+
+
+def test_the_review_banner_shows_without_embedder_when_present():
+    # [CP2-M8] REQ-06 positive case
+    result = CodeReviewResult.from_json(_cr_payload(without_embedder=True).decode("utf-8"))
+    assert "without_embedder" in " | ".join(format_review_banner(result))
+
+
+def test_the_report_carries_the_review_block_verbatim_and_the_effort():
+    result = CodeReviewResult.from_json(open(_CR_FIXTURE, encoding="utf-8").read())
+    blocks = code_review_report_blocks(result)
+    assert blocks["code_review"] == result.code_review
+    assert blocks["effort"] == result.effort()
+
+
+def test_code_review_ollama_never_enriches_guards_or_segments(monkeypatch, tmp_path):
+    called = []
+
+    def recorder(label):
+        return lambda *a, **k: called.append(label)
+
+    for name in ("_load_input_content", "_maybe_enrich", "_apply_finding_guard"):
+        monkeypatch.setattr(f"run_magi.{name}", recorder(name))
+    monkeypatch.setattr("run_magi.BundleSegmenter.plan", lambda *a, **k: called.append("segment"))
+    _run_main_with_fake_review(
+        monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
+    )
+    assert called == []
+
+
+def test_an_invalid_target_stops_before_any_preflight_or_launch(monkeypatch, tmp_path, capsys):
+    launched = []
+    monkeypatch.setattr(
+        "run_magi.MagiRsCodeReview.preflight", lambda self: launched.append("preflight")
+    )
+
+    async def _no_launch(self, *args, **kwargs):  # [CP2-B6] nothing is launched either
+        launched.append("run_trio")
+
+    monkeypatch.setattr("run_magi.MagiRsCodeReview.run_trio", _no_launch)
+    with pytest.raises(SystemExit) as exc:
+        _run_main(monkeypatch, tmp_path, ["code-review", "--ollama", "texto que no es ruta"])
+    assert exc.value.code == 1 and launched == []
+    assert capsys.readouterr().err.startswith("ERROR:")
+
+
+def test_without_embedder_marks_the_report_degraded_with_its_cause(monkeypatch, tmp_path, capsys):
+    report = _run_main_with_fake_review(
+        monkeypatch,
+        tmp_path,
+        ["code-review", "--ollama", "--commit", "abc"],
+        overrides={"without_embedder": True},
+    )
+    assert report["degraded"] is True and "without_embedder" in report["degraded_causes"]
+    assert "WARNING" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("overrides", "cause"),
+    [
+        ({"failed_batches": [[2, "timeout"]]}, "failed_batches"),
+        ({"batches_completed": 0}, "failed_batches"),
+        ({"undelivered_units": ["src/a.py"]}, "undelivered_units"),
+    ],
+)
+def test_lost_batches_or_units_degrade_the_run_with_one_warning(
+    monkeypatch, tmp_path, capsys, overrides, cause
+):
+    # Loop 1 I1: magi-rs consolidates and exits 0 over a partial review; that is truncation.
+    report = _run_main_with_fake_review(
+        monkeypatch,
+        tmp_path,
+        ["code-review", "--ollama", "--commit", "abc"],
+        overrides=overrides,
+    )
+    assert report["degraded"] is True
+    assert report["degraded_causes"].count(cause) == 1
+    err = capsys.readouterr().err
+    assert len([line for line in err.splitlines() if "WARNING" in line and cause in line]) == 1
+
+
+def test_a_complete_review_is_not_degraded_by_the_lost_context_checks(monkeypatch, tmp_path):
+    report = _run_main_with_fake_review(
+        monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
+    )
+    assert not report.get("degraded")
+    assert "degraded_causes" not in report
+
+
+def test_the_native_review_never_claims_a_definite_unverified_context_flag(monkeypatch, tmp_path):
+    # Loop 1 m1: the code-review envelope carries no ran_unmeasured, so the marker is
+    # unknown (null), never a definite false.
+    report = _run_main_with_fake_review(
+        monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
+    )
+    assert "gate_ran_on_unverified_context" in report["magi_rs"]
+    assert report["magi_rs"]["gate_ran_on_unverified_context"] is None
+
+
+def test_an_agent_that_breaks_the_seven_key_contract_degrades_the_run(monkeypatch, tmp_path):
+    # [CP2-M8] BDD-08: the seven-key validation runs on the code-review path too.
+    envelope = json.loads(_cr_payload())
+    del envelope["consult"]["agents"][0]["summary"]
+    report = _run_main_with_fake_review(
+        monkeypatch,
+        tmp_path,
+        ["code-review", "--ollama", "--commit", "abc"],
+        payload=json.dumps(envelope).encode("utf-8"),
+    )
+    assert report["degraded"] is True
+    assert (
+        envelope["consult"]["agents"][0]["agent"] in report["failed_agents"]
+    )  # [CP2-C22] names the agent
+
+
+def test_without_memory_is_one_error_line_and_no_report(monkeypatch, tmp_path, capsys):
+    # [CP2-M12] BDD-11 at main(): fail-closed, never a degraded report.
+    with pytest.raises(SystemExit) as exc:
+        _run_main_with_fake_review(
+            monkeypatch,
+            tmp_path,
+            ["code-review", "--ollama", "--commit", "abc"],
+            overrides={"without_memory": True},
+        )
+    assert exc.value.code == 1
+    assert (
+        len([line for line in capsys.readouterr().err.splitlines() if line.startswith("ERROR:")])
+        == 1
+    )
+    assert not (tmp_path / "out" / "magi-report.json").exists()
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--commit", "abc"],
+        ["--from", "a", "--to", "b"],
+        ["--base", "dev", "--head", "feat"],
+        ["--uncommitted"],
+    ],
+)
+def test_each_target_flag_reaches_the_child_argv(monkeypatch, tmp_path, flags):
+    # [CP2-M13] parse_args -> ReviewTarget.resolve -> build_review_argv, end to end (--from/--to dest included).
+    report = _run_main_with_fake_review(monkeypatch, tmp_path, ["code-review", "--ollama", *flags])
+    argv = report["_argv_seen"]
+    assert argv[1] == "code-review" and argv[2 : 2 + len(flags)] == flags
+
+
+def test_main_writes_the_review_block_and_prints_both_banners(monkeypatch, tmp_path, capsys):
+    # [CP2-M19] REQ-03/06/06a end to end; BDD-22 on this path.
+    report = _run_main_with_fake_review(
+        monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
+    )
+    assert report["magi_rs"]["code_review"] == json.loads(_cr_payload())["code_review"]
+    assert "effort" in report["magi_rs"]
+    out = capsys.readouterr().out
+    assert "Target: commit abc" in out and "batches:" in out
+    assert _CR_KEY.reveal() not in json.dumps(report) + out
+
+
+def test_an_unreachable_embedder_is_fatal_before_any_launch(monkeypatch, tmp_path, capsys):
+    # [CP2-C18] BDD-09 at main(): [FATAL], exit 1, nothing launched.
+    import run_magi
+    from magi_rs_code_review import MagiRsCodeReview
+    from magi_rs_embedder import EmbedderUnreachableError
+
+    def _preflight(self):
+        raise EmbedderUnreachableError(
+            "embedder http://localhost:11434/v1 (nomic-embed-text-v2-moe) is unreachable"
+        )
+
+    launched = []
+
+    async def _no_launch(self, *args, **kwargs):
+        launched.append("run_trio")
+
+    monkeypatch.setattr(MagiRsCodeReview, "preflight", _preflight)
+    monkeypatch.setattr(MagiRsCodeReview, "run_trio", _no_launch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["run_magi.py", "code-review", "--ollama", "--commit", "abc", "--no-status"]
+    )
+    with pytest.raises(SystemExit) as exc:
+        run_magi.main()
+    assert exc.value.code == 1 and launched == []
+    assert capsys.readouterr().err.startswith("[FATAL]")
+
+
+def test_main_refuses_a_target_inside_a_rotation_backup(monkeypatch, tmp_path, capsys):
+    # [CP2-C12] BDD-17, backup half: main passes rotation_backup_root() as a forbidden root.
+    backup = tmp_path / "state" / "rotated" / "x" / ".magi"
+    backup.mkdir(parents=True)
+    monkeypatch.setattr(
+        "run_magi.rotation_backup_root", lambda: str(tmp_path / "state" / "rotated")
+    )
+    with pytest.raises(SystemExit) as exc:
+        _run_main(monkeypatch, tmp_path, ["code-review", "--ollama", str(backup)])
+    assert exc.value.code == 1
+    assert capsys.readouterr().err.startswith("ERROR:")
+
+
+def test_a_lost_history_window_warns_and_keeps_the_report(monkeypatch, tmp_path, capsys):
+    report = _run_main_with_fake_review(
+        monkeypatch,
+        tmp_path,
+        ["code-review", "--ollama", "--commit", "abc"],
+        history_recorded=False,
+    )
+    assert report["consensus"] is not None
+    assert "history was not recorded" in capsys.readouterr().err
+
+
+def test_code_review_without_ollama_is_unchanged(monkeypatch, tmp_path):
+    called = []
+    monkeypatch.setattr(
+        "run_magi._maybe_enrich", lambda *a, **k: called.append("enrich") or (a[0], None)
+    )
+    _run_main_claude_path(monkeypatch, tmp_path, ["code-review", "bundle.md"])
+    assert called == ["enrich"]
+
+
+def test_the_claude_path_still_enriches_against_main_when_base_is_omitted(monkeypatch, tmp_path):
+    # [RD-D35] --base is shared and its parser default is None; the Claude path keeps "main".
+    seen = []
+    monkeypatch.setattr(
+        "run_magi._maybe_enrich",
+        lambda mode, content, **k: seen.append(k["base_ref"]) or (content, None),
+    )
+    _run_main_claude_path(monkeypatch, tmp_path, ["code-review", "bundle.md"])
+    assert seen == ["main"]
+
+
+def _exec_recording(process):
+    """A `create_subprocess_exec` fake that returns `process` and remembers the argv it got."""
+
+    async def _fake_exec(*argv, **kwargs):
+        _fake_exec.seen["argv"] = argv
+        return process
+
+    _fake_exec.seen = {}
+    return _fake_exec
+
+
+# [RD-D28] the imports of this task live at module level (helpers section); MagiKey is already imported (MS1 RD-D16).
+
+
+_CR_KEY = MagiKey("main-review-key-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=")
+
+
+_ORIGINAL_REVIEW_PREFLIGHT = MagiRsCodeReview.preflight
+
+
+def _run_main_with_fake_review(
+    monkeypatch, tmp_path, argv, overrides=None, history_recorded=True, payload=None
+):
+    """Run main() on `code-review --ollama` with a faked magi-rs child; return the report or None."""
+    import run_magi
+    from magi_rs_code_review import MagiRsCodeReview
+
+    def _preflight(self):
+        self._key = _CR_KEY
+        self._executable = "magi-rs"
+        return "magi-rs"
+
+    monkeypatch.chdir(tmp_path)
+    # run_trio re-verifies the binary and the key right before the launch (R4): fake both.
+    monkeypatch.setattr("magi_rs_code_review.verified_executable", lambda bootstrap: "magi-rs")
+    monkeypatch.setattr(
+        "magi_rs_code_review.ProjectPreflight.require_ready",
+        staticmethod(lambda *args, **kwargs: _CR_KEY),
+    )
+    if MagiRsCodeReview.preflight is _ORIGINAL_REVIEW_PREFLIGHT:  # a test's own recorder wins
+        monkeypatch.setattr(MagiRsCodeReview, "preflight", _preflight)
+    if not history_recorded:
+        monkeypatch.setattr("magi_rs_code_review.HISTORY_WINDOW_SECONDS", 0.1)
+    stdout = (
+        payload if payload is not None else _cr_payload(**(overrides or {}))
+    )  # [CP2-M8] a mutated envelope
+    process = _StreamingProcess(stdout, exits_after=0.0 if history_recorded else None)
+    fake_exec = _exec_recording(process)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    out = tmp_path / "out"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_magi.py", *argv, "--timeout", "1", "--no-status", "--output-dir", str(out)],
+    )
+    try:
+        run_magi.main()
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            raise
+    path = out / "magi-report.json"
+    report = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    if report is not None:
+        report["_argv_seen"] = list(fake_exec.seen.get("argv", ()))
+    return report
+
+
+def _run_main(monkeypatch, tmp_path, argv):
+    """Like `_run_main_with_fake_review`, letting a non-zero SystemExit propagate to the test."""
+    return _run_main_with_fake_review(monkeypatch, tmp_path, argv)
+
+
+def _run_main_claude_path(monkeypatch, tmp_path, argv):
+    """Run main() on the Claude path up to the orchestrator, which is stopped there."""
+    import run_magi
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bundle.md").write_text("# bundle\n", encoding="utf-8")
+    monkeypatch.setattr(run_magi.shutil, "which", lambda _: "/bin/claude")
+
+    async def _stop(*a, **k):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(run_magi, "run_orchestrator", _stop)
+    monkeypatch.setattr(sys, "argv", ["run_magi.py", *argv, "--no-status"])
+    with pytest.raises(SystemExit):
+        run_magi.main()
+
+
+def test_code_review_ollama_without_timeout_passes_the_default_to_magi_rs(monkeypatch, tmp_path):
+    # [PM-MS2-C6] REQ-14: the default reaches the child's argv (the helper's --timeout 1 is overridden here).
+    import run_magi
+    from magi_rs_code_review import MagiRsCodeReview
+    from magi_rs_trio import DEFAULT_OLLAMA_TIMEOUT_SECONDS
+
+    seen = {}
+
+    async def _stop(self, *a, **k):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(MagiRsCodeReview, "run_trio", _stop)
+    original = MagiRsCodeReview.__init__
+
+    def _spy(self, workdir, target, timeout, *a, **k):
+        seen["timeout"] = timeout
+        original(self, workdir, target, timeout, *a, **k)
+
+    monkeypatch.setattr(MagiRsCodeReview, "__init__", _spy)
+    monkeypatch.setattr(MagiRsCodeReview, "preflight", lambda self: "magi-rs")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_magi.py",
+            "code-review",
+            "--ollama",
+            "--commit",
+            "abc",
+            "--no-status",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+    with pytest.raises(SystemExit):
+        run_magi.main()
+    assert seen["timeout"] == DEFAULT_OLLAMA_TIMEOUT_SECONDS
+
+
+def test_the_review_banner_counts_the_unlisted_skipped_and_masked():
+    # [m1] the lists are capped by magi-rs; the *_unlisted counters hold the rest.
+    result = CodeReviewResult.from_json(
+        _cr_payload(skipped=["a"], skipped_unlisted=4, masked=[], masked_unlisted=2).decode("utf-8")
+    )
+    lines = format_review_banner(result)
+    assert "|  skipped: 1 (+4 unlisted)" in lines
+    assert "|  masked: 0 (+2 unlisted)" in lines
+
+
+def test_the_native_review_report_carries_a_null_guard(monkeypatch, tmp_path):
+    # [I] absent = null, never omitted.
+    report = _run_main_with_fake_review(
+        monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
+    )
+    assert "guard" in report and report["guard"] is None
+
+
+class TestInertFlagsOnTheNativeReview:
+    """Loop 1 m9: the Claude-path enrichment flags do nothing under code-review --ollama."""
+
+    _NATIVE = ["code-review", "--ollama", "--commit", "abc"]
+
+    @pytest.mark.parametrize(
+        "flag",
+        [["--no-enrich"], ["--enrich-max-chars", "512000"], ["--warn-input-tokens", "150000"]],
+        ids=["no-enrich", "enrich-max-chars-default-value", "warn-input-tokens-default-value"],
+    )
+    def test_a_passed_flag_says_it_has_no_effect(self, capsys, flag):
+        import run_magi
+
+        run_magi.parse_args([*self._NATIVE, *flag])
+
+        err = capsys.readouterr().err
+        assert flag[0] in err and "has no effect with code-review --ollama" in err
+        assert len([line for line in err.splitlines() if "WARNING" in line]) == 1
+
+    def test_not_passing_them_stays_quiet_and_keeps_the_defaults(self, capsys):
+        import run_magi
+
+        args = run_magi.parse_args(self._NATIVE)
+
+        assert capsys.readouterr().err == ""
+        assert args.enrich_max_chars == 512_000
+        assert args.warn_input_tokens == run_magi.WARN_INPUT_TOKENS
+
+    def test_the_claude_path_and_other_ollama_modes_stay_quiet(self, capsys):
+        import run_magi
+
+        run_magi.parse_args(["code-review", "x.md", "--no-enrich"])
+        run_magi.parse_args(["design", "x.md", "--ollama", "--warn-input-tokens", "10"])
+
+        assert capsys.readouterr().err == ""

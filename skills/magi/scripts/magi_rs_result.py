@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.0.1
-# Date: 2026-10-14
+# Version: 8.0.0
+# Date: 2026-11-21
 """Read the result of one ``magi-rs consult`` invocation.
 
 The JSON is NESTED: the telemetry fields plus ``agents``, ``consensus`` and
@@ -197,6 +197,167 @@ class ConsultResult:
             degraded=flag if isinstance(flag, bool) else True,
             run_id=str(run_id) if run_id is not None else None,
             ceiling_above_sanity=ceiling if isinstance(ceiling, bool) else None,
+        )
+
+
+class MemoryContractError(MagiRsContractError):
+    """The envelope reports ``without_memory`` although memory was required.
+
+    This plugin never passes ``--no-memory``, so the flag means a bug here or a
+    behaviour change in magi-rs. Deterministic, hence a sister of
+    ``ValidationError`` through :class:`MagiRsContractError`.
+    """
+
+
+#: ``code_review`` flags that must be JSON booleans when present.
+_REVIEW_FLAGS = ("without_memory", "without_embedder")
+#: ``code_review`` counts that must be non-negative JSON integers when present (a ``bool`` is not).
+_REVIEW_COUNTS = ("batches_planned", "batches_completed", "undelivered_units_unlisted")
+#: ``code_review`` loss fields that must be JSON arrays when present.
+_REVIEW_LISTS = ("failed_batches", "undelivered_units")
+#: ``code_review`` keys copied into :meth:`CodeReviewResult.effort`.
+_EFFORT_FROM_REVIEW = ("batches_planned", "batches_completed", "gate_questions", "judged_fraction")
+#: Per-batch keys copied into ``tokens_by_batch`` (``index`` is the batch number, which a failed batch leaves a gap in).
+_BATCH_FIELDS = ("index", "input_tokens", "output_tokens", "ms")
+
+
+@dataclass(frozen=True)
+class CodeReviewResult:
+    """One completed ``magi-rs code-review`` invocation.
+
+    The envelope is the ``consult`` envelope plus a ``code_review`` object, so
+    the verdict parsing is delegated to :class:`ConsultResult`. Telemetry that a
+    code-review envelope does not carry reads as absent there, never as an
+    invention: an absent ``consult.degraded`` reads as ``False``, the absent
+    consult telemetry fields (``extraction_failures``...) as ``None``, and an
+    absent ``completions`` yields an empty ``capped_agents``.
+
+    Attributes:
+        consult: The parsed verdicts and consult-level telemetry (``run_id``
+            included).
+        code_review: The ``code_review`` object, verbatim.
+        total_ms: ``timings.total_ms`` of the envelope, or ``None``.
+    """
+
+    consult: ConsultResult
+    code_review: dict[str, Any]
+    total_ms: int | None = None
+
+    @property
+    def without_memory(self) -> bool:
+        """True when the review reports it ran without memory."""
+        return self.code_review.get("without_memory") is True
+
+    @property
+    def without_embedder(self) -> bool:
+        """True when the review reports it ran without the embedder."""
+        return self.code_review.get("without_embedder") is True
+
+    @property
+    def degrading_causes(self) -> list[str]:
+        """Return the causes that make this review approve no gate, in a stable order.
+
+        Lost context is truncation under the integrity rule: ``without_embedder``; a batch
+        that failed (``failed_batches`` non-empty, or ``batches_completed`` short of
+        ``batches_planned``) although magi-rs still consolidated the rest; and
+        ``undelivered_units`` (listed, or only counted as unlisted).
+
+        Returns:
+            The matching names among ``without_embedder``, ``failed_batches``,
+            ``undelivered_units``; empty for a complete review.
+        """
+        review = self.code_review
+        causes: list[str] = []
+        if self.without_embedder:
+            causes.append("without_embedder")
+        planned, completed = review.get("batches_planned"), review.get("batches_completed")
+        if review.get("failed_batches") or (
+            isinstance(planned, int) and isinstance(completed, int) and completed != planned
+        ):
+            causes.append("failed_batches")
+        if review.get("undelivered_units") or review.get("undelivered_units_unlisted"):
+            causes.append("undelivered_units")
+        return causes
+
+    def effort(self) -> dict[str, Any]:
+        """Return the review-effort telemetry; an absent field is ``None``.
+
+        ``duration_ms`` is the envelope's ``timings.total_ms`` (the capture has
+        no ``code_review.duration_ms``); ``tokens_by_batch`` is copied from
+        ``batches[]``, never estimated.
+
+        Returns:
+            A dict with exactly ``batches_planned``, ``batches_completed``,
+            ``duration_ms``, ``gate_questions``, ``judged_fraction`` and
+            ``tokens_by_batch``.
+
+        Complexity: O(b) in the number of batches.
+        """
+        effort: dict[str, Any] = {key: self.code_review.get(key) for key in _EFFORT_FROM_REVIEW}
+        effort["duration_ms"] = self.total_ms
+        batches = self.code_review.get("batches")
+        effort["tokens_by_batch"] = (
+            [
+                {field: batch.get(field) for field in _BATCH_FIELDS}
+                for batch in batches
+                if isinstance(batch, dict)
+            ]
+            if isinstance(batches, list)
+            else None
+        )
+        return effort
+
+    @classmethod
+    def from_json(cls, raw: str) -> CodeReviewResult:
+        """Parse the invocation's stdout.
+
+        Args:
+            raw: The process's stdout, one JSON object.
+
+        Returns:
+            The parsed result.
+
+        Raises:
+            MemoryContractError: ``code_review.without_memory`` is true.
+            MagiRsContractError: Any :meth:`ConsultResult.from_json` failure, or
+                ``code_review`` absent or not an object, or one of its flags, counts or
+                loss lists mistyped (the degrading causes read them, so they fail closed).
+        """
+        consult = ConsultResult.from_json(raw)
+        envelope: dict[str, Any] = json.loads(raw)
+        review = envelope.get("code_review")
+        if not isinstance(review, dict):
+            raise MagiRsContractError("magi-rs output carries no 'code_review' object")
+        for flag in _REVIEW_FLAGS:
+            if flag in review and not isinstance(review[flag], bool):
+                raise MagiRsContractError(
+                    f"magi-rs 'code_review.{flag}' is not a JSON boolean: an off-contract envelope"
+                )
+        for count in _REVIEW_COUNTS:
+            value = review.get(count)
+            if count in review and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                raise MagiRsContractError(
+                    f"magi-rs 'code_review.{count}' is not a non-negative integer: "
+                    "an off-contract envelope"
+                )
+        for name in _REVIEW_LISTS:
+            if name in review and not isinstance(review[name], list):
+                raise MagiRsContractError(
+                    f"magi-rs 'code_review.{name}' is not a list: an off-contract envelope"
+                )
+        if review.get("without_memory") is True:
+            raise MemoryContractError(
+                "magi-rs reports without_memory although --no-memory was never passed; "
+                "this is a plugin bug or a magi-rs behaviour change"
+            )
+        timings = envelope.get("timings")
+        total = timings.get("total_ms") if isinstance(timings, dict) else None
+        return cls(
+            consult=consult,
+            code_review=review,
+            total_ms=total if isinstance(total, int) and not isinstance(total, bool) else None,
         )
 
 

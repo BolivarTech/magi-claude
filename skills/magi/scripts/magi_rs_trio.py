@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
-# Date: 2026-11-19
+# Version: 8.0.0
+# Date: 2026-11-21
 """Run the MAGI trio by delegating to the pinned ``magi-rs`` binary.
 
 This is the second implementer of :class:`TrioExecutor` -- the one that
@@ -11,12 +11,12 @@ and judges the result; ``magi-rs`` only runs the three mages.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from magi_key import KeyExposedError, KeyMissingError, KeyStore, MagiKey
+from magi_key_permissions import default_key_store
 from magi_rs_bootstrap import (
     BinaryBootstrap,
     DigestMismatchError,
@@ -24,13 +24,23 @@ from magi_rs_bootstrap import (
     UnsafeArchiveError,
     UnsafeBinDirectoryError,
     VersionMismatchError,
+    verified_executable,
+)
+from magi_rs_common import (
+    VAULT_HINT,
+    allowlist_hint,
+    emit_state,
+    persist_raw,
+    stderr_tail,
+    validate_verdicts,
 )
 from magi_rs_env import EnvironmentPolicy
 from magi_rs_paths import PluginRootError
 from magi_rs_pin import Pin, PinFormatError, UnsupportedPlatformError
+from magi_rs_embedder import EmbedderUnreachableError
 from magi_rs_preflight import ProjectNotInitialisedError, ProjectPreflight
 from magi_rs_result import ConsultResult, MagiRsContractError
-from synthesize import ValidationError, load_agent_output
+from synthesize import ValidationError
 from trio_executor import TrioExecutor
 
 __all__ = [
@@ -66,13 +76,6 @@ _UNTRUSTED_CONTENT_FLAG = "--untrusted-content"
 """The payload is third-party code (R11). It also turns an omitted ``--mode``
 into an error, closing by construction the path R10 closes by convention."""
 
-ALLOWS_RUNNING_WITHOUT_PASSPHRASE = "--no-memory"
-"""Named for what it DOES, not what its name suggests (D10). This flag turns
-"missing passphrase => fatal" into "missing passphrase => proceed with the
-environment" -- it is what lets the plugin run with no passphrase, no key and
-no config of its own (R13). It does NOT isolate memory: ``consult`` never
-touches the memory layer by construction, so every run is stateless anyway."""
-
 _TIMEOUT_FLAG = "--timeout"
 """Wall-clock ceiling (R12). ``magi-rs`` also DERIVES the per-mage budget from
 it: with magi-rs 0.21.0, 0.24.1 and 0.25.0, 16820 derives a 2335 s per-mage ceiling, a
@@ -83,11 +86,6 @@ _TRIO_NODE = "magi-rs consult · 3 mages"
 """The single status node. D5/BDD-27: the plugin launches ONE child and cannot
 observe individual mages, so three nodes would invent progress."""
 
-_RAW_ARTIFACT = "magi-rs-raw.json"
-#: The three seats. A mage magi-rs leaves out of ``agents`` (it is in
-#: ``failed_agents`` instead) still gets an entry: its failure.
-_MAGES = ("melchior", "balthasar", "caspar")
-_NO_VERDICT_CAUSE = "absent from agents and from failed_agents"
 DEFAULT_OLLAMA_TIMEOUT_SECONDS = 16820
 """magi-rs 0.21.0's published headless gate value; derives its 2335 s default
 ceiling (700 s per request, 1401 s operation budget). Source: 0.21.0 release
@@ -97,11 +95,6 @@ on 2026-09-29 against the pinned binary, and unchanged with 0.24.1 on
 _RECOMMENDED_MIN_TIMEOUT_SECONDS = DEFAULT_OLLAMA_TIMEOUT_SECONDS
 """Below the default the derived ceiling falls under the only value measured
 with the 65 536-token output cap, so a lower value warns (D2)."""
-_STDERR_EXCERPT_CHARS = 2000
-_STDERR_ELISION_MARKER = "[... earlier stderr elided ...] "
-"""Prefixed to a failure's stderr excerpt when its head was cut. Since 0.20 magi-rs
-writes WARN lines at startup and the real cause of a failure comes last, so the
-excerpt keeps the tail (v6.2.0 R14); the marker says the head is missing."""
 
 
 #: Every fail-closed error the bootstrap and the preflight can raise. All are
@@ -118,6 +111,9 @@ FAIL_CLOSED_ERRORS: tuple[type[Exception], ...] = (
     DigestMismatchError,
     VersionMismatchError,
     ProjectNotInitialisedError,
+    KeyMissingError,
+    KeyExposedError,
+    EmbedderUnreachableError,
 )
 
 
@@ -170,7 +166,6 @@ def build_argv(executable: str, workdir: str, mode: str, timeout: int) -> list[s
         _MODE_FLAG,
         mode,
         _UNTRUSTED_CONTENT_FLAG,
-        ALLOWS_RUNNING_WITHOUT_PASSPHRASE,
         _TIMEOUT_FLAG,
         str(timeout),
     ]
@@ -207,84 +202,20 @@ def resolve_timeout(flag_value: int | None) -> tuple[int, str | None]:
     return flag_value, None
 
 
-def write_raw_artifact(output_dir: str, raw: str | bytes) -> str:
-    """Persist magi-rs's stdout VERBATIM, under its own name (R16).
-
-    Two producers under one name is ambiguity nobody disambiguates later, so
-    this writes ``magi-rs-raw.json`` and never ``magi-report.json``.
+def redact_captured(key: MagiKey | None, captured: bytes) -> bytes:
+    """Remove the key from bytes captured from a magi-rs child.
 
     Args:
-        output_dir: The run's output directory.
-        raw: The child's stdout, exactly as received. NOT re-serialised -- a
-            round-trip through json would silently normalise key order and
-            float formatting, and this file is the audit artifact. ``str`` is
-            written as UTF-8.
+        key: The loaded key, or None when no preflight has run.
+        captured: The child's stdout or stderr.
 
     Returns:
-        The path written.
-
-    Raises:
-        OSError: The file cannot be written. NOT swallowed here: the strict
-            primitive. :meth:`MagiRsTrio._persist_raw` is the fail-soft caller
-            that turns it into a warning, because an audit artifact must not
-            be able to destroy the verdicts it records.
-
-    Side effects:
-        Writes one file.
+        ``captured`` with every exact occurrence of the key replaced by
+        ``REDACTION_MARKER``; unchanged when ``key`` is None. O(n).
     """
-    path = os.path.join(output_dir, _RAW_ARTIFACT)
-    payload = raw.encode("utf-8") if isinstance(raw, str) else raw
-    with open(path, "wb") as handle:
-        handle.write(payload)
-    return path
-
-
-def _emit(on_state: Callable[[str, str], None] | None, node: str, state: str) -> None:
-    """Forward one status transition, tolerating a callback that raises.
-
-    Args:
-        on_state: The caller's callback, or None when status is off.
-        node: The node's name. ONE node in this executor -- see run_trio.
-        state: ``running``, ``success``, ``failed`` or ``timeout``.
-
-    Returns:
-        None.
-
-    Note:
-        A status display that raises must not take the run down with it: the
-        verdicts are the product, the tree is decoration. Same fail-soft
-        contract ``_safe_display_update`` already has on the Claude path.
-    """
-    if on_state is None:
-        return
-    try:
-        on_state(node, state)
-    except Exception as exc:  # noqa: BLE001 - fail-soft by contract (see Note)
-        print(f"WARNING: status display failed for {node!r}: {exc}", file=sys.stderr)
-
-
-def _stderr_tail(stderr: bytes) -> str:
-    """Return the last ``_STDERR_EXCERPT_CHARS`` characters of a child's stderr.
-
-    Args:
-        stderr: The raw bytes the child wrote; need not be valid UTF-8.
-
-    Returns:
-        The decoded text (undecodable bytes replaced), whole when it fits, else
-        its tail prefixed with ``_STDERR_ELISION_MARKER``.
-
-    Example:
-        >>> _stderr_tail(b"boom")
-        'boom'
-
-    Note:
-        The tail, not the head: magi-rs's startup WARN lines come first and the
-        cause of a failure comes last (v6.2.0 R14). O(n) in the stderr size.
-    """
-    text = stderr.decode("utf-8", errors="replace")
-    if len(text) <= _STDERR_EXCERPT_CHARS:
-        return text
-    return _STDERR_ELISION_MARKER + text[-_STDERR_EXCERPT_CHARS:]
+    if key is None:
+        return captured
+    return key.redact_bytes(captured)
 
 
 class MagiRsTrio(TrioExecutor):
@@ -307,7 +238,15 @@ class MagiRsTrio(TrioExecutor):
         ``{mage}.json`` per verdict into ``output_dir``.
     """
 
-    def __init__(self, workdir: str, mode: str, timeout: int, bin_dir: str, pin: Pin) -> None:
+    def __init__(
+        self,
+        workdir: str,
+        mode: str,
+        timeout: int,
+        bin_dir: str,
+        pin: Pin,
+        key_store: KeyStore | None = None,
+    ) -> None:
         """Bind the executor to one project and one invocation.
 
         Args:
@@ -318,12 +257,17 @@ class MagiRsTrio(TrioExecutor):
             timeout: Wall-clock ceiling, already resolved by ``resolve_timeout``.
             bin_dir: The plugin's ``bin/``.
             pin: The parsed pin, for the bootstrap.
+            key_store: Where the key is loaded from. ``None`` means the
+                platform store from :func:`default_key_store`.
         """
         self._workdir = workdir
         self._mode = mode
         self._timeout = timeout
         self._bin_dir = bin_dir
         self._pin = pin
+        self._key_store = key_store if key_store is not None else default_key_store()
+        #: The key the last preflight loaded; injected into the child, never logged.
+        self._key: MagiKey | None = None
         #: The parsed envelope of the LAST run, for the report's ``magi_rs``
         #: block and the stderr warnings (MS4). ``None`` until a run completes
         #: past the contract check; the verdicts themselves travel through
@@ -392,7 +336,7 @@ class MagiRsTrio(TrioExecutor):
         argv = build_argv(executable, self._workdir, self._mode, self._timeout)
         stdout = await self._launch(argv, prompt, self._timeout, on_state, output_dir)
         self.last_result = ConsultResult.from_json(stdout)
-        return self._validate(self.last_result, output_dir)
+        return validate_verdicts(self.last_result, output_dir)
 
     def preflight(self) -> str:
         """Verify the binary and the project, spending nothing.
@@ -410,15 +354,17 @@ class MagiRsTrio(TrioExecutor):
             DownloadError, UnsupportedPlatformError: The binary could not be
                 obtained or did not verify. It is NOT executed.
             ProjectNotInitialisedError: No ``.magi/magi.toml`` under the
-                workdir. Names ``/magi --ollama-init``; never initialises.
+                workdir. Names ``run_magi.py --ollama-init``; never initialises.
+            KeyMissingError, KeyUnverifiableError, KeyExposedError: The key is
+                absent, its permissions could not be verified, or they are
+                loosened (not owner-only). Fail-closed.
 
         Side effects:
-            May download and install the binary into ``bin_dir``.
+            May download and install the binary into ``bin_dir``; stores the
+            loaded key for the launch.
         """
-        bootstrap = BinaryBootstrap(self._pin, self._bin_dir)
-        bootstrap.ensure()
-        executable = bootstrap.verify()
-        ProjectPreflight.require_initialised(self._workdir)
+        executable = verified_executable(BinaryBootstrap(self._pin, self._bin_dir))
+        self._key = ProjectPreflight.require_ready(self._workdir, self._key_store)
         return executable
 
     async def _launch(
@@ -463,8 +409,8 @@ class MagiRsTrio(TrioExecutor):
             at ``timeout``. magi-rs's deadline behaviour is internal to it, so
             this is re-measured on every pin bump.
         """
-        env = EnvironmentPolicy.build(os.environ)
-        _emit(on_state, _TRIO_NODE, "running")
+        env = EnvironmentPolicy.build(os.environ, passphrase=self._key)
+        emit_state(on_state, _TRIO_NODE, "running")
         # Encode BEFORE anything starts: a lone surrogate (argv or a file that
         # arrived via surrogateescape) is a deterministic payload defect, not a
         # transport failure -- refused as a contract error, never a traceback
@@ -484,113 +430,46 @@ class MagiRsTrio(TrioExecutor):
                 env=env,
             )
         except OSError as exc:
-            _emit(on_state, _TRIO_NODE, "failed")
+            emit_state(on_state, _TRIO_NODE, "failed")
             raise MagiRsProcessError(f"could not start {argv[0]}: {exc}") from exc
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(payload), timeout=timeout)
         except (asyncio.TimeoutError, TimeoutError) as exc:
             process.kill()
             await process.wait()
-            _emit(on_state, _TRIO_NODE, "timeout")
+            emit_state(on_state, _TRIO_NODE, "timeout")
             # A withheld proxy variable makes the child HANG on connect rather
             # than exit non-zero, so the allowlist diagnosis belongs here too.
             raise MagiRsProcessError(
                 f"magi-rs did not finish within --timeout {timeout}s; nothing is recovered "
-                f"from its partial output. {self._allowlist_hint()}"
+                f"from its partial output. {allowlist_hint()}"
             ) from exc
-        self._persist_raw(output_dir, stdout)
+        # The ONE redaction point: nothing the child said reaches a message, the
+        # stderr tail, the raw artifact or the parser with the key still in it.
+        stdout, stderr = self._redact(stdout), self._redact(stderr)
+        persist_raw(output_dir, stdout)
         if process.returncode != 0:
-            _emit(on_state, _TRIO_NODE, "failed")
+            emit_state(on_state, _TRIO_NODE, "failed")
             raise MagiRsProcessError(
                 f"magi-rs exited {process.returncode}; stderr: "
-                f"{_stderr_tail(stderr)!r}. "
-                f"{self._allowlist_hint()}"
+                f"{stderr_tail(stderr)!r}. "
+                f"{VAULT_HINT} {allowlist_hint()}"
             )
-        _emit(on_state, _TRIO_NODE, "success")
+        emit_state(on_state, _TRIO_NODE, "success")
         return stdout.decode("utf-8", errors="replace")
 
-    @staticmethod
-    def _allowlist_hint() -> str:
-        """The diagnosis every process failure carries: what the allowlist withheld.
-
-        Returns:
-            One sentence naming the allowlist as a suspect and listing the
-            parent variables (names only, never values) that did not travel.
-        """
-        withheld = EnvironmentPolicy.withheld(os.environ)
-        return (
-            "The child ran with an allowlisted environment (see magi_rs_env.py); if the "
-            "failure looks like a missing certificate, proxy or host, the allowlist is "
-            f"a suspect -- it withheld: {withheld}"
-        )
-
-    @staticmethod
-    def _persist_raw(output_dir: str, stdout: bytes) -> None:
-        """Write the raw envelope under its own name (R16); fail-soft.
+    def _redact(self, captured: bytes) -> bytes:
+        """Remove the key from bytes captured from the child.
 
         Args:
-            output_dir: Destination directory.
-            stdout: The child's stdout, verbatim.
+            captured: The child's stdout or stderr.
 
         Returns:
-            None.
+            ``captured`` with every exact occurrence of the key replaced by
+            ``REDACTION_MARKER`` (:meth:`MagiKey.redact_bytes`); unchanged when
+            no key is loaded.
 
-        Side effects:
-            Writes ``magi-rs-raw.json``; a failed write only warns, because an
-            audit artifact must not be able to destroy the verdicts it records.
+        Complexity:
+            O(n) in the captured size, once per stream per launch.
         """
-        try:
-            write_raw_artifact(output_dir, stdout)
-        except OSError as exc:
-            print(f"WARNING: failed to persist {_RAW_ARTIFACT}: {exc}", file=sys.stderr)
-
-    @staticmethod
-    def _validate(
-        result: ConsultResult, output_dir: str
-    ) -> dict[str, dict[str, Any] | BaseException]:
-        """Push each verdict through the EXISTING validator, unchanged.
-
-        Each verdict is written to ``{mage}.json`` -- the same per-mage artifact
-        the Claude path leaves -- and read back by ``load_agent_output``, whose
-        contract is a file path.
-
-        Args:
-            result: The parsed consult result.
-            output_dir: Where the per-mage files are written.
-
-        Returns:
-            One entry per mage of the trio: the validated dict, the
-            ``ValidationError`` it failed with, or -- for a mage magi-rs did not
-            deliver at all -- a ``RuntimeError`` carrying magi-rs's own cause
-            from ``failed_agents`` (the shape the orchestrator's degraded path
-            already handles, BDD-15/D7). A verdict that breaks the seven-key
-            contract is rejected EXACTLY as today (BDD-14c) -- no new validation
-            code, and no relaxing of the contract.
-
-        Side effects:
-            Writes one ``{mage}.json`` per verdict.
-        """
-        failed = result.telemetry.get("failed_agents") or {}
-        verdicts: dict[str, dict[str, Any] | BaseException] = {
-            mage: RuntimeError(
-                f"magi-rs delivered no verdict for {mage}: "
-                f"{failed.get(mage, _NO_VERDICT_CAUSE) if isinstance(failed, dict) else failed}"
-            )
-            for mage in _MAGES
-        }
-        for index, verdict in enumerate(result.agents):
-            name = verdict.get("agent") if isinstance(verdict, dict) else None
-            # The name is data from the child: only a seat of the trio may name
-            # the artifact, so a crafted name cannot write outside output_dir.
-            mage = name if name in _MAGES else f"agent-{index}"
-            path = os.path.join(output_dir, f"{mage}.json")
-            try:
-                with open(path, "w", encoding="utf-8") as handle:
-                    json.dump(verdict, handle, ensure_ascii=False, indent=2)
-                verdicts[mage] = load_agent_output(path)
-            except (ValidationError, json.JSONDecodeError, OSError, UnicodeEncodeError) as exc:
-                # UnicodeEncodeError: json.loads yields a lone surrogate from a
-                # JSON escape that the UTF-8 file write cannot take -- that
-                # seat's failure, never the run's.
-                verdicts[mage] = exc
-        return verdicts
+        return redact_captured(self._key, captured)

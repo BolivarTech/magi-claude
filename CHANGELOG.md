@@ -9,6 +9,59 @@ Install and update through the marketplace: `/plugin marketplace add BolivarTech
 `/plugin install magi@bolivartech-plugins`, then `/plugin marketplace update` to pick up a new
 release.
 
+## [8.0.0] - 2026-11-21
+
+### Breaking
+
+- `code-review --ollama` now takes a path or a git revision (`--commit`, `--from` with
+  `--to`, `--base` with `--head`, `--uncommitted`) and hands it to `magi-rs code-review`.
+  With no target it reviews `--base main --head HEAD`. A `.md` file given as the input is
+  reviewed as a file; in 7.x it was read as the prompt, so a 7.x bundle no longer frames a
+  review. The banner prints the reviewed target.
+  `--base` on its own is now an error on `code-review --ollama`: it is half of a
+  `--base` with `--head` target. `--no-enrich`, `--enrich-max-chars` and
+  `--warn-input-tokens` do nothing there and print a warning if you pass them.
+- Every `--ollama` run opens the `magi-rs` state with a key, and a `.magi/` created by 7.x
+  has none. Move it outside the project, run `--ollama-init` and reload your API keys with
+  `--ollama-vault-set`. The new `magi.toml` is the binary's default; nothing is copied from
+  the old one.
+- `--ollama-init` exits 1 with a `[FATAL]` line when it fails. In 7.x it relayed the refusal
+  and exited 0.
+- `code-review --ollama` needs the `[embedding]` endpoint to answer. 7.x ran without an
+  embedder; now the run stops with `[FATAL]` before the trio or the gate is called.
+
+### Added
+
+- `--ollama-init` generates the key (32 random bytes, base64) in `.magi/.secret/magi.key`.
+  It is plain text next to the database, owner-only (POSIX modes and owner; on Windows a
+  protected DACL with only your SID), and verified before every run. A key that is loose,
+  missing or empty stops the run with `[FATAL]`.
+- `--ollama-vault-set <NAME>` stores an API key in the vault, read from stdin or a hidden
+  prompt. `--ollama-rotate-key [--yes]` replaces an exposed key, the database and the vault,
+  moving the old `.magi/` to a backup outside every working tree and listing the names of
+  the keys to revoke. A lost key cannot be recovered.
+- `code-review --ollama` checks that the `[embedding]` endpoint answers before any model is
+  called. The `code_review` object of `magi-rs` is copied to `magi_rs.code_review`, with an
+  effort block. `without_embedder` marks the run degraded; `without_memory` is an error.
+- The release check on marker adherence now measures `analysis --ollama` in a throwaway
+  workspace. Its series starts again at 8.0.0 and the artifact declares `schema: "v8"`.
+
+### Changed
+
+- No `--ollama` mode passes `--no-memory` any more. With `magi-rs` 0.25.0, `design` and
+  `analysis` use the key only to open the vault; they do not store or retrieve memory and
+  do not call the embedder.
+- `docs/ollama-backend.md` documents the key and its limits, the data each endpoint
+  receives, and the defaults `--ollama-init` writes, including the local `clef-flash` and
+  `nimble` fallbacks.
+
+### Known limitations
+
+- With the cloud trio, `magi-rs` 0.25.0 cannot measure the models' context windows and sizes
+  each review batch against its 32 768-token default, which caps a batch near 16 000 tokens.
+  A changed unit larger than that stops `code-review --ollama` before any model is called (a
+  new 806-line Python file did, in our measurement). Review a smaller commit or range.
+
 ## [7.1.0] - 2026-11-19
 
 ### Changed
