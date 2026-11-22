@@ -302,3 +302,44 @@ def test_the_history_warning_marker_is_pinned_to_magi_rs_wording():
 def test_the_timeout_rejection_marker_is_pinned_to_magi_rs_wording():
     """Part of the budget rejection measured against magi-rs 0.25.0 (``pass --timeout``)."""
     assert TIMEOUT_REJECTION_MARKER == "pass --timeout"
+
+
+class _TwoChunkStdout:
+    """A stdout that is silent until released, then yields two chunks and never closes."""
+
+    def __init__(self, chunks):
+        self._chunks, self.released = list(chunks), asyncio.Event()
+
+    async def read(self, n=-1):
+        await self.released.wait()
+        if self._chunks:
+            return self._chunks.pop(0)
+        await asyncio.sleep(3600)  # the pipe never closes
+
+
+class _TwoChunkProcess(_StreamingProcess):
+    """After the kill the envelope arrives in two chunks and EOF never follows."""
+
+    def __init__(self, envelope: bytes):
+        super().__init__(envelope, exits_after=None)
+        half = len(envelope) // 2
+        self._two = _TwoChunkStdout([envelope[:half], envelope[half:]])
+
+    @property
+    def stdout(self):
+        return self._two
+
+    def kill(self):
+        self._two.released.set()
+        super().kill()
+
+
+@pytest.mark.asyncio
+async def test_chunks_read_before_the_drain_deadline_are_kept(monkeypatch, tmp_path):
+    # G4 re-review: a single read() cancelled by the deadline loses what it already consumed.
+    monkeypatch.setattr("magi_rs_code_review.HISTORY_WINDOW_SECONDS", 0.1)
+    monkeypatch.setattr("magi_rs_code_review.PROC_STDERR_DRAIN_TIMEOUT", 0.3)
+    process = _TwoChunkProcess(_cr_payload())
+    executor, _ = _review(monkeypatch, tmp_path, process, timeout=0)
+    verdicts = await asyncio.wait_for(executor.run_trio("", "agents", str(tmp_path), 0, {}, 1), 5)
+    assert len(verdicts) == 3 and executor.history_recorded is False
