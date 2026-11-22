@@ -157,6 +157,12 @@ MAGI_RS_CAUSE_MAP: Mapping[str, str] = {
     "agent-identity": "agent_identity",
 }
 
+#: Seconds ``--ollama-init`` may take in :func:`prepare_workspace`. Generous on purpose: on a
+#: fresh machine it may download and verify the pinned magi-rs binary (about 12 MB, plus a
+#: ``--version`` spawn) and then run ``magi-rs init``; ten minutes covers a slow link without
+#: letting a wedged child hang the release measurement forever.
+OLLAMA_INIT_TIMEOUT_SECONDS = 600
+
 #: How many runs had to be measured through the BLIND fallback (no ``magi-report.json``,
 #: so only each mage's last attempt is on disk). It is carried INTO the artifact and it
 #: forbids a green verdict: ``make release-check`` reads the artifact and nothing else, so
@@ -475,14 +481,22 @@ def prepare_workspace(scratch: Path) -> Path:
         ``run_magi.py --ollama-init``.
 
     Raises:
-        RuntimeError: If ``--ollama-init`` exits non-zero (the message names the code).
+        RuntimeError: If ``--ollama-init`` exits non-zero (the message names the code) or
+            exceeds :data:`OLLAMA_INIT_TIMEOUT_SECONDS` (the message names the timeout).
     """
     workspace = Path(tempfile.mkdtemp(prefix=WORKSPACE_PREFIX, dir=scratch))
-    result = subprocess.run(
-        [sys.executable, str(_RUN_MAGI_PATH), "--ollama-init"],
-        check=False,
-        cwd=workspace,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(_RUN_MAGI_PATH), "--ollama-init"],
+            check=False,
+            cwd=workspace,
+            timeout=OLLAMA_INIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"--ollama-init did not finish within {OLLAMA_INIT_TIMEOUT_SECONDS}s while "
+            f"preparing the measurement workspace {workspace}"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"--ollama-init failed with exit code {result.returncode} while preparing "
@@ -648,6 +662,18 @@ def build_artifact(
                 f"no raw output was measured for agent {agent!r} -- an artifact built "
                 "from zero samples for a seat cannot certify anything"
             )
+
+    stray = sorted(
+        cause
+        for counts in tally.values()
+        for cause, count in counts.items()
+        if count and cause != OK_TALLY_KEY and cause not in CAUSES
+    )
+    if stray:
+        raise RuntimeError(
+            f"tallied cause {stray[0]!r} is not a column of the artifact (CAUSES): "
+            "it would be dropped and the seat scored clean"
+        )
 
     if fallback_measured:
         # A blind measurement cannot certify anything -- not even when it saw no failure.
