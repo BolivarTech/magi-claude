@@ -170,6 +170,9 @@ VALID_MODES = ("code-review", "design", "analysis")
 #: Attempts per model, by default: the original + 1 retry with corrective feedback.
 DEFAULT_MAX_ATTEMPTS = 2
 
+#: Default ``--enrich-max-chars``: the cap on the enriched code-review context.
+DEFAULT_ENRICH_MAX_CHARS = 512_000
+
 #: The bounds themselves live in ``validate`` and are RE-EXPORTED here so the two doors --
 #: this flag and any direct ``run_orchestrator`` caller -- cannot disagree.
 #: **This is not paranoia:** ``--max-attempts 1000`` (one zero too many)
@@ -427,13 +430,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--enrich-max-chars",
         type=int,
-        default=512_000,
-        help="Max chars of enriched code-review context (default: 512000)",
+        # None sentinel, like --max-attempts: "was it passed?" is asked below.
+        default=None,
+        help=f"Max chars of enriched code-review context (default: {DEFAULT_ENRICH_MAX_CHARS})",
     )
     parser.add_argument(
         "--warn-input-tokens",
         type=int,
-        default=WARN_INPUT_TOKENS,
+        default=None,
         help=(
             f"Warn when estimated input tokens exceed this value "
             f"(default: {WARN_INPUT_TOKENS}). Warning reflects the RAW input "
@@ -499,7 +503,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "runs (keeping only the one about to be created), or --keep-runs "
             "-1 to disable cleanup entirely."
         )
-    if args.warn_input_tokens <= 0:
+    if args.warn_input_tokens is not None and args.warn_input_tokens <= 0:
         parser.error("--warn-input-tokens must be a positive integer")
     _check_subcommands(parser, args)
     standalone = args.ollama_init or args.ollama_vault_set is not None or args.ollama_rotate_key
@@ -538,8 +542,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "magi-rs owns every retry and rotation (.magi/magi.toml)",
             file=sys.stderr,
         )
+    if native_review:
+        # code-review --ollama delegates the whole review to magi-rs: the plugin neither
+        # enriches nor measures the input, so these Claude-path flags are inert there.
+        inert = [
+            flag
+            for flag, given in (
+                ("--no-enrich", args.enrich is False),
+                ("--enrich-max-chars", args.enrich_max_chars is not None),
+                ("--warn-input-tokens", args.warn_input_tokens is not None),
+            )
+            if given
+        ]
+        if inert:
+            print(
+                f"[!] WARNING: {', '.join(inert)} has no effect with code-review --ollama: "
+                "magi-rs builds the review context itself",
+                file=sys.stderr,
+            )
     if args.max_attempts is None:
         args.max_attempts = DEFAULT_MAX_ATTEMPTS
+    if args.enrich_max_chars is None:
+        args.enrich_max_chars = DEFAULT_ENRICH_MAX_CHARS
+    if args.warn_input_tokens is None:
+        args.warn_input_tokens = WARN_INPUT_TOKENS
     # INVARIANT: --model must stay None when --ollama is set. Do NOT collapse
     # this into `args.model or MODE_DEFAULT_MODELS[...]` — that would silently
     # re-enable `--ollama --model` and feed Ollama a Claude-shaped model name.
