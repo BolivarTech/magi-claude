@@ -517,18 +517,20 @@ def prepare_workspace(scratch: Path) -> Path:
     """
     workspace = Path(tempfile.mkdtemp(prefix=WORKSPACE_PREFIX, dir=scratch))
     command = [sys.executable, str(_RUN_MAGI_PATH), "--ollama-init"]
-    with subprocess.Popen(command, cwd=workspace) as process:
-        try:
-            process.communicate(timeout=OLLAMA_INIT_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as exc:
-            _kill_init_tree(process)
-            raise RuntimeError(
-                f"--ollama-init did not finish within {OLLAMA_INIT_TIMEOUT_SECONDS}s while "
-                f"preparing the measurement workspace {workspace}"
-            ) from exc
-        except BaseException:
-            _kill_init_tree(process)  # Ctrl-C and friends: never leave the tree behind
-            raise
+    # No ``with``: ``Popen.__exit__`` waits with NO timeout, which would hang on a child that
+    # survived the bounded kill. There are no pipes to close, so nothing else is lost.
+    process = subprocess.Popen(command, cwd=workspace)
+    try:
+        process.communicate(timeout=OLLAMA_INIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        _kill_init_tree(process)
+        raise RuntimeError(
+            f"--ollama-init did not finish within {OLLAMA_INIT_TIMEOUT_SECONDS}s while "
+            f"preparing the measurement workspace {workspace}"
+        ) from exc
+    except BaseException:
+        _kill_init_tree(process)  # Ctrl-C and friends: never leave the tree behind
+        raise
     if process.returncode != 0:
         raise RuntimeError(
             f"--ollama-init failed with exit code {process.returncode} while preparing "
