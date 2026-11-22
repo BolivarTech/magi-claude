@@ -18,6 +18,9 @@ release.
   With no target it reviews `--base main --head HEAD`. A `.md` file given as the input is
   reviewed as a file; in 7.x it was read as the prompt, so a 7.x bundle no longer frames a
   review. The banner prints the reviewed target.
+  `--base` on its own is now an error on `code-review --ollama`: it is half of a
+  `--base` with `--head` target. `--no-enrich`, `--enrich-max-chars` and
+  `--warn-input-tokens` do nothing there and print a warning if you pass them.
 - Every `--ollama` run opens the `magi-rs` state with a key, and a `.magi/` created by 7.x
   has none. Move it outside the project, run `--ollama-init` and reload your API keys with
   `--ollama-vault-set`. The new `magi.toml` is the binary's default; nothing is copied from
