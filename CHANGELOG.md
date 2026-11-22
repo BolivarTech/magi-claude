@@ -9,6 +9,17 @@ Install and update through the marketplace: `/plugin marketplace add BolivarTech
 `/plugin install magi@bolivartech-plugins`, then `/plugin marketplace update` to pick up a new
 release.
 
+## [8.0.1] - 2026-11-21
+
+### Fixed
+
+- The documented cause of the `code-review --ollama` batch limit was wrong. `magi-rs` 0.25.0
+  does measure the context windows of cloud models. The cap near 16 000 tokens comes from any
+  single model in the pool, seat or fallback, whose window the daemon does not report: it counts
+  as 32 768 tokens. `mistral-large-3:675b-cloud`, one of the fallbacks `magi-rs init` writes,
+  was retired on November 9, 2026 and reports no window. Corrected in `docs/ollama-backend.md`
+  (section 1a and the troubleshooting table) and in the 8.0.0 known limitations. No code changed.
+
 ## [8.0.0] - 2026-11-21
 
 ### Breaking
@@ -57,10 +68,11 @@ release.
 
 ### Known limitations
 
-- With the cloud trio, `magi-rs` 0.25.0 cannot measure the models' context windows and sizes
-  each review batch against its 32 768-token default, which caps a batch near 16 000 tokens.
-  A changed unit larger than that stops `code-review --ollama` before any model is called (a
-  new 806-line Python file did, in our measurement). Review a smaller commit or range.
+- `magi-rs` 0.25.0 sizes each review batch at half of the smallest context window in the pool,
+  and a model whose window the daemon does not report counts as 32 768 tokens, so one such model
+  caps a batch near 16 000 tokens. A changed unit larger than that stops `code-review --ollama`
+  before any model is called (a new 806-line Python file did, in our measurement). Review a
+  smaller commit or range. (Corrected in 8.0.1.)
 
 ## [7.1.0] - 2026-11-19
 
