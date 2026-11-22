@@ -1031,3 +1031,26 @@ def test_a_failed_batch_does_not_shift_the_batch_index():
     batches[:] = [dict(batches[0], index=1), dict(batches[0], index=3)]
     effort = CodeReviewResult.from_json(json.dumps(envelope)).effort()
     assert [entry["index"] for entry in effort["tokens_by_batch"]] == [1, 3]
+
+
+# --- MAGI run 2 wave, G3: the counts the degrading causes read must be well typed ---------
+
+
+@pytest.mark.parametrize(
+    "field", ["batches_planned", "batches_completed", "undelivered_units_unlisted"]
+)
+@pytest.mark.parametrize("value", ["2", True, -1, 1.5, None])
+def test_a_badly_typed_count_is_an_off_contract_envelope(field, value):
+    with pytest.raises(MagiRsContractError, match=field):
+        CodeReviewResult.from_json(_raw(**{field: value}))
+
+
+@pytest.mark.parametrize("field", ["failed_batches", "undelivered_units"])
+@pytest.mark.parametrize("value", ["x", 1, {"a": 1}, None])
+def test_a_non_list_loss_field_is_an_off_contract_envelope(field, value):
+    with pytest.raises(MagiRsContractError, match=field):
+        CodeReviewResult.from_json(_raw(**{field: value}))
+
+
+def test_the_clean_capture_passes_the_type_checks():
+    assert CodeReviewResult.from_json(_raw()).degrading_causes == []
