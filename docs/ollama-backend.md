@@ -125,13 +125,20 @@ the history could not be recorded, `magi-rs` says so on stderr; the plugin detec
 line and prints its own warning, and the report already written stays valid.
 
 **Size of a batch.** `magi-rs` lets one batch, code and context together, take up to half of the
-smallest context window in the pool (the trio plus its fallbacks). A model whose window it could
-not measure counts as 32 768 tokens, and the report lists those models in
-`magi_rs.code_review.unmeasured_models`. With the cloud trio the windows go unmeasured, so a batch
-is capped near 16 000 tokens. A changed unit that does not fit in one batch by itself stops the
-review before any model is called: in our measurement with 0.25.0, a new Python file of 806 lines
-needed 19 281 tokens against a limit of 16 268. The plugin shows the refusal as one `ERROR:` line.
-Review a smaller target instead, such as a commit or a range whose changed units fit.
+smallest context window in the pool (the trio plus its fallbacks). It reads each window from the
+Ollama daemon, cloud models included. A model the daemon reports no window for counts as 32 768
+tokens, and the report lists those models in `magi_rs.code_review.unmeasured_models`. One such model
+anywhere in the pool caps every batch near 16 000 tokens, however large the other windows are. Which
+models go unmeasured depends on the daemon. A retired model reports none: `mistral-large-3:675b-cloud`,
+one of the fallbacks `magi-rs init` writes, was retired on November 9, 2026. If the report lists a
+retired fallback, replace it in `.magi/magi.toml`.
+
+A hunk of a diff is never split. A changed unit that does not fit in one batch by itself therefore
+stops the review before any model is called: in our measurement with 0.25.0, a new Python file of
+806 lines needed 19 281 tokens, context included, against a limit of 16 268. The plugin shows the
+refusal as one `ERROR:` line. Review a smaller target instead, such as a commit or a range whose
+changed units fit. A file given as a path is split by its units (functions, methods) instead of
+being sent as one piece.
 
 **Framing a gate.** Without a bundle, what the mages are told is settled comes from the
 documentation `magi-rs` indexes: `README.md` and `CLAUDE.md` at the root, `docs/**/*.md`,
@@ -438,7 +445,7 @@ a different mode and are not comparable.
 | `[FATAL]` about the key's permissions | The key file or its directory is reachable by others. Treat the database and the vault as compromised and run `--ollama-rotate-key` (section 2a). |
 | `[FATAL]` naming the embedder endpoint | `code-review --ollama` could not connect to the `[embedding]` endpoint. Start it, or fix `base_url` in `.magi/magi.toml` (section 1a). |
 | `ERROR:` naming `--timeout` on a `code-review --ollama` | `magi-rs` refused the total as too small for the batches before spending anything. Pass a larger `--timeout` (section 1a). |
-| `ERROR:` with `does not fit in one batch` on a `code-review --ollama` | A changed unit is larger than one batch, which is capped near 16 000 tokens when the trio's windows are unmeasured. Review a smaller commit or range (section 1a). |
+| `ERROR:` with `does not fit in one batch` on a `code-review --ollama` | A changed unit is larger than one batch. Batches are capped near 16 000 tokens when any model in the pool has no measured window (`magi_rs.code_review.unmeasured_models`). Replace a retired fallback, or review a smaller commit or range, or the file as a path (section 1a). |
 | `degraded: true` with `without_embedder` | The embedder failed during the review. The report is written but approves no gate; fix the embedder and run again. |
 
 ## 8. References
