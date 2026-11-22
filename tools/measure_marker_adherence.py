@@ -383,7 +383,8 @@ def measure_run_report(report_path: Path) -> None:
         json.JSONDecodeError: If the report is not valid JSON -- an infrastructure problem
             with the sample, never silently swallowed into a zero.
         ValueError: If a magi-rs record carries a cause missing from the mapping.
-        RuntimeError: If the report has a ``magi_rs`` block without ``extraction_failures``.
+        RuntimeError: If the report has a ``magi_rs`` block whose ``extraction_failures`` is
+            absent or not an object.
     """
     report: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
     failures: Mapping[str, Mapping[str, int]] = report.get("extraction_failures", {})
@@ -392,14 +393,17 @@ def measure_run_report(report_path: Path) -> None:
     magi_rs_block = report.get("magi_rs")
     magi_rs_failures: Mapping[str, list[Mapping[str, Any]]] = {}
     if magi_rs_block is not None:
-        # A magi-rs report always carries the tally (all 44 corpus reports do): its absence
-        # is a broken measurement, never a clean seat.
-        if "extraction_failures" not in magi_rs_block:
+        # A magi-rs report always carries the tally as an object (an empty one is a clean
+        # run). A missing tally is written as ``null``, and any non-object value is as
+        # unreadable: both are a broken measurement, never a clean seat.
+        tally_value = magi_rs_block.get("extraction_failures")
+        if not isinstance(tally_value, dict):
             raise RuntimeError(
-                f"{report_path} has a magi_rs block but no extraction_failures: "
-                "the run cannot be scored"
+                f"{report_path} has a magi_rs block whose extraction_failures is "
+                f"{'absent' if 'extraction_failures' not in magi_rs_block else 'not an object'}"
+                ": the run cannot be scored"
             )
-        magi_rs_failures = magi_rs_block["extraction_failures"] or {}
+        magi_rs_failures = tally_value
 
     for agent in AGENT_NAMES:
         for cause, count in failures.get(agent, {}).items():
