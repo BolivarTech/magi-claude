@@ -763,12 +763,6 @@ class _FakePopen:
         self.timeouts, self.wait_timeouts = [], []
         _FakePopen.instances.append(self)
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        return False
-
     def communicate(self, timeout=None):
         self.timeouts.append(timeout)
         if self._interrupt and len(self.timeouts) == 1:
