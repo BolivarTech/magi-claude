@@ -6342,3 +6342,40 @@ def test_the_native_review_report_carries_a_null_guard(monkeypatch, tmp_path):
         monkeypatch, tmp_path, ["code-review", "--ollama", "--commit", "abc"]
     )
     assert "guard" in report and report["guard"] is None
+
+
+class TestInertFlagsOnTheNativeReview:
+    """Loop 1 m9: the Claude-path enrichment flags do nothing under code-review --ollama."""
+
+    _NATIVE = ["code-review", "--ollama", "--commit", "abc"]
+
+    @pytest.mark.parametrize(
+        "flag",
+        [["--no-enrich"], ["--enrich-max-chars", "512000"], ["--warn-input-tokens", "150000"]],
+        ids=["no-enrich", "enrich-max-chars-default-value", "warn-input-tokens-default-value"],
+    )
+    def test_a_passed_flag_says_it_has_no_effect(self, capsys, flag):
+        import run_magi
+
+        run_magi.parse_args([*self._NATIVE, *flag])
+
+        err = capsys.readouterr().err
+        assert flag[0] in err and "has no effect with code-review --ollama" in err
+        assert len([line for line in err.splitlines() if "WARNING" in line]) == 1
+
+    def test_not_passing_them_stays_quiet_and_keeps_the_defaults(self, capsys):
+        import run_magi
+
+        args = run_magi.parse_args(self._NATIVE)
+
+        assert capsys.readouterr().err == ""
+        assert args.enrich_max_chars == 512_000
+        assert args.warn_input_tokens == run_magi.WARN_INPUT_TOKENS
+
+    def test_the_claude_path_and_other_ollama_modes_stay_quiet(self, capsys):
+        import run_magi
+
+        run_magi.parse_args(["code-review", "x.md", "--no-enrich"])
+        run_magi.parse_args(["design", "x.md", "--ollama", "--warn-input-tokens", "10"])
+
+        assert capsys.readouterr().err == ""
