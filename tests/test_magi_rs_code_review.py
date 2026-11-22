@@ -255,3 +255,35 @@ async def test_the_overrun_kill_takes_down_the_process_tree(monkeypatch, tmp_pat
     executor, _ = _review(monkeypatch, tmp_path, process, timeout=0)
     await asyncio.wait_for(executor.run_trio("", "agents", str(tmp_path), 0, {}, 1), 5)
     assert killed_trees == [process.pid]
+
+
+class _LateStdoutProcess(_StreamingProcess):
+    """A wedged child whose complete envelope reaches the pipe only once it is killed.
+
+    Models an envelope written to the pipe but not yet read when the deadline fires: the
+    reader sees nothing until the kill, after which the bytes are there and EOF follows.
+    """
+
+    def _streams(self):
+        if self._readers is None:
+            out, err = asyncio.StreamReader(), asyncio.StreamReader()
+            err.feed_eof()
+            self._readers = (out, err)
+        return self._readers
+
+    def kill(self):
+        out = self._streams()[0]
+        out.feed_data(self._out)
+        out.feed_eof()
+        super().kill()
+
+
+@pytest.mark.asyncio
+async def test_a_complete_envelope_still_unread_at_the_kill_is_kept(monkeypatch, tmp_path):
+    # MAGI run 2, G4: the overrun kill must drain stdout before judging it incomplete.
+    monkeypatch.setattr("magi_rs_code_review.HISTORY_WINDOW_SECONDS", 0.1)
+    process = _LateStdoutProcess(_cr_payload(), exits_after=None)
+    executor, _ = _review(monkeypatch, tmp_path, process, timeout=0)
+    verdicts = await asyncio.wait_for(executor.run_trio("", "agents", str(tmp_path), 0, {}, 1), 5)
+    assert process.killed is True and executor.history_recorded is False
+    assert len(verdicts) == 3
