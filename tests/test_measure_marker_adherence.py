@@ -1065,3 +1065,23 @@ def test_an_interrupt_kills_the_init_tree_and_propagates(monkeypatch, tmp_path):
     with pytest.raises(KeyboardInterrupt):
         mma.prepare_workspace(tmp_path)
     assert killed == [started[0].pid] and started[0].killed is True
+
+
+# --- MAGI run 2 wave ---------------------------------------------------------------
+
+
+def test_a_magi_rs_report_without_extraction_failures_is_a_measurement_error(tmp_path):
+    # G2: absence must not read as "no failures"; a seat would be scored clean on silence.
+    def mutate(report):
+        del report["magi_rs"]["extraction_failures"]
+
+    path = _copy_magi_rs_report(tmp_path, mutate)
+    with pytest.raises(RuntimeError, match="extraction_failures") as exc:
+        mma.measure_run_report(path)
+    assert str(path) in str(exc.value) and "\n" not in str(exc.value)
+
+
+def test_a_report_without_a_magi_rs_block_is_still_measured(tmp_path):
+    path = _write_run_report(tmp_path, agents=mma.AGENT_NAMES)
+    mma.measure_run_report(path)
+    assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1
