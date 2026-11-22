@@ -747,31 +747,52 @@ def test_a_claude_only_measurement_never_prepares_a_workspace(monkeypatch, tmp_p
 
 
 class _FakePopen:
-    """A ``subprocess.Popen`` stand-in for ``--ollama-init``: exits with ``returncode`` or hangs."""
+    """A ``subprocess.Popen`` stand-in for ``--ollama-init``.
+
+    ``hangs``: the first ``communicate`` raises TimeoutExpired. ``immortal``: it never dies,
+    so a bounded ``wait`` expires. Otherwise a hung child dies on ``kill()`` only.
+    ``interrupt``: the first ``communicate`` raises KeyboardInterrupt.
+    """
 
     instances: list = []
 
-    def __init__(self, command, returncode=0, hangs=False, **kwargs):
-        self.command, self.kwargs, self.pid = command, kwargs, 4242
-        self.returncode, self._hangs, self.killed = returncode, hangs, False
+    def __init__(self, command, returncode=0, hangs=False, immortal=False, interrupt=False, **kw):
+        self.command, self.kwargs, self.pid = command, kw, 4242
+        self.returncode, self._hangs, self._immortal = returncode, hangs, immortal
+        self._interrupt, self.killed = interrupt, False
+        self.timeouts, self.wait_timeouts = [], []
         _FakePopen.instances.append(self)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
     def communicate(self, timeout=None):
-        self.timeouts = [*getattr(self, "timeouts", []), timeout]
-        if self._hangs and len(self.timeouts) == 1:  # only the first wait hangs; the reap returns
+        self.timeouts.append(timeout)
+        if self._interrupt and len(self.timeouts) == 1:
+            raise KeyboardInterrupt
+        if self._hangs and len(self.timeouts) == 1:
             raise mma.subprocess.TimeoutExpired(self.command, timeout)
         return None, None
+
+    def wait(self, timeout=None):
+        self.wait_timeouts.append(timeout)
+        if self._immortal or (self._hangs and not self.killed):
+            raise mma.subprocess.TimeoutExpired(self.command, timeout)
+        return self.returncode
 
     def kill(self):
         self.killed = True
 
 
-def _fake_popen(monkeypatch, returncode=0, hangs=False):
+def _fake_popen(monkeypatch, returncode=0, **flags):
     _FakePopen.instances = []
     monkeypatch.setattr(
         mma.subprocess,
         "Popen",
-        lambda command, **kwargs: _FakePopen(command, returncode, hangs, **kwargs),
+        lambda command, **kwargs: _FakePopen(command, returncode, **flags, **kwargs),
     )
     return _FakePopen.instances
 
@@ -1008,13 +1029,15 @@ def test_prepare_workspace_turns_a_timeout_into_one_line_naming_it(monkeypatch, 
 
 
 def test_a_timed_out_init_has_its_whole_tree_killed_on_windows(monkeypatch, tmp_path):
+    # windows_kill_tree is best-effort: it is a no-op here and the child only dies on kill().
     started = _fake_popen(monkeypatch, hangs=True)
     killed = []
     monkeypatch.setattr(mma, "windows_kill_tree", killed.append)
     monkeypatch.setattr(mma.sys, "platform", "win32")
     with pytest.raises(RuntimeError, match=str(mma.OLLAMA_INIT_TIMEOUT_SECONDS)):
         mma.prepare_workspace(tmp_path)
-    assert killed == [started[0].pid]
+    assert killed == [started[0].pid] and started[0].killed is True
+    assert started[0].wait_timeouts == [mma.PROC_WAIT_REAP_TIMEOUT]
 
 
 def test_a_timed_out_init_is_killed_directly_off_windows(monkeypatch, tmp_path):
@@ -1025,3 +1048,26 @@ def test_a_timed_out_init_is_killed_directly_off_windows(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError):
         mma.prepare_workspace(tmp_path)
     assert killed == [] and started[0].killed is True
+
+
+def test_an_init_that_survives_the_kill_warns_and_still_raises_without_hanging(
+    monkeypatch, tmp_path, capsys
+):
+    started = _fake_popen(monkeypatch, hangs=True, immortal=True)
+    monkeypatch.setattr(mma, "windows_kill_tree", lambda pid: None)
+    with pytest.raises(RuntimeError, match=str(mma.OLLAMA_INIT_TIMEOUT_SECONDS)) as exc:
+        mma.prepare_workspace(tmp_path)
+    assert "\n" not in str(exc.value)
+    assert started[0].wait_timeouts == [mma.PROC_WAIT_REAP_TIMEOUT]
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "4242" in err
+
+
+def test_an_interrupt_kills_the_init_tree_and_propagates(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch, interrupt=True)
+    killed = []
+    monkeypatch.setattr(mma, "windows_kill_tree", killed.append)
+    monkeypatch.setattr(mma.sys, "platform", "win32")
+    with pytest.raises(KeyboardInterrupt):
+        mma.prepare_workspace(tmp_path)
+    assert killed == [started[0].pid] and started[0].killed is True
