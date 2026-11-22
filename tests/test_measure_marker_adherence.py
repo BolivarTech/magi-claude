@@ -1085,3 +1085,54 @@ def test_a_report_without_a_magi_rs_block_is_still_measured(tmp_path):
     path = _write_run_report(tmp_path, agents=mma.AGENT_NAMES)
     mma.measure_run_report(path)
     assert mma.tally["caspar"][mma.OK_TALLY_KEY] == 1
+
+
+def _patch_posix_group_kill(monkeypatch):
+    """Platform patched to linux; ``os.killpg``/``signal.SIGKILL`` recorded (absent on Windows)."""
+    groups = []
+    monkeypatch.setattr(mma.sys, "platform", "linux")
+    monkeypatch.setattr(mma.os, "killpg", lambda pid, sig: groups.append((pid, sig)), raising=False)
+    monkeypatch.setattr(mma.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(mma, "windows_kill_tree", lambda pid: pytest.fail("not on POSIX"))
+    return groups
+
+
+def test_a_timed_out_init_has_its_process_group_killed_on_posix(monkeypatch, tmp_path):
+    # G1: the magi-rs init grandchild must not survive the parent.
+    started = _fake_popen(monkeypatch, hangs=True)
+    groups = _patch_posix_group_kill(monkeypatch)
+    with pytest.raises(RuntimeError):
+        mma.prepare_workspace(tmp_path)
+    assert groups == [(started[0].pid, 9)] and started[0].killed is True
+
+
+def test_an_interrupt_kills_the_process_group_on_posix(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch, interrupt=True)
+    groups = _patch_posix_group_kill(monkeypatch)
+    with pytest.raises(KeyboardInterrupt):
+        mma.prepare_workspace(tmp_path)
+    assert groups == [(started[0].pid, 9)]
+
+
+def test_a_missing_process_group_is_tolerated(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch, hangs=True)
+    _patch_posix_group_kill(monkeypatch)
+
+    def gone(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(mma.os, "killpg", gone, raising=False)
+    with pytest.raises(RuntimeError, match=str(mma.OLLAMA_INIT_TIMEOUT_SECONDS)):
+        mma.prepare_workspace(tmp_path)
+    assert started[0].killed is True
+
+
+def test_the_init_starts_its_own_session_on_posix_only(monkeypatch, tmp_path):
+    started = _fake_popen(monkeypatch)
+    monkeypatch.setattr(mma.sys, "platform", "linux")
+    mma.prepare_workspace(tmp_path)
+    assert started[0].kwargs.get("start_new_session") is True
+    started = _fake_popen(monkeypatch)
+    monkeypatch.setattr(mma.sys, "platform", "win32")
+    mma.prepare_workspace(tmp_path)
+    assert "start_new_session" not in started[0].kwargs
