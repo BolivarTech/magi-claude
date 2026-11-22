@@ -758,7 +758,7 @@ class _FakePopen:
 
     def communicate(self, timeout=None):
         self.timeouts = [*getattr(self, "timeouts", []), timeout]
-        if self._hangs and not self.killed:
+        if self._hangs and len(self.timeouts) == 1:  # only the first wait hangs; the reap returns
             raise mma.subprocess.TimeoutExpired(self.command, timeout)
         return None, None
 

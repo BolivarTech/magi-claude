@@ -87,6 +87,7 @@ from retry_feedback import (  # noqa: E402
     retry_feedback_cause,
 )
 from run_magi import AGENTS  # noqa: E402
+from subprocess_utils import windows_kill_tree  # noqa: E402
 from verdict_markers import VerdictExtractionError, VerdictSentinel  # noqa: E402
 
 #: The three mage seats, in a fixed order. Single source of truth for BOTH the
@@ -485,21 +486,27 @@ def prepare_workspace(scratch: Path) -> Path:
             exceeds :data:`OLLAMA_INIT_TIMEOUT_SECONDS` (the message names the timeout).
     """
     workspace = Path(tempfile.mkdtemp(prefix=WORKSPACE_PREFIX, dir=scratch))
+    process = subprocess.Popen(
+        [sys.executable, str(_RUN_MAGI_PATH), "--ollama-init"], cwd=workspace
+    )
     try:
-        result = subprocess.run(
-            [sys.executable, str(_RUN_MAGI_PATH), "--ollama-init"],
-            check=False,
-            cwd=workspace,
-            timeout=OLLAMA_INIT_TIMEOUT_SECONDS,
-        )
+        process.communicate(timeout=OLLAMA_INIT_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
+        # ``Popen.kill`` ends only the direct child; on Windows the ``magi-rs init``
+        # grandchild would outlive it and keep the workspace files open, so the scratch
+        # directory could not be removed. Kill the whole tree, then reap.
+        if sys.platform == "win32":
+            windows_kill_tree(process.pid)
+        else:
+            process.kill()
+        process.communicate()
         raise RuntimeError(
             f"--ollama-init did not finish within {OLLAMA_INIT_TIMEOUT_SECONDS}s while "
             f"preparing the measurement workspace {workspace}"
         ) from exc
-    if result.returncode != 0:
+    if process.returncode != 0:
         raise RuntimeError(
-            f"--ollama-init failed with exit code {result.returncode} while preparing "
+            f"--ollama-init failed with exit code {process.returncode} while preparing "
             f"the measurement workspace {workspace}"
         )
     return workspace
