@@ -164,8 +164,7 @@ of `magi.toml` on this side.
 
 **Upgrading from 6.x or 7.x: `.magi/` has to be regenerated (8.0.0).** A `.magi/` created
 by 7.x has no key, and the plugin does not adapt it. Every `--ollama` mode stops with a
-`[FATAL]` line that gives the procedure. From the
-project root:
+`[FATAL]` line that gives the procedure. Run these steps from the project root:
 
 1. Move the old state directory aside, to somewhere outside the project. A backup left in
    the working tree is untracked, so `--uncommitted` would pick it up.
@@ -198,9 +197,9 @@ persists; stderr carries only `ERROR` and `WARN`.
 
 `--ollama-init` generates one key for the project: 32 random bytes, base64-encoded, saved as
 `.magi/.secret/magi.key`. It opens both the encrypted memory database and the vault of
-`magi-rs`. The plugin gives it to the child process as `MAGI_PASSPHRASE` in the child's
-environment and nowhere else: never in the arguments (those show in a process list), never
-in a log, a report, an error message or a `repr`. A key that is missing or empty stops
+`magi-rs`. The plugin hands it to the child process only as `MAGI_PASSPHRASE` in the child's
+environment. It never goes in the arguments (those show in a process list), nor in a log, a
+report, an error message or a `repr`. A key that is missing or empty stops
 every `--ollama` run with one `[FATAL]` line, before the input is read and before any model
 is called. The plugin never falls back to running without memory.
 
