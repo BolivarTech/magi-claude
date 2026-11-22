@@ -21,6 +21,8 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from magi_key import KEY_DIR_PARTS
+from path_containment import is_within
 from validate import ValidationError
 
 DEFAULT_BASE = "main"
@@ -32,7 +34,6 @@ KIND_RANGE = "range"
 KIND_BRANCH = "branch"
 KIND_UNCOMMITTED = "uncommitted"
 
-_MAGI_DIRNAME = ".magi"
 _OPTION_PREFIX = "-"
 _GIT_COUNT_ARGV = ["rev-list", "--count"]
 _EMPTY_RANGE_COUNT = 0
@@ -167,21 +168,7 @@ class ReviewTarget:
         candidate = path if os.path.isabs(path) else os.path.join(workdir, path)
         if not os.path.exists(candidate):
             raise InvalidTargetError(f"{path!r} is not an existing path; use {TARGETS_HELP}")
-        real = _canonical(candidate)
-        for root in (os.path.join(workdir, _MAGI_DIRNAME), *forbidden_roots):
-            if _is_within(real, _canonical(root)):
+        for root in (os.path.join(workdir, KEY_DIR_PARTS[0]), *forbidden_roots):
+            if is_within(candidate, root):
                 raise InvalidTargetError(f"{path!r} lies inside {root!r}, which is never reviewed")
         return cls(KIND_PATH, (candidate,), f"path {path}")
-
-
-def _canonical(path: str) -> str:
-    """Resolve links and ``..`` and fold case where the filesystem does."""
-    return os.path.normcase(os.path.realpath(path))
-
-
-def _is_within(path: str, root: str) -> bool:
-    """True when ``path`` is ``root`` or lies below it (both canonical)."""
-    try:
-        return os.path.commonpath([path, root]) == root
-    except ValueError:  # different drives
-        return False

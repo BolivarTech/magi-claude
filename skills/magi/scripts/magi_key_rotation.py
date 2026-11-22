@@ -106,6 +106,7 @@ from link_guard import link_refusal
 from magi_rs_vault import VAULT_KEY_NAMES
 from ollama_init import InitLeftover, MagiDirExistsError, OllamaInitError
 from one_line import one_line
+from path_containment import canonical_path, is_within
 
 MAGI_DIR = KEY_DIR_PARTS[0]
 """The project directory that a rotation moves aside and recreates."""
@@ -245,36 +246,6 @@ def _utc_now() -> datetime:
         ``datetime.now(timezone.utc)``.
     """
     return datetime.now(timezone.utc)
-
-
-def _canonical(path: str) -> str:
-    """Return ``path`` resolved and case-normalised, for containment checks.
-
-    Args:
-        path: Any path; it need not exist.
-
-    Returns:
-        The real, normalised path.
-    """
-    return os.path.normcase(os.path.realpath(path))
-
-
-def _is_within(path: str, parent: str) -> bool:
-    """Tell whether ``path`` is ``parent`` or lies under it.
-
-    Args:
-        path: The candidate path.
-        parent: The directory it may lie in.
-
-    Returns:
-        True when ``path`` resolves inside ``parent``; False otherwise,
-        including when the two are on different drives.
-    """
-    candidate, root = _canonical(path), _canonical(parent)
-    try:
-        return os.path.commonpath([candidate, root]) == root
-    except ValueError:
-        return False
 
 
 def _raise_walk_error(error: OSError) -> None:
@@ -461,7 +432,7 @@ class KeyRotation:
         problem = magi_dir_problem(workdir)
         if problem is not None:
             raise RotationFailedError(problem)
-        if _is_within(self._backup_root, workdir):
+        if is_within(self._backup_root, workdir):
             raise RotationFailedError(
                 f"the rotation backup root {self._backup_root} is inside the working tree {workdir}: "
                 "nothing was moved; point the state directory outside the project"
@@ -648,7 +619,7 @@ class KeyRotation:
                 interrupted; the empty directories this call made are removed (any
                 that cannot be are named) and nothing was moved.
         """
-        fingerprint = hashlib.sha256(_canonical(workdir).encode("utf-8")).hexdigest()
+        fingerprint = hashlib.sha256(canonical_path(workdir).encode("utf-8")).hexdigest()
         stamp = self._clock().astimezone(timezone.utc).strftime(_TIMESTAMP_FORMAT)
         base = os.path.join(self._backup_root, f"{fingerprint[:_FINGERPRINT_HEX_CHARS]}-{stamp}")
         suffixed = (f"{base}-{n}" for n in itertools.count(_FIRST_COLLISION_SUFFIX))
