@@ -514,7 +514,7 @@ def _report_without(key):
 
 def test_the_raw_output_is_persisted_verbatim_under_its_own_name(tmp_path):
     # R16: two producers, two names.
-    from magi_rs_trio import write_raw_artifact
+    from magi_rs_common import write_raw_artifact
 
     raw = _fixture("three-agents.json")
     write_raw_artifact(str(tmp_path), raw)
@@ -523,7 +523,7 @@ def test_the_raw_output_is_persisted_verbatim_under_its_own_name(tmp_path):
 
 
 def test_a_raw_artifact_that_cannot_be_written_raises_not_swallows(tmp_path):
-    from magi_rs_trio import write_raw_artifact
+    from magi_rs_common import write_raw_artifact
 
     with pytest.raises(OSError):
         write_raw_artifact(str(tmp_path / "missing" / "dir"), "{}")

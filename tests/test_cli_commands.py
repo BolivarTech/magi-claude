@@ -8,7 +8,7 @@ import run_magi
 from cli_commands import INIT_FLAG, ROTATE_KEY_FLAG, VAULT_SET_FLAG, YES_FLAG, command
 from magi_key import REGENERATION_GUIDANCE
 from magi_rs_preflight import ProjectPreflight
-from magi_rs_trio import _VAULT_HINT
+from magi_rs_common import VAULT_HINT
 
 
 def test_a_command_is_named_one_way_everywhere():
@@ -24,7 +24,7 @@ def test_the_regeneration_guidance_names_its_commands_in_that_form():
 
 
 def test_the_vault_hint_names_the_command_in_that_form():
-    assert "run_magi.py --ollama-vault-set <NAME>" in _VAULT_HINT
+    assert "run_magi.py --ollama-vault-set <NAME>" in VAULT_HINT
 
 
 def test_an_uninitialised_project_names_the_init_command_in_that_form(tmp_path):

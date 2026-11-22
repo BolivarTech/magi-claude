@@ -23,6 +23,14 @@ from typing import Any
 from magi_key import KeyStore, MagiKey
 from magi_key_permissions import default_key_store
 from magi_rs_bootstrap import BinaryBootstrap, verified_executable
+from magi_rs_common import (
+    VAULT_HINT,
+    allowlist_hint,
+    emit_state,
+    persist_raw,
+    stderr_tail,
+    validate_verdicts,
+)
 from magi_rs_embedder import EmbedderProbe
 from magi_rs_env import EnvironmentPolicy
 from magi_rs_pin import Pin
@@ -30,12 +38,8 @@ from magi_rs_preflight import ProjectPreflight
 from magi_rs_result import CodeReviewResult
 from magi_rs_targets import ReviewTarget
 from magi_rs_trio import (
-    _VAULT_HINT,
     MagiRsContractError,
     MagiRsProcessError,
-    MagiRsTrio,
-    _emit,
-    _stderr_tail,
     redact_captured,
 )
 from subprocess_utils import PROC_STDERR_DRAIN_TIMEOUT, reap_and_drain_stderr
@@ -196,7 +200,7 @@ class MagiRsCodeReview(TrioExecutor):
             on_state: Optional progress callback, ``(node, state)``.
 
         Returns:
-            The validated verdicts, as :meth:`MagiRsTrio._validate` returns them.
+            The validated verdicts, as :func:`magi_rs_common.validate_verdicts` returns them.
 
         Raises:
             MagiRsContractError: :meth:`preflight` has not run, or the envelope
@@ -223,7 +227,7 @@ class MagiRsCodeReview(TrioExecutor):
         self.last_result = CodeReviewResult.from_json(text)
         warned = HISTORY_WARNING_MARKER in stderr.decode("utf-8", errors="replace")
         self.history_recorded = not overran and not warned
-        return MagiRsTrio._validate(self.last_result.consult, output_dir)
+        return validate_verdicts(self.last_result.consult, output_dir)
 
     async def _launch(
         self, argv: list[str], on_state: Callable[[str, str], None] | None, output_dir: str
@@ -248,7 +252,7 @@ class MagiRsCodeReview(TrioExecutor):
             MagiRsProcessError: The child could not start, or exited non-zero.
         """
         env = EnvironmentPolicy.build(os.environ, passphrase=self._key)
-        _emit(on_state, _TRIO_NODE, "running")
+        emit_state(on_state, _TRIO_NODE, "running")
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv,
@@ -258,7 +262,7 @@ class MagiRsCodeReview(TrioExecutor):
                 env=env,
             )
         except OSError as exc:
-            _emit(on_state, _TRIO_NODE, "failed")
+            emit_state(on_state, _TRIO_NODE, "failed")
             raise MagiRsProcessError(f"could not start {argv[0]}: {exc}") from exc
         out, err = bytearray(), bytearray()
 
@@ -291,17 +295,17 @@ class MagiRsCodeReview(TrioExecutor):
                 )
             except (asyncio.TimeoutError, TimeoutError):
                 pass  # the pipe never closed: judge what was read
-            _emit(on_state, _TRIO_NODE, "timeout")
+            emit_state(on_state, _TRIO_NODE, "timeout")
         stdout, stderr = (
             redact_captured(self._key, bytes(out)),
             redact_captured(self._key, bytes(err)),
         )
-        MagiRsTrio._persist_raw(output_dir, stdout)
+        persist_raw(output_dir, stdout)
         if not overran and process.returncode != 0:
-            _emit(on_state, _TRIO_NODE, "failed")
+            emit_state(on_state, _TRIO_NODE, "failed")
             raise MagiRsProcessError(self._failure_message(process.returncode, stderr))
         if not overran:
-            _emit(on_state, _TRIO_NODE, "success")
+            emit_state(on_state, _TRIO_NODE, "success")
         return stdout, stderr, overran
 
     def _failure_message(self, returncode: int | None, stderr: bytes) -> str:
@@ -314,13 +318,10 @@ class MagiRsCodeReview(TrioExecutor):
         Returns:
             The message, free of the key (stderr was redacted by the caller).
         """
-        tail = _stderr_tail(stderr)
+        tail = stderr_tail(stderr)
         if TIMEOUT_REJECTION_MARKER in tail:
             return _TIMEOUT_REJECTED_MESSAGE.format(timeout=self._timeout, stderr=tail)
-        return (
-            f"magi-rs exited {returncode}; stderr: {tail!r}. "
-            f"{_VAULT_HINT} {MagiRsTrio._allowlist_hint()}"
-        )
+        return f"magi-rs exited {returncode}; stderr: {tail!r}. {VAULT_HINT} {allowlist_hint()}"
 
     def _require_complete_envelope(self, text: str) -> None:
         """Refuse the output of a killed child unless it is one whole JSON document.
@@ -337,5 +338,5 @@ class MagiRsCodeReview(TrioExecutor):
             raise MagiRsProcessError(
                 f"magi-rs did not finish within --timeout {self._timeout}s plus the "
                 f"{HISTORY_WINDOW_SECONDS}s history window and its output is incomplete; "
-                f"nothing is recovered from it. {MagiRsTrio._allowlist_hint()}"
+                f"nothing is recovered from it. {allowlist_hint()}"
             ) from exc

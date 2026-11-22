@@ -19,9 +19,9 @@ import pytest
 import magi_rs_trio
 from magi_key import KeyExposedError, KeyHardeningError, KeyMissingError, MagiKey
 from magi_rs_bootstrap import DigestMismatchError
+from magi_rs_common import STDERR_ELISION_MARKER
 from magi_rs_preflight import ProjectNotInitialisedError
 from magi_rs_trio import (
-    _STDERR_ELISION_MARKER,
     FAIL_CLOSED_ERRORS,
     MagiRsContractError,
     MagiRsProcessError,
@@ -1203,7 +1203,7 @@ async def test_a_long_stderr_keeps_its_tail_where_the_real_cause_is(monkeypatch,
         await _run(monkeypatch, tmp_path)
     message = str(exc.value)
     assert "FATAL: the real cause" in message
-    assert _STDERR_ELISION_MARKER in message
+    assert STDERR_ELISION_MARKER in message
 
 
 @pytest.mark.asyncio
@@ -1217,7 +1217,7 @@ async def test_a_short_stderr_goes_whole_and_unmarked(monkeypatch, tmp_path):
     with pytest.raises(MagiRsProcessError) as exc:
         await _run(monkeypatch, tmp_path)
     assert "boom" in str(exc.value)
-    assert _STDERR_ELISION_MARKER not in str(exc.value)
+    assert STDERR_ELISION_MARKER not in str(exc.value)
 
 
 @pytest.mark.asyncio
