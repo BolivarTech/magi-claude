@@ -68,12 +68,12 @@ HISTORY_WARNING_MARKER = "warning: the review history was not updated"
 """Prefix of the stderr warning magi-rs prints when it could not record the
 review history (src/tools/code_review.rs:1500, followed by ``: <cause>``)."""
 
-REVIEW_ERROR_PATTERN = re.compile(r"review\.error=([a-z_]+)")
+_REVIEW_ERROR_PATTERN = re.compile(r"review\.error=([a-z_]+)")
 """The field magi-rs's review error line carries (src/main.rs ``emit_review_error``): the
 error's class, from ``review_error_cause_name``. Every class is a ``ReviewError`` variant --
 none is an authentication, network or TLS failure, which never reach this line."""
 
-ENVIRONMENT_REVIEW_ERRORS = frozenset({"git", "io"})
+_ENVIRONMENT_REVIEW_ERRORS = frozenset({"git", "io"})
 """Review error classes the child's environment can cause (a ``git`` without ``HOME`` or
 ``PATH``, a missing temp directory): they keep the allowlist hint. Every other class is about
 the input or its size and carries no hint."""
@@ -358,10 +358,10 @@ class MagiRsCodeReview(TrioExecutor):
         if TIMEOUT_REJECTION_MARKER in tail:
             return _TIMEOUT_REJECTED_MESSAGE.format(timeout=self._timeout, stderr=tail)
         prefix = f"magi-rs exited {returncode}; stderr: {tail!r}."
-        found = REVIEW_ERROR_PATTERN.search(tail)
+        found = _REVIEW_ERROR_PATTERN.search(tail)
         if found is None:
             return f"{prefix} {VAULT_HINT} {allowlist_hint()}"
-        if found.group(1) in ENVIRONMENT_REVIEW_ERRORS:
+        if found.group(1) in _ENVIRONMENT_REVIEW_ERRORS:
             return f"{prefix} {allowlist_hint()}"
         return prefix
 
