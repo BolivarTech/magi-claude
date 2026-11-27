@@ -36,7 +36,7 @@ python skills/magi/scripts/run_magi.py code-review --ollama --commit <rev>
 ```
 
 The first `--ollama` (or `--ollama-init`) after an install downloads `magi-rs` (pinned at
-v0.25.0) into the plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`,
+v0.26.0) into the plugin's `bin/`, checks its sha256 against `skills/magi/magi-rs.pin.json`,
 and only then runs it. Every later run verifies the digest and `--version` again before executing. When
 the binary cannot be obtained or does not verify, the run stops with one `[FATAL]` line and
 nothing is executed. There is no fallback to another architecture or to an unverified copy.
@@ -92,9 +92,11 @@ is reviewed as a file, and its content is never read as instructions.
 **The embedder is a prerequisite.** `magi-rs code-review` gets documentation and earlier
 findings through the embedder configured in `[embedding]` of `.magi/magi.toml` (the
 `base_url` is inherited from the top level when `[embedding]` does not set one). Before any
-model is called, the plugin sends one small request to that endpoint. If the connection
-fails or times out, the run stops with one `[FATAL]` line that names the endpoint and the
-model. The probe measures reachability only: any HTTP answer counts, a 401 or 403 included,
+model is called, the plugin sends one small request to that endpoint and waits up to 30 s
+for it, long enough for Ollama to load a model it had unloaded (20 s measured on a 4 GB GPU).
+If the connection fails, the run stops with one `[FATAL]` line that names the endpoint and the
+model and says it is unreachable; if the request times out, the line says the embedder did not
+answer within 30 s and that a cold model may still be loading. The probe measures reachability only: any HTTP answer counts, a 401 or 403 included,
 so a key that is missing or wrong passes the probe and fails later, during the review, with
 `magi-rs`'s own message. An embedder that goes down during the review yields a report
 marked `degraded`: the cause is in the report, a warning goes to stderr, and the run does
@@ -112,8 +114,10 @@ envelope names the three models as one comma-joined list, not one per seat.
 
 If the false-positive gate cannot use `clef:cloud`, `magi-rs` reports it in the
 `code_review` block (`gate_stopped` and `gate_causes`), and the plugin prints those two
-fields as `magi-rs` sent them. Section 2b says what the default `magi.toml` declares as
-fallbacks.
+fields as `magi-rs` sent them. Since `magi-rs` 0.26.0, a daemon that refuses `clef:cloud`
+with HTTP 401 or 403 (no `ollama signin`) no longer stops the gate: `magi-rs` leaves that model
+out for the rest of the review and the next model in the chain judges. Section 2b says what the
+default `magi.toml` declares as fallbacks.
 
 **Time.** `--timeout` keeps its default of 16820 s and is passed to `magi-rs` as the total
 for the review. If it is too small for the number of batches, `magi-rs` refuses it before
@@ -132,6 +136,11 @@ anywhere in the pool caps every batch near 16 000 tokens, however large the othe
 models go unmeasured depends on the daemon. A retired model reports none: `mistral-large-3:675b-cloud`,
 one of the fallbacks `magi-rs init` writes, was retired on November 9, 2026. If the report lists a
 retired fallback, replace it in `.magi/magi.toml`.
+
+Before `magi-rs` 0.26.0, a containing unit with several hunks inside it was counted once per
+hunk, so a branch with many edits to one function could be refused with `too_large_for_batch`
+although it fit. 0.26.0 counts each unit once, and the error names up to three of the costliest
+units in the batch.
 
 A hunk of a diff is never split. A changed unit that does not fit in one batch by itself therefore
 stops the review before any model is called: in our measurement with 0.25.0, a new Python file of
@@ -263,7 +272,7 @@ never from an argument. When `magi-rs` reports a missing key, the plugin's messa
 command; it cannot tell which `<NAME>` was missing.
 
 **What memory does in each mode.** `code-review --ollama` uses it: documentation, and earlier
-findings that git confirms, reach the mages as context. In `magi-rs` 0.25.0, `design` and
+findings that git confirms, reach the mages as context. In `magi-rs` 0.25.0 and 0.26.0, `design` and
 `analysis` open the database only to read the vault: they store and retrieve no memory, do
 not call the embedder and never report `without_memory` or `without_embedder`. The plugin
 passes the key in those modes only to open the vault, so read that as a documented limit of
@@ -273,9 +282,13 @@ those two modes, not as a promise of memory.
 
 The `magi.toml` is exactly what `magi-rs init` writes, and the plugin edits nothing in it.
 Know what it contains before you rely on it. The `[decision]` section configures the small
-decision models of `magi-rs` (`clef-flash`, with `nimble` as fallback); the plugin passes
-the mode explicitly, so it does not use them to choose one, but `magi-rs` refuses to load a
-file without the section. The `[code_review]` section names `clef:cloud` for the
+decision models of `magi-rs`. Since 0.26.0 that is `clef:cloud`, with the local `nimble` as
+fallback and `min_confidence = 0.85` (0.25.0 wrote `clef-flash` and 0.75); with `clef:cloud`,
+a decision state goes to `ollama.com`, secrets masked first. The plugin never triggers a
+decision: it passes the mode explicitly, and `design` and `analysis` store no memory, so the
+contradiction check never runs (measured with 0.26.0: no decision call in the run log). `magi-rs`
+still refuses to load a file without the section. A `.magi/` written by 0.25.0 keeps its
+`clef-flash` and loads unchanged. The `[code_review]` section names `clef:cloud` for the
 false-positive gate, with the local models `clef-flash` and `nimble` as fallbacks, and the
 default trio puts `deepseek-v4-pro` in Caspar's seat. If `clef:cloud` fails and the local
 models are not installed on your machine, `magi-rs` reports it in the `code_review` block
@@ -315,7 +328,7 @@ derives each mage's per-attempt budget from. The default on this path is **16820
 Claude path's 900. That is the value `magi-rs` 0.21.0 publishes for a headless gate. It
 derives a per-mage ceiling of 2335 s, an operation budget of 1401 s per attempt and a
 700 s per-request clock, confirmed locally on 2026-09-29, again with 0.24.1 on
-2026-10-13 and with 0.25.0 on 2026-11-18. Any explicit positive value is
+2026-10-13, with 0.25.0 on 2026-11-18 and with 0.26.0 on 2026-11-26. Any explicit positive value is
 honoured. Below 16820 a warning goes to stderr, because a lower wall timeout also cuts the
 reasoning budget of every seat, and the symptom (mages that stop completing) does not look
 like a timeout setting.
@@ -337,7 +350,7 @@ model in that seat, not a longer timeout.
 **Reasoning keys.** `magi-rs` 0.20.0 added four `[magi]` keys: `reasoning`
 (`default`/`disabled`/`enabled`), `reasoning_spelling` (`openai-compat` only), `max_tokens`
 and `reasoning_trace` (opt-in, log only). They are documented in
-[`docs/REASONING-BUDGET.md`](https://github.com/BolivarTech/magi/blob/v0.25.0/docs/REASONING-BUDGET.md)
+[`docs/REASONING-BUDGET.md`](https://github.com/BolivarTech/magi/blob/v0.26.0/docs/REASONING-BUDGET.md)
 in the `magi-rs` repository.
 
 **A `--timeout` that is too high.** A high value is obeyed as given. `magi-rs` flags a
@@ -436,7 +449,7 @@ a different mode and are not comparable.
 | `[FATAL] ... is not initialised for magi-rs ... run /magi --ollama-init` | No `.magi/magi.toml` under the current directory. Run the init from the project root, then the gate from the same place. |
 | `ERROR: magi-rs exited 2; ... has no [decision] section` | The `.magi/magi.toml` predates `magi-rs` 0.23.0. Regenerate it as described in section 2 (upgrading from 6.x). |
 | `[FATAL] digest mismatch` / `version mismatch` | The binary in `bin/` is not the pinned one. Delete it and re-run; the bootstrap downloads and verifies again. |
-| `ERROR: magi-rs exited N; stderr: ...` | The child failed; its stderr is relayed verbatim. If it looks like a missing certificate, proxy or host, the allowlist (section 3) is the first suspect: the message lists what it withheld. |
+| `ERROR: magi-rs exited N; stderr: ...` | The child failed; its stderr is relayed verbatim. If it looks like a missing certificate, proxy or host, the allowlist (section 3) is the first suspect: the message lists what it withheld. When the stderr names a `review.error=` class, the message carries only the hints that apply: none for a class about the input or its size, the allowlist hint for `git` and `io`, never the vault hint. |
 | `ERROR: magi-rs did not finish within --timeout` | Raise `--timeout` (section 4), or re-seat a model that keeps overrunning. |
 | `WARNING: the run is DEGRADED ... The gate is INVALID` | A seat died, a verdict failed the contract, or `magi-rs` sent a non-boolean `degraded` flag. Resolve the cause and re-run; a degraded run approves nothing. |
 | `WARNING: NOBODY MEASURED the context window` | Every seat ran on an estimated window. Set `strict_context_guard = true` in `.magi/magi.toml` to fail closed instead. |
@@ -444,6 +457,7 @@ a different mode and are not comparable.
 | `[FATAL]` about a missing or empty memory key, or a `.magi/` without its key | A `.magi/` from 7.x or a lost key. Regenerate it as described in section 2. |
 | `[FATAL]` about the key's permissions | The key file or its directory is reachable by others. Treat the database and the vault as compromised and run `--ollama-rotate-key` (section 2a). |
 | `[FATAL]` naming the embedder endpoint | `code-review --ollama` could not connect to the `[embedding]` endpoint. Start it, or fix `base_url` in `.magi/magi.toml` (section 1a). |
+| `[FATAL] embedder ... did not answer within 30 s` | The endpoint accepted the connection but did not answer in time. Ollama unloads an idle model after 5 minutes and the next request waits for the load (20 s measured on a 4 GB GPU); run the review again, or keep the model loaded. |
 | `ERROR:` naming `--timeout` on a `code-review --ollama` | `magi-rs` refused the total as too small for the batches before spending anything. Pass a larger `--timeout` (section 1a). |
 | `ERROR:` with `does not fit in one batch` on a `code-review --ollama` | A changed unit is larger than one batch. Batches are capped near 16 000 tokens when any model in the pool has no measured window (`magi_rs.code_review.unmeasured_models`). Replace a retired fallback, or review a smaller commit or range, or the file as a path (section 1a). |
 | `degraded: true` with `without_embedder` | The embedder failed during the review. The report is written but approves no gate; fix the embedder and run again. |

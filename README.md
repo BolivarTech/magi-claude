@@ -61,6 +61,16 @@ exited 0. The procedure, the limits of the key's protection, what `design` and `
 do with memory, and where your data goes are in
 [`docs/ollama-backend.md`](docs/ollama-backend.md).
 
+**New in v8.0.2: `magi-rs` 0.26.0.** The pinned `magi-rs` moves from 0.25.0 to 0.26.0, which
+stops refusing a branch whose edits fall several times inside one function
+(`too_large_for_batch`) and names the units behind a batch that really does not fit. A `.magi/`
+created with 8.0.x keeps working as it is; a new `--ollama-init` writes `clef:cloud` as the
+decision model, which the plugin never calls. The embedder check of `code-review --ollama` now
+waits 30 s instead of 10, so a model Ollama had unloaded can load, and says "did not answer"
+rather than "unreachable" when it times out. A review that `magi-rs` refuses for its input or
+size no longer suggests loading API keys. Details in
+[`docs/ollama-backend.md`](docs/ollama-backend.md).
+
 **New in v7.1.0: `magi-rs` 0.25.0.** The pinned `magi-rs` moves from 0.24.1 to 0.25.0. A
 `.magi/` created with 7.0.x keeps working as it is (under 7.1.0; see v8.0.0 above), and flags, defaults and the report are
 unchanged. The new binary brings `magi-rs`'s own `code-review` command, which the plugin
