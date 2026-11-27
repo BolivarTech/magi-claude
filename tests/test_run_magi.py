@@ -5286,6 +5286,16 @@ def test_the_timeout_help_names_the_ollama_default_from_its_constant(capsys):
     assert "default 1800" not in help_text
 
 
+def test_the_no_enrich_help_says_it_applies_only_without_ollama(capsys):
+    """code-review --ollama ignores --no-enrich (magi-rs builds the context); say so up front."""
+    from run_magi import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "no effect with code-review --ollama" in help_text
+
+
 def _raise(exception):
     """A callable with any signature that raises `exception`."""
 
