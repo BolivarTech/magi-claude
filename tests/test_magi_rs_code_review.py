@@ -189,6 +189,51 @@ async def test_no_failure_message_contains_the_key(monkeypatch, tmp_path):
     assert _KEY.reveal() not in str(exc.value)
 
 
+def _review_error_line(code):
+    # The shape magi-rs 0.26.0 prints (src/main.rs emit_review_error): the text, then the field.
+    return (
+        "2026-11-24T12:00:00Z ERROR run=1-a magi_rs::code_review: error: batch 1 with its "
+        "containing units does not fit in one batch (69830 tokens, limit 65445) "
+        f"review.error={code}"
+    ).encode()
+
+
+async def _failure(monkeypatch, tmp_path, stderr):
+    monkeypatch.setenv("CORP_PROXY_CA_HINT", "x")
+    executor, _ = _review(monkeypatch, tmp_path, _StreamingProcess(b"", stderr, returncode=2))
+    with pytest.raises(MagiRsProcessError) as exc:
+        await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    return str(exc.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code", ["too_large_for_batch", "nothing_to_review", "not_reviewable", "budget"]
+)
+async def test_a_review_error_about_the_input_carries_neither_hint(monkeypatch, tmp_path, code):
+    message = await _failure(monkeypatch, tmp_path, _review_error_line(code))
+    assert f"review.error={code}" in message  # the cause itself is still stated
+    assert "--ollama-vault-set" not in message
+    assert "allowlist" not in message and "CORP_PROXY_CA_HINT" not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["git", "io"])
+async def test_a_review_error_from_the_environment_keeps_only_the_allowlist_hint(
+    monkeypatch, tmp_path, code
+):
+    message = await _failure(monkeypatch, tmp_path, _review_error_line(code))
+    assert "allowlist" in message and "CORP_PROXY_CA_HINT" in message
+    assert "--ollama-vault-set" not in message
+
+
+@pytest.mark.asyncio
+async def test_a_failure_without_a_review_error_code_keeps_both_hints(monkeypatch, tmp_path):
+    message = await _failure(monkeypatch, tmp_path, b"error: provider answered 401")
+    assert "--ollama-vault-set" in message
+    assert "allowlist" in message and "CORP_PROXY_CA_HINT" in message
+
+
 @pytest.mark.asyncio
 async def test_a_failing_exit_still_persists_the_redacted_stdout(monkeypatch, tmp_path):
     # Loop 1 m5: a non-zero exit may follow paid per-batch output; keep it, key redacted.
