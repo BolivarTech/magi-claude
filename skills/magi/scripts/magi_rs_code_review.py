@@ -68,9 +68,11 @@ HISTORY_WARNING_MARKER = "warning: the review history was not updated"
 """Prefix of the stderr warning magi-rs prints when it could not record the
 review history (src/tools/code_review.rs:1500, followed by ``: <cause>``)."""
 
-_REVIEW_ERROR_PATTERN = re.compile(r"review\.error=([a-z_]+)")
-"""The field magi-rs's review error line carries (src/main.rs ``emit_review_error``): the
-error's class, from ``review_error_cause_name``. Every class is a ``ReviewError`` variant --
+_REVIEW_ERROR_PATTERN = re.compile(r"review\.error=([a-z_]+)\s*$")
+"""The field magi-rs's review error line ends with (src/main.rs ``emit_review_error``; its
+renderer writes the message, then the fields): the error's class, from
+``review_error_cause_name``. Only the end of the LAST line counts, because the message
+before it can echo foreign text (a ref name, git's stderr) that contains the same words. Every class is a ``ReviewError`` variant --
 none is an authentication, network or TLS failure, which never reach this line."""
 
 _ENVIRONMENT_REVIEW_ERRORS = frozenset({"git", "io"})
@@ -358,7 +360,8 @@ class MagiRsCodeReview(TrioExecutor):
         if TIMEOUT_REJECTION_MARKER in tail:
             return _TIMEOUT_REJECTED_MESSAGE.format(timeout=self._timeout, stderr=tail)
         prefix = f"magi-rs exited {returncode}; stderr: {tail!r}."
-        found = _REVIEW_ERROR_PATTERN.search(tail)
+        lines = tail.strip().splitlines()
+        found = _REVIEW_ERROR_PATTERN.search(lines[-1]) if lines else None
         if found is None:
             return f"{prefix} {VAULT_HINT} {allowlist_hint()}"
         if found.group(1) in _ENVIRONMENT_REVIEW_ERRORS:
