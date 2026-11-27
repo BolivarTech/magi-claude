@@ -228,6 +228,30 @@ async def test_a_review_error_from_the_environment_keeps_only_the_allowlist_hint
 
 
 @pytest.mark.asyncio
+async def test_only_the_field_magi_rs_appends_last_counts_not_one_echoed_in_the_message(
+    monkeypatch, tmp_path
+):
+    # Loop 1 W1: render_event writes the message, THEN the field; the message may echo a ref name.
+    stderr = b"error: git failed for ref 'review.error=budget': cannot lock HEAD review.error=io\n"
+    message = await _failure(monkeypatch, tmp_path, stderr)
+    assert "allowlist" in message and "CORP_PROXY_CA_HINT" in message
+    assert "--ollama-vault-set" not in message
+
+
+@pytest.mark.asyncio
+async def test_an_echoed_field_on_an_earlier_line_does_not_hide_the_vault_hint(
+    monkeypatch, tmp_path
+):
+    stderr = (
+        b"2026-11-24T12:00:00Z WARN run=1-a magi_rs::startup: head is review.error=budget\n"
+        b"error: provider answered 401\n"
+    )
+    message = await _failure(monkeypatch, tmp_path, stderr)
+    assert "--ollama-vault-set" in message
+    assert "allowlist" in message
+
+
+@pytest.mark.asyncio
 async def test_a_failure_without_a_review_error_code_keeps_both_hints(monkeypatch, tmp_path):
     message = await _failure(monkeypatch, tmp_path, b"error: provider answered 401")
     assert "--ollama-vault-set" in message
