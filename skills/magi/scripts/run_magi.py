@@ -425,7 +425,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-enrich",
         dest="enrich",
         action="store_false",
-        help="Disable code-review context enrichment (use for untrusted PRs)",
+        help=(
+            "Disable code-review context enrichment (use for untrusted PRs); "
+            "no effect with code-review --ollama, where magi-rs builds the context"
+        ),
     )
     parser.add_argument(
         "--enrich-max-chars",
