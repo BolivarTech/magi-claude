@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 8.0.0
-# Date: 2026-11-21
+# Version: 8.0.2
+# Date: 2026-11-26
 """Tests for MagiRsCodeReview, the executor of one ``magi-rs code-review`` (MS2 Task 3).
 
 Every child process is faked: nothing here launches a binary or reaches the network.

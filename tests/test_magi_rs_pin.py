@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 7.1.0
-# Date: 2026-11-19
+# Version: 8.0.2
+# Date: 2026-11-26
 """Tests for the read-only magi-rs release pin (MS2 Task 1)."""
 
 import json

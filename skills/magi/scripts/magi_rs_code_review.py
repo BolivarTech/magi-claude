@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 8.0.0
-# Date: 2026-11-21
+# Version: 8.0.2
+# Date: 2026-11-26
 """Run ONE ``magi-rs code-review`` child and judge what it prints (REQ-14).
 
 The third implementer of :class:`TrioExecutor`. magi-rs batches the change,

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 8.0.0
-# Date: 2026-11-21
+# Version: 8.0.2
+# Date: 2026-11-26
 """Tests for the embedder reachability probe of the code-review preflight (REQ-11a)."""
 
 import http.client
