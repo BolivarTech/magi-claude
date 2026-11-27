@@ -190,12 +190,18 @@ async def test_no_failure_message_contains_the_key(monkeypatch, tmp_path):
 
 
 def _review_error_line(code):
-    # The shape magi-rs 0.26.0 prints (src/main.rs emit_review_error): the text, then the field.
+    # Captured from magi-rs 0.26.0 on stderr (SMOKE S-HINT, --commit of a missing sha):
+    # "run: 44348-fce5563d29da894a\nerror: git ref not found: *** review.error=ref_not_found\n".
     return (
-        "2026-11-24T12:00:00Z ERROR run=1-a magi_rs::code_review: error: batch 1 with its "
-        "containing units does not fit in one batch (69830 tokens, limit 65445) "
-        f"review.error={code}"
-    ).encode()
+        f"run: 44348-fce5563d29da894a\nerror: git ref not found: *** review.error={code}\n".encode()
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_review_error_class_carries_neither_hint(monkeypatch, tmp_path):
+    # A class a later magi-rs adds is still a ReviewError: not an authentication failure.
+    message = await _failure(monkeypatch, tmp_path, _review_error_line("some_new_class"))
+    assert "--ollama-vault-set" not in message and "allowlist" not in message
 
 
 async def _failure(monkeypatch, tmp_path, stderr):
