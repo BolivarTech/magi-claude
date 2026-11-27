@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 8.0.0
-# Date: 2026-11-21
+# Version: 8.0.2
+# Date: 2026-11-26
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
 Launches Melchior, Balthasar, and Caspar in parallel using asyncio,
@@ -425,7 +425,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-enrich",
         dest="enrich",
         action="store_false",
-        help="Disable code-review context enrichment (use for untrusted PRs)",
+        help=(
+            "Disable code-review context enrichment (use for untrusted PRs); "
+            "no effect with code-review --ollama, where magi-rs builds the context"
+        ),
     )
     parser.add_argument(
         "--enrich-max-chars",

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 8.0.0
-# Date: 2026-11-21
+# Version: 8.0.2
+# Date: 2026-11-26
 """Reachability probe for the embedder that ``magi-rs code-review`` depends on."""
 
 from __future__ import annotations
@@ -15,7 +15,13 @@ from typing import Any, Callable
 
 from one_line import one_line
 
-EMBEDDER_PROBE_TIMEOUT_SECONDS = 10
+EMBEDDER_PROBE_TIMEOUT_SECONDS = 30
+"""Seconds the probe waits for its one request.
+
+Ollama unloads an idle model after 5 minutes, and the first request then waits for the load:
+measured 2026-11-24, a cold ``nomic-embed-text-v2-moe`` took 20 s on a 4 GB GPU (0.1 s warm).
+30 s covers that with margin; a refused connection still fails at once.
+"""
 EMBEDDINGS_PATH = "/embeddings"
 _EMBEDDING_TABLE = "embedding"
 _BASE_URL_KEY = "base_url"
@@ -150,6 +156,21 @@ class EmbedderProbe:
         except http.client.HTTPException:
             return  # someone answered, just not in valid HTTP (DIR-2)
         except (urllib.error.URLError, OSError) as error:
+            if self._is_timeout(error):
+                raise EmbedderUnreachableError(
+                    f"embedder {model} did not answer within {self._timeout:g} s at {url} "
+                    "(a cold model may still be loading)"
+                ) from error
             raise EmbedderUnreachableError(
                 f"embedder {model} is unreachable at {url}: {one_line(str(error))}"
             ) from error
+
+    @staticmethod
+    def _is_timeout(error: OSError) -> bool:
+        """Whether a request failure is a timeout rather than a refused or unresolved connection.
+
+        A read timeout surfaces as ``TimeoutError``; a connect timeout as a ``URLError``
+        wrapping one.
+        """
+        reason = error.reason if isinstance(error, urllib.error.URLError) else error
+        return isinstance(reason, TimeoutError)

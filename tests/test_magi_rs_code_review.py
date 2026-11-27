@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 8.0.0
-# Date: 2026-11-21
+# Version: 8.0.2
+# Date: 2026-11-26
 """Tests for MagiRsCodeReview, the executor of one ``magi-rs code-review`` (MS2 Task 3).
 
 Every child process is faked: nothing here launches a binary or reaches the network.
@@ -187,6 +187,81 @@ async def test_no_failure_message_contains_the_key(monkeypatch, tmp_path):
     with pytest.raises(MagiRsProcessError) as exc:
         await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
     assert _KEY.reveal() not in str(exc.value)
+
+
+def _review_error_line(code):
+    # Captured from magi-rs 0.26.0 on stderr (SMOKE S-HINT, --commit of a missing sha):
+    # "run: 44348-fce5563d29da894a\nerror: git ref not found: *** review.error=ref_not_found\n".
+    return (
+        f"run: 44348-fce5563d29da894a\nerror: git ref not found: *** review.error={code}\n".encode()
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_review_error_class_carries_neither_hint(monkeypatch, tmp_path):
+    # A class a later magi-rs adds is still a ReviewError: not an authentication failure.
+    message = await _failure(monkeypatch, tmp_path, _review_error_line("some_new_class"))
+    assert "--ollama-vault-set" not in message and "allowlist" not in message
+
+
+async def _failure(monkeypatch, tmp_path, stderr):
+    monkeypatch.setenv("CORP_PROXY_CA_HINT", "x")
+    executor, _ = _review(monkeypatch, tmp_path, _StreamingProcess(b"", stderr, returncode=2))
+    with pytest.raises(MagiRsProcessError) as exc:
+        await executor.run_trio("", "agents", str(tmp_path), 1, {}, 1)
+    return str(exc.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code", ["too_large_for_batch", "nothing_to_review", "not_reviewable", "budget"]
+)
+async def test_a_review_error_about_the_input_carries_neither_hint(monkeypatch, tmp_path, code):
+    message = await _failure(monkeypatch, tmp_path, _review_error_line(code))
+    assert f"review.error={code}" in message  # the cause itself is still stated
+    assert "--ollama-vault-set" not in message
+    assert "allowlist" not in message and "CORP_PROXY_CA_HINT" not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["git", "io"])
+async def test_a_review_error_from_the_environment_keeps_only_the_allowlist_hint(
+    monkeypatch, tmp_path, code
+):
+    message = await _failure(monkeypatch, tmp_path, _review_error_line(code))
+    assert "allowlist" in message and "CORP_PROXY_CA_HINT" in message
+    assert "--ollama-vault-set" not in message
+
+
+@pytest.mark.asyncio
+async def test_only_the_field_magi_rs_appends_last_counts_not_one_echoed_in_the_message(
+    monkeypatch, tmp_path
+):
+    # Loop 1 W1: render_event writes the message, THEN the field; the message may echo a ref name.
+    stderr = b"error: git failed for ref 'review.error=budget': cannot lock HEAD review.error=io\n"
+    message = await _failure(monkeypatch, tmp_path, stderr)
+    assert "allowlist" in message and "CORP_PROXY_CA_HINT" in message
+    assert "--ollama-vault-set" not in message
+
+
+@pytest.mark.asyncio
+async def test_an_echoed_field_on_an_earlier_line_does_not_hide_the_vault_hint(
+    monkeypatch, tmp_path
+):
+    stderr = (
+        b"2026-11-24T12:00:00Z WARN run=1-a magi_rs::startup: head is review.error=budget\n"
+        b"error: provider answered 401\n"
+    )
+    message = await _failure(monkeypatch, tmp_path, stderr)
+    assert "--ollama-vault-set" in message
+    assert "allowlist" in message
+
+
+@pytest.mark.asyncio
+async def test_a_failure_without_a_review_error_code_keeps_both_hints(monkeypatch, tmp_path):
+    message = await _failure(monkeypatch, tmp_path, b"error: provider answered 401")
+    assert "--ollama-vault-set" in message
+    assert "allowlist" in message and "CORP_PROXY_CA_HINT" in message
 
 
 @pytest.mark.asyncio

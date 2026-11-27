@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 8.0.0
-# Date: 2026-11-21
+# Version: 8.0.2
+# Date: 2026-11-26
 """Tests for run_magi.py — async Python orchestrator."""
 
 from __future__ import annotations
@@ -5284,6 +5284,16 @@ def test_the_timeout_help_names_the_ollama_default_from_its_constant(capsys):
     help_text = " ".join(capsys.readouterr().out.split())
     assert f"default {magi_rs_trio.DEFAULT_OLLAMA_TIMEOUT_SECONDS}" in help_text
     assert "default 1800" not in help_text
+
+
+def test_the_no_enrich_help_says_it_applies_only_without_ollama(capsys):
+    """code-review --ollama ignores --no-enrich (magi-rs builds the context); say so up front."""
+    from run_magi import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "no effect with code-review --ollama" in help_text
 
 
 def _raise(exception):

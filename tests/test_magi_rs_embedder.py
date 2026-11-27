@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 8.0.0
-# Date: 2026-11-21
+# Version: 8.0.2
+# Date: 2026-11-26
 """Tests for the embedder reachability probe of the code-review preflight (REQ-11a)."""
 
 import http.client
@@ -8,7 +8,12 @@ import urllib.error
 
 import pytest
 
-from magi_rs_embedder import EMBEDDINGS_PATH, EmbedderProbe, EmbedderUnreachableError
+from magi_rs_embedder import (
+    EMBEDDER_PROBE_TIMEOUT_SECONDS,
+    EMBEDDINGS_PATH,
+    EmbedderProbe,
+    EmbedderUnreachableError,
+)
 from synthesize import ValidationError
 
 _TOML = 'base_url = "http://localhost:11434/v1"\n[embedding]\nmodel = "nomic-embed-text-v2-moe:latest"\n'
@@ -55,6 +60,40 @@ def test_a_timeout_is_fatal(tmp_path):
 
     with pytest.raises(EmbedderUnreachableError):
         EmbedderProbe(opener=opener).check(_config(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("timed out"), urllib.error.URLError(TimeoutError("timed out"))],
+    ids=["read-timeout", "connect-timeout"],
+)
+def test_a_timeout_names_the_seconds_and_a_cold_load_not_unreachable(tmp_path, failure):
+    def opener(request, timeout):
+        raise failure
+
+    with pytest.raises(EmbedderUnreachableError) as exc:
+        EmbedderProbe(opener=opener, timeout=7).check(_config(tmp_path))
+    message = str(exc.value)
+    assert "did not answer within 7 s" in message
+    assert "cold model may still be loading" in message
+    assert "unreachable" not in message
+    assert "nomic-embed-text-v2-moe" in message
+    assert "localhost:11434" in message
+
+
+def test_a_refused_connection_still_says_unreachable_not_a_cold_load(tmp_path):
+    def opener(request, timeout):
+        raise urllib.error.URLError(ConnectionRefusedError("refused"))
+
+    with pytest.raises(EmbedderUnreachableError) as exc:
+        EmbedderProbe(opener=opener).check(_config(tmp_path))
+    assert "is unreachable at" in str(exc.value)
+    assert "did not answer within" not in str(exc.value)
+
+
+def test_the_default_budget_covers_the_measured_cold_load():
+    # Measured 2026-11-24: a cold nomic-embed-text-v2-moe took 20 s to answer on a 4 GB GPU.
+    assert EMBEDDER_PROBE_TIMEOUT_SECONDS > 20
 
 
 def test_the_probe_sends_one_minimal_request_with_the_named_timeout(tmp_path):

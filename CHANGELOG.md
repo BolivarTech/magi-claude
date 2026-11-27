@@ -9,6 +9,31 @@ Install and update through the marketplace: `/plugin marketplace add BolivarTech
 `/plugin install magi@bolivartech-plugins`, then `/plugin marketplace update` to pick up a new
 release.
 
+## [8.0.2] - 2026-11-26
+
+### Changed
+
+- The pinned `magi-rs` moves from 0.25.0 to 0.26.0. A range whose edits fall several times
+  inside one function is reviewed instead of refused with `too_large_for_batch`, the error now
+  names the costliest units in the batch, and the code-review gate goes on past a `clef:cloud`
+  the daemon refuses (no `ollama signin`). A `.magi/` created with 8.0.x loads unchanged; the
+  per-mage clock is unchanged: 16820 s still derives 2335 s per mage and 1401 s per attempt. A new
+  `--ollama-init` writes `clef:cloud` as the decision model with `min_confidence = 0.85`; the
+  plugin never calls the decision models (it passes the mode, and `design`/`analysis` store
+  no memory).
+
+### Fixed
+
+- The embedder check of `code-review --ollama` gave up after 10 s, before Ollama could load a
+  model it had unloaded, and called the timeout "unreachable". It now waits 30 s, and a
+  timeout says the embedder did not answer within that time and that a cold model may still be
+  loading; a refused connection still says "unreachable".
+- A `code-review --ollama` failure that `magi-rs` classifies with `review.error=` (a batch too
+  large, nothing to review, a path it cannot review) no longer carries the API-key hint, and
+  carries the list of withheld environment variables only for the `git` and `io` classes. A
+  failure without that class keeps both hints.
+- `--help` now says that `--no-enrich` has no effect with `code-review --ollama`.
+
 ## [8.0.1] - 2026-11-21
 
 ### Fixed
