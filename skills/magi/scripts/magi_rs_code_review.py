@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -66,6 +67,16 @@ pin may reword it (PM-MS2-3): a test pins this constant, a smoke the wording."""
 HISTORY_WARNING_MARKER = "warning: the review history was not updated"
 """Prefix of the stderr warning magi-rs prints when it could not record the
 review history (src/tools/code_review.rs:1500, followed by ``: <cause>``)."""
+
+REVIEW_ERROR_PATTERN = re.compile(r"review\.error=([a-z_]+)")
+"""The field magi-rs's review error line carries (src/main.rs ``emit_review_error``): the
+error's class, from ``review_error_cause_name``. Every class is a ``ReviewError`` variant --
+none is an authentication, network or TLS failure, which never reach this line."""
+
+ENVIRONMENT_REVIEW_ERRORS = frozenset({"git", "io"})
+"""Review error classes the child's environment can cause (a ``git`` without ``HOME`` or
+``PATH``, a missing temp directory): they keep the allowlist hint. Every other class is about
+the input or its size and carries no hint."""
 
 _SUBCOMMAND = "code-review"
 _TRIO_NODE = "magi-rs code-review · 3 mages"
@@ -331,6 +342,11 @@ class MagiRsCodeReview(TrioExecutor):
     def _failure_message(self, returncode: int | None, stderr: bytes) -> str:
         """Render a non-zero exit as one line; a ``--timeout`` rejection names the flag.
 
+        The vault and allowlist hints follow the cause: a line with no ``review.error=``
+        class carries both (REQ-13d: an authentication failure looks like any other
+        failure); a review error drops the vault hint, and keeps the allowlist hint only
+        when its class is one the environment can cause.
+
         Args:
             returncode: The child's exit code.
             stderr: Its redacted stderr.
@@ -341,7 +357,13 @@ class MagiRsCodeReview(TrioExecutor):
         tail = stderr_tail(stderr)
         if TIMEOUT_REJECTION_MARKER in tail:
             return _TIMEOUT_REJECTED_MESSAGE.format(timeout=self._timeout, stderr=tail)
-        return f"magi-rs exited {returncode}; stderr: {tail!r}. {VAULT_HINT} {allowlist_hint()}"
+        prefix = f"magi-rs exited {returncode}; stderr: {tail!r}."
+        found = REVIEW_ERROR_PATTERN.search(tail)
+        if found is None:
+            return f"{prefix} {VAULT_HINT} {allowlist_hint()}"
+        if found.group(1) in ENVIRONMENT_REVIEW_ERRORS:
+            return f"{prefix} {allowlist_hint()}"
+        return prefix
 
     def _require_complete_envelope(self, text: str) -> None:
         """Refuse the output of a killed child unless it is one whole JSON document.
