@@ -19,13 +19,13 @@ _SHIPPED_PIN = os.path.join(
 
 
 def test_the_shipped_pin_file_loads_and_names_the_pinned_version():
-    assert Pin.load(_SHIPPED_PIN).version == "0.25.0"
+    assert Pin.load(_SHIPPED_PIN).version == "0.26.0"
 
 
-def test_the_shipped_pin_targets_magi_rs_0_25_0_on_the_four_platforms():
-    # v7.1.0: the pin moved from 0.24.1; linux-x86_64-compat stays out on purpose.
+def test_the_shipped_pin_targets_magi_rs_0_26_0_on_the_four_platforms():
+    # v8.0.2: the pin moved from 0.25.0; linux-x86_64-compat stays out on purpose.
     pin = Pin.load(_SHIPPED_PIN)
-    assert pin.version == "0.25.0"
+    assert pin.version == "0.26.0"
     assert sorted(pin.assets) == [
         "linux-aarch64",
         "linux-x86_64",
@@ -33,7 +33,7 @@ def test_the_shipped_pin_targets_magi_rs_0_25_0_on_the_four_platforms():
         "windows-x86_64",
     ]
     for asset in pin.assets.values():
-        assert asset.name.startswith("magi-rs-v0.25.0-")
+        assert asset.name.startswith("magi-rs-v0.26.0-")
 
 
 @pytest.mark.parametrize("field", ["archive_sha256", "executable_sha256"])
